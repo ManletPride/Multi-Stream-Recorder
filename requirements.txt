@@ -1,0 +1,20 @@
+# Multi-Stream Recorder — Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# ── Required ──────────────────────────────────────
+yt-dlp>=2024.01.01        # Stream detection & recording (Kick, YouTube, custom URLs)
+
+# ── Recommended ───────────────────────────────────
+streamlink>=6.0.0         # Twitch recording (not needed if only using Kick/YouTube)
+psutil>=5.9.0             # Clean process shutdown & orphan cleanup
+
+# ── Optional (GUI enhancements) ──────────────────
+pystray>=0.19.0           # System tray icon (minimize to tray)
+Pillow>=9.0.0             # Required by pystray for tray icon rendering
+plyer>=2.1.0              # Desktop notifications (stream started/stopped)
+
+# ── External tools (not pip-installable) ──────────
+# ffmpeg — required for remuxing .ts → .mp4
+#   Download: https://www.gyan.dev/ffmpeg/builds/ (Windows)
+#   Or: sudo apt install ffmpeg (Linux) / brew install ffmpeg (macOS)
+#   Must be available in PATH

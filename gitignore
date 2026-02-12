@@ -1,0 +1,34 @@
+# Recordings and data
+Recorded/
+Processed/
+PendingDeletion/
+
+# User configuration (contains paths, preferences)
+config.ini
+window_state.json
+channels.json
+
+# Cookies (sensitive — never commit!)
+cookies.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.spec
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
