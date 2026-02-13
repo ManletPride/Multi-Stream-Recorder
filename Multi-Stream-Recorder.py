@@ -32,10 +32,10 @@ Author: ManletPride
 Built with assistance from Claude (Anthropic) and Grok (xAI).
 
 License: MIT
-Repository: https://github.com/ManletPride/Multi-Stream-Recorder
+Repository: https://github.com/YOUR_USERNAME/Multi-Stream-Recorder
 """
 
-__version__ = "1.0"
+__version__ = "1.1"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -426,8 +426,9 @@ def check_disk_space(path, min_gb=5.0):
 
 
 # ── GitHub repository for version checks ──
-GITHUB_OWNER = "ManletPride"   # ← The author's GitHub username
-GITHUB_REPO = "Multi-Stream-Recorder"   # ← The repo name
+# Update these before publishing to GitHub
+GITHUB_OWNER = "YOUR_USERNAME"   # ← Replace with your GitHub username
+GITHUB_REPO = "Multi-Stream-Recorder"   # ← Replace with your repo name
 
 
 def check_for_updates(current_version, callback=None):
@@ -2154,9 +2155,80 @@ class StreamRecorder:
 #          Notifications
 # ────────────────────────────────────────────────
 
-def send_notification(title, message, timeout=5):
-    """Send a desktop toast notification (non-blocking)."""
+class NotificationThrottle:
+    """Rate-limits desktop notifications to prevent spam.
+
+    Rules:
+        - Global cooldown: minimum 30 seconds between any two notifications
+        - Per-channel error dedup: same channel+error only notifies once
+        - Burst limit: after 5 notifications in 2 minutes, suppresses until quiet
+    """
+
+    def __init__(self, cooldown=30, burst_limit=5, burst_window=120):
+        self._cooldown = cooldown
+        self._burst_limit = burst_limit
+        self._burst_window = burst_window
+        self._last_sent = 0
+        self._recent_times = []        # timestamps of recent notifications
+        self._sent_errors = set()       # (channel, error_snippet) dedup keys
+        self._suppressed_count = 0
+
+    def should_send(self, category="info", channel="", detail=""):
+        """Check if a notification should be sent.  Returns True if allowed."""
+        now = time.time()
+
+        # Global cooldown
+        if now - self._last_sent < self._cooldown:
+            self._suppressed_count += 1
+            return False
+
+        # Burst detection: too many recent notifications
+        self._recent_times = [t for t in self._recent_times if now - t < self._burst_window]
+        if len(self._recent_times) >= self._burst_limit:
+            self._suppressed_count += 1
+            return False
+
+        # Error dedup: don't re-notify same channel+error
+        if category == "error" and channel:
+            key = (channel, detail[:50] if detail else "")
+            if key in self._sent_errors:
+                return False
+            self._sent_errors.add(key)
+
+        self._last_sent = now
+        self._recent_times.append(now)
+        return True
+
+    def reset(self):
+        """Reset all state (call when starting/stopping recording)."""
+        self._last_sent = 0
+        self._recent_times.clear()
+        self._sent_errors.clear()
+        self._suppressed_count = 0
+
+    @property
+    def suppressed_count(self):
+        return self._suppressed_count
+
+
+# Global throttle instance
+_notif_throttle = NotificationThrottle()
+
+
+def send_notification(title, message, timeout=5, category="info", channel="", detail=""):
+    """Send a desktop toast notification with rate limiting.
+
+    Args:
+        title: Notification title
+        message: Notification body
+        timeout: Display duration in seconds
+        category: One of 'info', 'error', 'recording', 'complete' — used for throttling
+        channel: Channel name for per-channel dedup
+        detail: Error detail string for dedup
+    """
     if not HAS_NOTIFICATIONS:
+        return
+    if not _notif_throttle.should_send(category, channel, detail):
         return
     try:
         plyer_notification.notify(
@@ -2988,7 +3060,8 @@ def main_gui(config):
                     tag = "recording"
                     if notifications_enabled and ch_name not in _notified_live and "starting" not in st.get("detail", ""):
                         _notified_live.add(ch_name)
-                        send_notification("Stream Recording", f"Now recording: {ch_name}")
+                        send_notification("Stream Recording", f"Now recording: {ch_name}",
+                                          category="recording", channel=ch_name)
                 elif "remuxing" in curr or "pending" in curr:
                     tag = "remuxing"
                 elif "checking" in curr or "initializing" in curr:
@@ -2996,12 +3069,14 @@ def main_gui(config):
                 elif "error" in curr or "failed" in curr:
                     tag = "error"
                     if notifications_enabled:
-                        send_notification("Recording Error", f"{ch_name}: {display}")
+                        send_notification("Recording Error", f"{ch_name}: {display}",
+                                          category="error", channel=ch_name, detail=display)
                 elif "completed" in curr:
                     tag = "completed"
                     _notified_live.discard(ch_name)
                     if notifications_enabled:
-                        send_notification("Recording Complete", f"{ch_name}: {st.get('detail', '')}")
+                        send_notification("Recording Complete", f"{ch_name}: {st.get('detail', '')}",
+                                          category="complete", channel=ch_name)
                 elif "offline" in curr:
                     tag = "offline"
                     _notified_live.discard(ch_name)
@@ -3095,6 +3170,7 @@ def main_gui(config):
         start_button.config(state=tk.DISABLED)
         stop_button.config(state=tk.NORMAL)
         _notified_live.clear()
+        _notif_throttle.reset()
 
         if notifications_enabled:
             send_notification("Recording Started", f"Monitoring {len(enabled)} channel(s)")
@@ -3144,6 +3220,7 @@ def main_gui(config):
         start_button.config(state=tk.NORMAL)
         stop_button.config(state=tk.DISABLED)
         _notified_live.clear()
+        _notif_throttle.reset()
 
         if notifications_enabled:
             send_notification("Recording Stopped", "All recordings have been stopped.")
