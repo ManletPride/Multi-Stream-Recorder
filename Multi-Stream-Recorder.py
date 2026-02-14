@@ -134,6 +134,14 @@ HAS_STREAMLINK = STREAMLINK_VERSION is not None
 FFMPEG_VERSION = check_ffmpeg()
 HAS_FFMPEG = FFMPEG_VERSION is not None
 
+# Check if curl_cffi is available for browser impersonation (needed for Cloudflare-protected sites)
+HAS_CURL_CFFI = False
+try:
+    import importlib
+    HAS_CURL_CFFI = importlib.util.find_spec("curl_cffi") is not None
+except Exception:
+    pass
+
 
 # ============ CONFIGURATION MANAGEMENT ============
 class Config:
@@ -883,11 +891,14 @@ def setup_child_logging(root_path, channel_key):
 def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
     """Check if a stream is live using yt-dlp (Kick, YouTube, custom URLs).
 
-    Returns (is_live: bool, stream_title: str | None, error: str | None).
+    Returns (is_live: bool, stream_title: str | None, error: str | None,
+             used_impersonation: bool).
+    The fourth value indicates whether browser impersonation was needed,
+    so the recording command can use the same flag.
     """
     if not HAS_YTDLP:
         logger.error("yt-dlp not installed — cannot check Kick/YouTube streams")
-        return False, None, "yt-dlp not installed"
+        return False, None, "yt-dlp not installed", False
 
     check_cmd = ["yt-dlp", "--dump-json", "--playlist-items", "1"]
     if cookies_file:
@@ -911,7 +922,7 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
 
                 if not is_live and data.get("live_status") == "is_upcoming":
                     logger.info("Stream is scheduled but not live yet")
-                    return False, title, "scheduled (not started)"
+                    return False, title, "scheduled (not started)", False
 
                 # For custom URLs: if yt-dlp can extract formats, treat as recordable
                 # even if is_live isn't explicitly set (e.g. direct .m3u8, Rumble, etc.)
@@ -920,42 +931,65 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
                     is_live = True  # treat as recordable
 
                 logger.info(f"yt-dlp found stream: is_live={is_live}, title={title!r}")
-                return is_live, title, None
+                return is_live, title, None, False
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse yt-dlp JSON: {e}")
-                return False, None, "JSON parse error"
+                return False, None, "JSON parse error", False
 
         # Parse common error conditions from stderr
         if check.stderr:
             stderr_lower = check.stderr.lower()
             if "private video" in stderr_lower or "members-only" in stderr_lower:
-                return False, None, "members-only or private"
+                return False, None, "members-only or private", False
             elif "this live event will begin" in stderr_lower:
-                return False, None, "scheduled but not started"
+                return False, None, "scheduled but not started", False
             elif "video unavailable" in stderr_lower or "no video formats" in stderr_lower:
                 logger.warning("Video unavailable — might be offline or /live redirect failed")
-                return False, None, "video unavailable"
+                return False, None, "video unavailable", False
             elif "unable to extract" in stderr_lower:
                 logger.warning("Could not extract stream info — channel might not be live")
-                return False, None, "extraction failed"
+                return False, None, "extraction failed", False
             elif "http error 403" in stderr_lower or "http error 503" in stderr_lower:
+                # Try again with browser impersonation if curl_cffi is available
+                if HAS_CURL_CFFI:
+                    logger.info("HTTP 403/503 — retrying with --impersonate chrome")
+                    impersonate_cmd = ["yt-dlp", "--impersonate", "chrome",
+                                       "--dump-json", "--playlist-items", "1"]
+                    if cookies_file:
+                        impersonate_cmd.extend(["--cookies", cookies_file])
+                    impersonate_cmd.append(url)
+                    try:
+                        retry = subprocess.run(impersonate_cmd, capture_output=True,
+                                               text=True, timeout=timeout)
+                        if retry.returncode == 0 and retry.stdout:
+                            data = json.loads(retry.stdout)
+                            is_live = data.get("is_live", False) or data.get("live_status") == "is_live"
+                            title = data.get("title") or data.get("fulltitle")
+                            if not is_live and data.get("formats"):
+                                is_live = True
+                            logger.info(f"Impersonation succeeded: is_live={is_live}, title={title!r}")
+                            return is_live, title, None, True  # True = impersonation was needed
+                        else:
+                            logger.warning("Impersonation retry also failed")
+                    except Exception as e:
+                        logger.warning(f"Impersonation retry error: {e}")
                 logger.error("HTTP 403/503 — cookies may be expired or invalid")
-                return False, None, "403/503 (cookies expired?)"
+                return False, None, "403/503 (cookies expired?)", False
             elif "sign in" in stderr_lower or "login required" in stderr_lower:
                 logger.error("Login required — cookies may be missing or expired")
-                return False, None, "login required (check cookies)"
+                return False, None, "login required (check cookies)", False
 
-        return False, None, None
+        return False, None, None, False
 
     except subprocess.TimeoutExpired:
         logger.warning("Stream check timed out")
-        return False, None, "timeout"
+        return False, None, "timeout", False
     except FileNotFoundError:
         logger.error("yt-dlp not found in PATH")
-        return False, None, "yt-dlp not found"
+        return False, None, "yt-dlp not found", False
     except Exception as e:
         logger.error(f"Unexpected error checking stream: {e}")
-        return False, None, str(e)
+        return False, None, str(e), False
 
 
 def check_stream_streamlink(url, logger, timeout=30):
@@ -999,7 +1033,8 @@ def check_stream_streamlink(url, logger, timeout=30):
 #          Recording Functions
 # ────────────────────────────────────────────────
 
-def build_recording_command_ytdlp(url, raw_file, config, verbose, streamlink_debug, cookies_file=None):
+def build_recording_command_ytdlp(url, raw_file, config, verbose, streamlink_debug,
+                                  cookies_file=None, impersonate=False):
     """Build yt-dlp command for live stream recording (Kick, YouTube, custom).
 
     For live HLS streams, yt-dlp's default fragment-based downloader buffers
@@ -1007,9 +1042,20 @@ def build_recording_command_ytdlp(url, raw_file, config, verbose, streamlink_deb
     for a live stream.  Instead, we use ffmpeg as an external downloader with
     --hls-use-mpegts, which writes a continuous MPEG-TS stream directly to the
     output file in real-time.
+
+    Args:
+        impersonate: If True, adds --impersonate chrome for Cloudflare-protected
+                     sites (requires curl_cffi).
     """
     cmd = [
         "yt-dlp",
+    ]
+
+    # Browser impersonation for Cloudflare-protected sites (e.g. Rumble)
+    if impersonate and HAS_CURL_CFFI:
+        cmd.extend(["--impersonate", "chrome"])
+
+    cmd.extend([
         url,
         "-f", "b",                     # "b" = best single format (suppresses yt-dlp warning vs "best")
         "-o", raw_file,
@@ -1026,7 +1072,7 @@ def build_recording_command_ytdlp(url, raw_file, config, verbose, streamlink_deb
         # after the output file, causing "Error parsing options for output file"
         # and ffmpeg exit code 4294967274 (-22 / EINVAL).  Live HLS streams
         # are inherently rate-limited by the server, so -re isn't needed.
-    ]
+    ])
 
     if cookies_file:
         cmd.extend(["--cookies", cookies_file])
@@ -1465,8 +1511,9 @@ def record_worker(args):
                 last_status = new_status.copy()
 
             # Check if stream is live
+            need_impersonate = False
             if platform in ["kick", "youtube", "custom"]:
-                is_live, stream_title, error = check_stream_ytdlp(url, logger, stream_check_timeout, cookies_file)
+                is_live, stream_title, error, need_impersonate = check_stream_ytdlp(url, logger, stream_check_timeout, cookies_file)
             else:
                 is_live, stream_title, error = check_stream_streamlink(url, logger, stream_check_timeout)
 
@@ -1541,7 +1588,9 @@ def record_worker(args):
 
             # Build recording command
             if platform in ["kick", "youtube", "custom"]:
-                record_cmd = build_recording_command_ytdlp(url, raw_file, config, verbose, streamlink_debug, cookies_file)
+                record_cmd = build_recording_command_ytdlp(url, raw_file, config, verbose,
+                                                           streamlink_debug, cookies_file,
+                                                           impersonate=need_impersonate)
             else:
                 record_cmd = build_recording_command_streamlink(url, raw_file, quality, platform, config, verbose, streamlink_debug)
 
@@ -2839,6 +2888,7 @@ def main_gui(config):
         deps.append(f"ffmpeg {FFMPEG_VERSION}" if HAS_FFMPEG else "ffmpeg: not found")
         deps.append(f"psutil: {'yes' if HAS_PSUTIL else 'no'}")
         deps.append(f"pystray: {'yes' if HAS_TRAY else 'no'}")
+        deps.append(f"curl_cffi: {'yes' if HAS_CURL_CFFI else 'no'} (browser impersonation)")
         deps_str = "\n".join(deps)
 
         messagebox.showinfo(
@@ -3446,6 +3496,7 @@ examples:
     logging.info(f"streamlink available: {HAS_STREAMLINK} (version: {STREAMLINK_VERSION})")
     logging.info(f"ffmpeg available: {HAS_FFMPEG} (version: {FFMPEG_VERSION})")
     logging.info(f"psutil available: {HAS_PSUTIL}")
+    logging.info(f"curl_cffi available: {HAS_CURL_CFFI} (browser impersonation)")
     logging.info(f"System tray available: {HAS_TRAY}")
     logging.info(f"Notifications available: {HAS_NOTIFICATIONS}")
     logging.info(f"Streams directory: {config.get('Paths', 'streams_dir')}")
