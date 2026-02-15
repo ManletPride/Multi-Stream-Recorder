@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/YOUR_USERNAME/Multi-Stream-Recorder
 """
 
-__version__ = "1.1"
+__version__ = "1.2"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -2015,6 +2015,7 @@ class StreamRecorder:
         self.processes = []
         self.should_stop = mp.Event()
         self.is_running = False
+        self.stopped_channels = set()  # channels individually stopped by user
         self.cleaner = BackgroundCleaner(config)
 
     def update_status_from_queue(self):
@@ -2025,6 +2026,104 @@ class StreamRecorder:
                     self.status_dict[ch] = new_status
             except Exception:
                 break
+
+    def stop_channel(self, channel_name):
+        """Stop a single channel's worker process and trigger cleanup for its files.
+
+        The channel is marked as individually stopped so refresh_status can show
+        'Stopped' instead of 'Offline', and so the master Stop doesn't double-kill it.
+        """
+        if not self.is_running:
+            return
+
+        # Find and kill the process for this channel
+        target_proc = None
+        for ch, proc in self.processes:
+            if ch == channel_name and proc.is_alive():
+                target_proc = proc
+                break
+
+        if target_proc is None:
+            logging.info(f"Channel {channel_name} is not actively running")
+            self.status_dict[channel_name] = {
+                "status": "Stopped", "detail": "by user", "size": "", "time": "", "progress": 0
+            }
+            return
+
+        # Collect recording info before killing
+        st = self.status_dict.get(channel_name, {})
+        size_str = st.get("size", "")
+        time_str = st.get("time", "")
+
+        logging.info(f"Stopping channel {channel_name} (PID {target_proc.pid})")
+        kill_process_tree(target_proc.pid)
+        target_proc.join(timeout=10)
+        if target_proc.is_alive():
+            target_proc.kill()
+            target_proc.join(timeout=5)
+
+        # Log summary for this channel
+        if size_str and time_str:
+            logging.info(f"Channel stopped — {channel_name}: {size_str}, {time_str}")
+        else:
+            logging.info(f"Channel stopped — {channel_name}: no active recording")
+
+        # Update status to Stopped and mark as intentionally stopped
+        self.stopped_channels.add(channel_name)
+        self.status_dict[channel_name] = {
+            "status": "Stopped", "detail": "by user", "size": "", "time": "", "progress": 0
+        }
+
+        # Run cleanup for this channel's files in background
+        # Use a short delay so file handles are released
+        def _channel_cleanup():
+            time.sleep(5)  # wait for file handles
+            self.cleaner._process_leftover_files()
+            logging.info(f"Cleanup finished for {channel_name}")
+
+        threading.Thread(target=_channel_cleanup, daemon=True,
+                         name=f"cleanup-{channel_name}").start()
+
+    def start_channel(self, channel_name):
+        """Start (or restart) a single channel's worker while other channels continue.
+
+        Can be used to restart a channel that was individually stopped, or to add
+        a new channel mid-session.
+        """
+        if not self.is_running:
+            logging.warning("Cannot start channel — no active recording session")
+            return
+
+        # Check if this channel is already running
+        for ch, proc in self.processes:
+            if ch == channel_name and proc.is_alive():
+                logging.info(f"Channel {channel_name} is already running (PID {proc.pid})")
+                return
+
+        logging.info(f"Starting channel {channel_name} mid-session")
+
+        # Clear the individually-stopped flag
+        self.stopped_channels.discard(channel_name)
+
+        # Build config dict the same way run() does
+        config_dict = {section: dict(self.config.config.items(section))
+                       for section in self.config.config.sections()}
+        cookies_file = find_cookies_file(self.config)
+        if cookies_file:
+            config_dict.setdefault('Paths', {})['cookies_file'] = cookies_file
+
+        # Initialize status
+        self.status_dict[channel_name] = {
+            "status": "Initializing", "detail": "", "size": "", "time": "", "progress": 0
+        }
+
+        # Spawn worker
+        worker_args = (channel_name, config_dict, self.should_stop, self.status_queue)
+        proc = mp.Process(target=record_worker, args=(worker_args,))
+        proc.daemon = True
+        proc.start()
+        self.processes.append((channel_name, proc))
+        logging.info(f"Started process for {channel_name} (PID {proc.pid})")
 
     def stop(self):
         if not self.is_running:
@@ -2104,6 +2203,10 @@ class StreamRecorder:
 
             for i, (ch, proc) in enumerate(self.processes):
                 if not proc.is_alive() and not self.should_stop.is_set():
+                    # Skip channels that were individually stopped by the user
+                    if ch in self.stopped_channels:
+                        continue
+
                     exit_code = proc.exitcode
                     if exit_code != 0:
                         logging.warning(f"Process for {ch} crashed (exit code {exit_code}) — restarting...")
@@ -2933,6 +3036,90 @@ def main_gui(config):
     tree.column("Platform", width=80, anchor="center")
     tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
+    # ── Status tree right-click context menu ──
+    status_ctx_menu = tk.Menu(root, tearoff=0)
+
+    def _get_selected_status_channel():
+        """Get the internal channel name from the selected status tree row."""
+        selected = tree.selection()
+        if not selected:
+            return None
+        values = tree.item(selected[0], "values")
+        if not values:
+            return None
+        display_name = values[0]  # The display name shown in the Channel column
+        # Map display name back to the internal channel name
+        if recorder:
+            for ch_name in recorder.status_dict:
+                if _get_display_name(ch_name) == display_name:
+                    return ch_name
+        return None
+
+    def _stop_selected_channel():
+        ch_name = _get_selected_status_channel()
+        if not ch_name or not recorder or not recorder.is_running:
+            return
+        st = recorder.status_dict.get(ch_name, {})
+        if st.get("status", "").lower() in ("stopped",):
+            return  # already stopped
+        recorder.stop_channel(ch_name)
+
+    def _start_selected_channel():
+        ch_name = _get_selected_status_channel()
+        if not ch_name or not recorder or not recorder.is_running:
+            return
+        st = recorder.status_dict.get(ch_name, {})
+        if st.get("status", "").lower() not in ("stopped",):
+            return  # only restart channels that were individually stopped
+        recorder.start_channel(ch_name)
+
+    def _open_status_channel_url():
+        ch_name = _get_selected_status_channel()
+        if not ch_name:
+            return
+        if ch_name.startswith("custom:"):
+            url = ch_name.split(":", 1)[1]
+        elif ch_name.startswith("twitch:"):
+            url = f"https://twitch.tv/{ch_name.split(':', 1)[1]}"
+        elif ch_name.startswith("youtube:"):
+            name = ch_name.split(':', 1)[1]
+            url = f"https://youtube.com/@{name}/live" if not name.startswith("UC") else f"https://youtube.com/channel/{name}/live"
+        else:
+            url = f"https://kick.com/{ch_name}"
+        import webbrowser
+        webbrowser.open(url)
+
+    def _show_status_context_menu(event):
+        """Show context menu on status tree with options appropriate to channel state."""
+        item = tree.identify_row(event.y)
+        if not item:
+            return
+        tree.selection_set(item)
+
+        # Rebuild menu based on channel state
+        status_ctx_menu.delete(0, tk.END)
+
+        ch_name = _get_selected_status_channel()
+        if ch_name and recorder and recorder.is_running:
+            st = recorder.status_dict.get(ch_name, {})
+            status_lower = st.get("status", "").lower()
+
+            if status_lower == "stopped":
+                status_ctx_menu.add_command(label="Restart Channel", command=_start_selected_channel)
+            else:
+                status_ctx_menu.add_command(label="Stop Channel", command=_stop_selected_channel)
+
+            status_ctx_menu.add_separator()
+
+        status_ctx_menu.add_command(label="Open in Browser", command=_open_status_channel_url)
+
+        try:
+            status_ctx_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            status_ctx_menu.grab_release()
+
+    tree.bind("<Button-3>", _show_status_context_menu)
+
     # ── Tab 2: Logs ──
     log_tab = ttk.Frame(notebook)
     notebook.add(log_tab, text="  Logs  ")
@@ -3092,11 +3279,19 @@ def main_gui(config):
         if recorder and recorder.is_running:
             recorder.update_status_from_queue()
 
+            # Preserve the currently selected channel name so selection survives refresh
+            selected_display_name = None
+            sel = tree.selection()
+            if sel:
+                vals = tree.item(sel[0], "values")
+                if vals:
+                    selected_display_name = vals[0]
+
             for item in tree.get_children():
                 tree.delete(item)
 
-            enabled_names = get_enabled_channels()
-            for ch_name in enabled_names:
+            # Show all channels tracked by the recorder (includes individually stopped ones)
+            for ch_name in recorder.status_dict:
                 st = recorder.status_dict.get(ch_name, {"status": "Unknown", "detail": "", "size": "", "time": ""})
                 curr = st["status"].lower()
 
@@ -3130,16 +3325,23 @@ def main_gui(config):
                 elif "offline" in curr:
                     tag = "offline"
                     _notified_live.discard(ch_name)
+                elif "stopped" in curr:
+                    tag = "stopped"
+                    _notified_live.discard(ch_name)
                 else:
                     tag = "unknown"
 
                 display_name = _get_display_name(ch_name)
 
-                tree.insert("", tk.END, values=(display_name, display, st["size"], st["time"], platform_label), tags=(tag,))
+                item_id = tree.insert("", tk.END, values=(display_name, display, st["size"], st["time"], platform_label), tags=(tag,))
+
+                # Restore selection if this was the previously selected channel
+                if display_name == selected_display_name:
+                    tree.selection_set(item_id)
 
             # Update tray icon tooltip if tray exists
             if tray_icon is not None:
-                active = sum(1 for ch_name in enabled_names
+                active = sum(1 for ch_name in recorder.status_dict
                              if recorder.status_dict.get(ch_name, {}).get("status", "").lower().startswith("recording"))
                 tray_icon.title = f"Multi-Stream Recorder — {active} recording" if active else "Multi-Stream Recorder — idle"
 
@@ -3230,13 +3432,11 @@ def main_gui(config):
         if not recorder or not recorder.is_running:
             return
 
-        # Collect recording summary before stopping
+        # Collect recording summary before stopping (include all tracked channels)
         summary_parts = []
         active_count = 0
-        total_size_str = ""
         try:
-            for ch_name in get_enabled_channels():
-                st = recorder.status_dict.get(ch_name, {})
+            for ch_name, st in recorder.status_dict.items():
                 if st.get("status", "").lower().startswith("recording"):
                     active_count += 1
                     size_str = st.get("size", "")
@@ -3260,7 +3460,7 @@ def main_gui(config):
         # Update the GUI to show "Stopped" for all channels
         for item in tree.get_children():
             tree.delete(item)
-        for ch_name in get_enabled_channels():
+        for ch_name in recorder.status_dict:
             display_name = _get_display_name(ch_name)
             platform_label = _get_platform_label(ch_name)
             tree.insert("", tk.END, values=(display_name, "Stopped", "", "", platform_label), tags=("stopped",))
