@@ -32,7 +32,7 @@ Author: ManletPride
 Built with assistance from Claude (Anthropic) and Grok (xAI).
 
 License: MIT
-Repository: https://github.com/YOUR_USERNAME/Multi-Stream-Recorder
+Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
 __version__ = "1.2"
@@ -435,8 +435,8 @@ def check_disk_space(path, min_gb=5.0):
 
 # ── GitHub repository for version checks ──
 # Update these before publishing to GitHub
-GITHUB_OWNER = "YOUR_USERNAME"   # ← Replace with your GitHub username
-GITHUB_REPO = "Multi-Stream-Recorder"   # ← Replace with your repo name
+GITHUB_OWNER = "ManletPride"   # The author's GitHub username
+GITHUB_REPO = "Multi-Stream-Recorder"   # ← The GitHub repo name
 
 
 def check_for_updates(current_version, callback=None):
