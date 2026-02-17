@@ -235,6 +235,7 @@ The GUI includes a **Polling** dropdown to switch between Relaxed (5 min), Norma
 | psutil | Recommended | Clean process management |
 | pystray + Pillow | Optional | System tray icon |
 | plyer | Optional | Desktop notifications |
+| curl_cffi | Recommended | Browser impersonation for Cloudflare-protected site
 
 ## Author
 
