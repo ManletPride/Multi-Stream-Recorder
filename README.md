@@ -1,12 +1,12 @@
 # Multi-Stream Recorder
 
-A desktop application for simultaneously recording live streams from **Kick**, **Twitch**, **YouTube**, and any site supported by yt-dlp. Set it up, press record, and walk away — it monitors channels, auto-records when they go live, and produces clean MP4 files.
+A desktop application for simultaneously recording live streams from **Kick**, **Twitch**, **YouTube**, **Rumble**, and any site supported by yt-dlp. Set it up, press record, and walk away — it monitors channels, auto-records when they go live, and produces clean MP4 files.
 
 ![Dark Mode Screenshot](screenshots/dark-mode.png)
 
 ## Features
 
-- **Multi-platform** — Record from Kick, Twitch, YouTube Live, and 1,800+ sites via custom URLs
+- **Multi-platform** — Record from Kick, Twitch, YouTube Live, Rumble, and 1,800+ sites via custom URLs
 - **Concurrent recording** — Monitor and record multiple streams simultaneously
 - **Automatic detection** — Polls channels and starts recording the moment a stream goes live
 - **Smart polling** — Configurable check intervals with jitter to avoid rate limiting; exponential backoff on errors only
