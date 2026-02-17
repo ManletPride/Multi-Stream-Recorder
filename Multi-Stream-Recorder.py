@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
-__version__ = "1.2"
+__version__ = "1.3"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -435,7 +435,7 @@ def check_disk_space(path, min_gb=5.0):
 
 # ── GitHub repository for version checks ──
 # Update these before publishing to GitHub
-GITHUB_OWNER = "ManletPride"   # The author's GitHub username
+GITHUB_OWNER = "ManletPride"   # ← The author's GitHub username
 GITHUB_REPO = "Multi-Stream-Recorder"   # ← The GitHub repo name
 
 
@@ -892,13 +892,15 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
     """Check if a stream is live using yt-dlp (Kick, YouTube, custom URLs).
 
     Returns (is_live: bool, stream_title: str | None, error: str | None,
-             used_impersonation: bool).
+             used_impersonation: bool, resolved_url: str | None).
     The fourth value indicates whether browser impersonation was needed,
     so the recording command can use the same flag.
+    The fifth value is the resolved video URL if yt-dlp found a different
+    URL than the one provided (e.g. Rumble channel page -> video URL).
     """
     if not HAS_YTDLP:
         logger.error("yt-dlp not installed — cannot check Kick/YouTube streams")
-        return False, None, "yt-dlp not installed", False
+        return False, None, "yt-dlp not installed", False, None
 
     check_cmd = ["yt-dlp", "--dump-json", "--playlist-items", "1"]
     if cookies_file:
@@ -922,33 +924,46 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
 
                 if not is_live and data.get("live_status") == "is_upcoming":
                     logger.info("Stream is scheduled but not live yet")
-                    return False, title, "scheduled (not started)", False
+                    return False, title, "scheduled (not started)", False, None
+
+                # Check if yt-dlp resolved to a different URL (e.g. channel page -> video)
+                resolved = data.get("webpage_url") or data.get("url")
+                resolved_url = None
+                if resolved and resolved != url:
+                    logger.info(f"Resolved URL: {resolved}")
+                    resolved_url = resolved
 
                 # For custom URLs: if yt-dlp can extract formats, treat as recordable
-                # even if is_live isn't explicitly set (e.g. direct .m3u8, Rumble, etc.)
-                if not is_live and data.get("formats"):
+                # even if is_live isn't explicitly set (e.g. direct .m3u8 links).
+                # BUT: if the URL resolved to a different page (channel -> video),
+                # trust yt-dlp's is_live flag — a resolved VOD should NOT be treated
+                # as live just because it has formats.
+                if not is_live and data.get("formats") and not resolved_url:
                     logger.info(f"yt-dlp found extractable stream (not explicitly live): title={title!r}")
                     is_live = True  # treat as recordable
+                elif not is_live and resolved_url:
+                    live_status = data.get("live_status", "unknown")
+                    logger.info(f"Resolved video is not live (live_status={live_status!r}) — treating as offline")
 
                 logger.info(f"yt-dlp found stream: is_live={is_live}, title={title!r}")
-                return is_live, title, None, False
+                return is_live, title, None, False, resolved_url
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse yt-dlp JSON: {e}")
-                return False, None, "JSON parse error", False
+                return False, None, "JSON parse error", False, None
 
         # Parse common error conditions from stderr
         if check.stderr:
             stderr_lower = check.stderr.lower()
             if "private video" in stderr_lower or "members-only" in stderr_lower:
-                return False, None, "members-only or private", False
+                return False, None, "members-only or private", False, None
             elif "this live event will begin" in stderr_lower:
-                return False, None, "scheduled but not started", False
+                return False, None, "scheduled but not started", False, None
             elif "video unavailable" in stderr_lower or "no video formats" in stderr_lower:
                 logger.warning("Video unavailable — might be offline or /live redirect failed")
-                return False, None, "video unavailable", False
+                return False, None, "video unavailable", False, None
             elif "unable to extract" in stderr_lower:
                 logger.warning("Could not extract stream info — channel might not be live")
-                return False, None, "extraction failed", False
+                return False, None, "extraction failed", False, None
             elif "http error 403" in stderr_lower or "http error 503" in stderr_lower:
                 # Try again with browser impersonation if curl_cffi is available
                 if HAS_CURL_CFFI:
@@ -967,29 +982,40 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
                             title = data.get("title") or data.get("fulltitle")
                             if not is_live and data.get("formats"):
                                 is_live = True
+                            # Check resolved URL for impersonation path too
+                            resolved = data.get("webpage_url") or data.get("url")
+                            resolved_url = None
+                            if resolved and resolved != url:
+                                logger.info(f"Resolved URL: {resolved}")
+                                resolved_url = resolved
+                            # Don't treat resolved VODs as live
+                            if is_live and not (data.get("is_live", False) or data.get("live_status") == "is_live") and resolved_url:
+                                live_status = data.get("live_status", "unknown")
+                                logger.info(f"Resolved video is not live (live_status={live_status!r}) — treating as offline")
+                                is_live = False
                             logger.info(f"Impersonation succeeded: is_live={is_live}, title={title!r}")
-                            return is_live, title, None, True  # True = impersonation was needed
+                            return is_live, title, None, True, resolved_url
                         else:
                             logger.warning("Impersonation retry also failed")
                     except Exception as e:
                         logger.warning(f"Impersonation retry error: {e}")
                 logger.error("HTTP 403/503 — cookies may be expired or invalid")
-                return False, None, "403/503 (cookies expired?)", False
+                return False, None, "403/503 (cookies expired?)", False, None
             elif "sign in" in stderr_lower or "login required" in stderr_lower:
                 logger.error("Login required — cookies may be missing or expired")
-                return False, None, "login required (check cookies)", False
+                return False, None, "login required (check cookies)", False, None
 
-        return False, None, None, False
+        return False, None, None, False, None
 
     except subprocess.TimeoutExpired:
         logger.warning("Stream check timed out")
-        return False, None, "timeout", False
+        return False, None, "timeout", False, None
     except FileNotFoundError:
         logger.error("yt-dlp not found in PATH")
-        return False, None, "yt-dlp not found", False
+        return False, None, "yt-dlp not found", False, None
     except Exception as e:
         logger.error(f"Unexpected error checking stream: {e}")
-        return False, None, str(e), False
+        return False, None, str(e), False, None
 
 
 def check_stream_streamlink(url, logger, timeout=30):
@@ -1512,8 +1538,14 @@ def record_worker(args):
 
             # Check if stream is live
             need_impersonate = False
+            recording_url = url  # may be overridden by resolved URL
             if platform in ["kick", "youtube", "custom"]:
-                is_live, stream_title, error, need_impersonate = check_stream_ytdlp(url, logger, stream_check_timeout, cookies_file)
+                is_live, stream_title, error, need_impersonate, resolved_url = check_stream_ytdlp(url, logger, stream_check_timeout, cookies_file)
+                # If yt-dlp resolved to a different URL (e.g. Rumble channel -> video),
+                # use the resolved URL for recording so yt-dlp can actually download it
+                if resolved_url:
+                    recording_url = resolved_url
+                    logger.info(f"Using resolved URL for recording: {recording_url}")
             else:
                 is_live, stream_title, error = check_stream_streamlink(url, logger, stream_check_timeout)
 
@@ -1588,7 +1620,7 @@ def record_worker(args):
 
             # Build recording command
             if platform in ["kick", "youtube", "custom"]:
-                record_cmd = build_recording_command_ytdlp(url, raw_file, config, verbose,
+                record_cmd = build_recording_command_ytdlp(recording_url, raw_file, config, verbose,
                                                            streamlink_debug, cookies_file,
                                                            impersonate=need_impersonate)
             else:
@@ -2646,7 +2678,7 @@ def main_gui(config):
         tree.tag_configure("unknown", foreground=t['offline_fg'])
 
         # Tk widgets (non-ttk) — set all frame backgrounds
-        for w in [frame_left, platform_frame, btn_small_frame, frame_right,
+        for w in [frame_left, platform_frame, btn_small_frame, move_btn_frame, frame_right,
                   bottom_bar, btn_frame, toggle_frame]:
             w.configure(bg=t['bg'])
         ch_tree.tag_configure("enabled", foreground=t['fg'])
@@ -2661,7 +2693,8 @@ def main_gui(config):
         cookie_label.configure(bg=t['bg'], fg=t['fg'])
         cookie_indicator.configure(bg=t['bg'])
 
-        for btn, bg_key in [(add_btn, 'btn_bg'), (remove_btn, 'btn_bg')]:
+        for btn, bg_key in [(add_btn, 'btn_bg'), (remove_btn, 'btn_bg'),
+                            (up_btn, 'btn_bg'), (down_btn, 'btn_bg')]:
             btn.configure(bg=t[bg_key], fg=t['btn_fg'], activebackground=t['accent'],
                           activeforeground='#ffffff',
                           highlightbackground=border_color, relief='flat', bd=1)
@@ -2680,10 +2713,13 @@ def main_gui(config):
         status_bar.configure(bg=t['bg'], fg=t['offline_fg'])
         update_label.configure(bg=t['bg'])
 
-        # Context menu theming
+        # Context menu theming — borderwidth=0 removes the bright system border
         ctx_menu.configure(bg=t['entry_bg'], fg=t['fg'],
                           activebackground=t['accent'], activeforeground='#ffffff',
-                          borderwidth=1, relief='flat')
+                          borderwidth=0, activeborderwidth=0, relief='flat')
+        status_ctx_menu.configure(bg=t['entry_bg'], fg=t['fg'],
+                                  activebackground=t['accent'], activeforeground='#ffffff',
+                                  borderwidth=0, activeborderwidth=0, relief='flat')
 
         # Save dark_mode preference
         try:
@@ -2840,12 +2876,54 @@ def main_gui(config):
         _populate_channel_tree()
         save_channels()
 
+    def _move_channel_up():
+        """Move selected channel up in the list."""
+        selected = ch_tree.selection()
+        if not selected:
+            return
+        idx = ch_tree.index(selected[0])
+        if idx <= 0 or idx >= len(channels):
+            return
+        channels[idx], channels[idx - 1] = channels[idx - 1], channels[idx]
+        _populate_channel_tree()
+        save_channels()
+        # Re-select the moved item
+        new_item = ch_tree.get_children()[idx - 1]
+        ch_tree.selection_set(new_item)
+        ch_tree.see(new_item)
+
+    def _move_channel_down():
+        """Move selected channel down in the list."""
+        selected = ch_tree.selection()
+        if not selected:
+            return
+        idx = ch_tree.index(selected[0])
+        if idx < 0 or idx >= len(channels) - 1:
+            return
+        channels[idx], channels[idx + 1] = channels[idx + 1], channels[idx]
+        _populate_channel_tree()
+        save_channels()
+        # Re-select the moved item
+        new_item = ch_tree.get_children()[idx + 1]
+        ch_tree.selection_set(new_item)
+        ch_tree.see(new_item)
+
     add_btn = tk.Button(btn_small_frame, text="Add", command=add_channel, width=10,
                         font=("Segoe UI", 9))
     add_btn.pack(side=tk.LEFT, padx=4)
     remove_btn = tk.Button(btn_small_frame, text="Remove", command=remove_selected, width=10,
                            font=("Segoe UI", 9))
     remove_btn.pack(side=tk.LEFT, padx=4)
+
+    # Move Up/Down buttons for channel reordering
+    move_btn_frame = tk.Frame(frame_left)
+    move_btn_frame.pack(pady=2)
+    up_btn = tk.Button(move_btn_frame, text="▲", command=_move_channel_up, width=3,
+                       font=("Segoe UI", 8))
+    up_btn.pack(side=tk.LEFT, padx=2)
+    down_btn = tk.Button(move_btn_frame, text="▼", command=_move_channel_down, width=3,
+                         font=("Segoe UI", 8))
+    down_btn.pack(side=tk.LEFT, padx=2)
 
     # ── Cookie status indicator ──
     cookie_frame = tk.Frame(frame_left)
@@ -2908,12 +2986,68 @@ def main_gui(config):
     # ── Right-click context menu on channel list ──
     ctx_menu = tk.Menu(root, tearoff=0)
 
+    def _start_selected_channel_from_list():
+        """Start recording a channel from the channel list (mid-session)."""
+        selected_items = ch_tree.selection()
+        if not selected_items or not recorder or not recorder.is_running:
+            return
+        for item in selected_items:
+            idx = ch_tree.index(item)
+            if 0 <= idx < len(channels):
+                ch_name = channels[idx]["name"]
+                # Enable the channel if it's not already
+                if not channels[idx].get("enabled", True):
+                    channels[idx]["enabled"] = True
+                    _populate_channel_tree()
+                    save_channels()
+                # Start it in the running session
+                recorder.start_channel(ch_name)
+
+    def _stop_selected_channel_from_list():
+        """Stop recording a channel from the channel list."""
+        selected_items = ch_tree.selection()
+        if not selected_items or not recorder or not recorder.is_running:
+            return
+        for item in selected_items:
+            idx = ch_tree.index(item)
+            if 0 <= idx < len(channels):
+                ch_name = channels[idx]["name"]
+                recorder.stop_channel(ch_name)
+
     def show_context_menu(event):
         # Select the item under cursor if not already selected
         item = ch_tree.identify_row(event.y)
         if item:
             if item not in ch_tree.selection():
                 ch_tree.selection_set(item)
+
+        # Rebuild menu dynamically
+        ctx_menu.delete(0, tk.END)
+
+        # If a recording session is active, show Start/Stop Recording option
+        if recorder and recorder.is_running and ch_tree.selection():
+            idx = ch_tree.index(ch_tree.selection()[0])
+            if 0 <= idx < len(channels):
+                ch_name = channels[idx]["name"]
+                st = recorder.status_dict.get(ch_name, {})
+                status_lower = st.get("status", "").lower()
+                if status_lower in ("stopped",) or ch_name not in recorder.status_dict:
+                    ctx_menu.add_command(label="Start Recording", command=_start_selected_channel_from_list)
+                elif "recording" in status_lower or "checking" in status_lower or "offline" in status_lower or "initializing" in status_lower:
+                    ctx_menu.add_command(label="Stop Recording", command=_stop_selected_channel_from_list)
+                else:
+                    ctx_menu.add_command(label="Start Recording", command=_start_selected_channel_from_list)
+                ctx_menu.add_separator()
+
+        ctx_menu.add_command(label="Open in Browser", command=open_channel_url)
+        ctx_menu.add_command(label="Copy Name", command=copy_channel_name)
+        ctx_menu.add_separator()
+        ctx_menu.add_command(label="Toggle Selected", command=_toggle_selected_channels)
+        ctx_menu.add_command(label="Enable All", command=_enable_all_channels)
+        ctx_menu.add_command(label="Disable All", command=_disable_all_channels)
+        ctx_menu.add_separator()
+        ctx_menu.add_command(label="Remove", command=remove_selected)
+
         try:
             ctx_menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -2968,15 +3102,6 @@ def main_gui(config):
             ch["enabled"] = False
         _populate_channel_tree()
         save_channels()
-
-    ctx_menu.add_command(label="Open in Browser", command=open_channel_url)
-    ctx_menu.add_command(label="Copy Name", command=copy_channel_name)
-    ctx_menu.add_separator()
-    ctx_menu.add_command(label="Toggle Selected", command=_toggle_selected_channels)
-    ctx_menu.add_command(label="Enable All", command=_enable_all_channels)
-    ctx_menu.add_command(label="Disable All", command=_disable_all_channels)
-    ctx_menu.add_separator()
-    ctx_menu.add_command(label="Remove", command=remove_selected)
 
     ch_tree.bind("<Button-3>", show_context_menu)
 
