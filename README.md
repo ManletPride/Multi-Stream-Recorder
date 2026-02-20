@@ -6,18 +6,21 @@ A desktop application for simultaneously recording live streams from **Kick**, *
 
 ## Features
 
-- **Multi-platform** — Record from Kick, Twitch, YouTube Live, Rumble, and 1,800+ sites via custom URLs
-- **Concurrent recording** — Monitor and record multiple streams simultaneously
-- **Automatic detection** — Polls channels and starts recording the moment a stream goes live
-- **Smart polling** — Configurable check intervals with jitter to avoid rate limiting; exponential backoff on errors only
-- **Fast reconnect** — If a stream drops briefly (streamer disconnect), re-detects within 15 seconds
-- **Clean MP4 output** — Automatically remuxes raw .ts recordings to .mp4 with ffmpeg
-- **Dark mode GUI** — Full dark/light theme with system tray support and desktop notifications
-- **Cookie support** — Use browser cookies for authenticated access (subscriber-only streams, age-gated content)
-- **Cookie health indicator** — Visual status showing if your cookies are valid, expiring, or need renewal
-- **Recording metadata** — JSON sidecar files with channel info, stream title, duration, and timestamps
-- **Auto-cleanup** — Configurable retention period for processed files
-- **Robust shutdown** — No orphaned processes, no zombie ffmpeg instances
+* **Multi-platform** — Record from Kick, Twitch, YouTube Live, Rumble, and 1,800+ sites via custom URLs
+* **Concurrent recording** — Monitor and record multiple streams simultaneously
+* **Automatic detection** — Polls channels and starts recording the moment a stream goes live
+* **Smart polling** — Configurable check intervals with jitter to avoid rate limiting; exponential backoff on errors only
+* **Fast reconnect** — If a stream drops briefly (streamer disconnect), re-detects within 15 seconds
+* **Clean MP4 output** — Automatically remuxes raw .ts recordings to .mp4 with ffmpeg
+* **Cloudflare bypass** — Kick streams use streamlink's built-in JS challenge solver; Rumble uses browser impersonation fallback
+* **Dark mode GUI** — Full dark/light theme with system tray support and desktop notifications
+* **Cookie support** — Use browser cookies for authenticated access (subscriber-only streams, age-gated content)
+* **Cookie health indicator** — Visual status showing if your cookies are valid, expiring, or need renewal
+* **Per-channel control** — Start or stop individual channels mid-session via right-click context menu
+* **Channel reorder** — Rearrange your channel list with ▲/▼ buttons
+* **Recording metadata** — JSON sidecar files with channel info, stream title, duration, and timestamps
+* **Auto-cleanup** — Configurable retention period for processed files
+* **Robust shutdown** — No orphaned processes, no zombie ffmpeg instances
 
 ## Quick Start
 
@@ -26,6 +29,7 @@ A desktop application for simultaneously recording live streams from **Kick**, *
 **Python 3.10+** is required. Then install the external tools:
 
 **ffmpeg** (required):
+
 ```
 # Windows — download from https://www.gyan.dev/ffmpeg/builds/
 # Add the bin/ folder to your system PATH
@@ -37,12 +41,14 @@ sudo apt install ffmpeg
 brew install ffmpeg
 ```
 
-**yt-dlp** (required for Kick, YouTube, custom URLs):
+**yt-dlp** (required for YouTube, Rumble, custom URLs):
+
 ```
 pip install yt-dlp
 ```
 
-**streamlink** (required for Twitch):
+**streamlink** (required for Twitch and Kick):
+
 ```
 pip install streamlink
 ```
@@ -53,12 +59,14 @@ pip install streamlink
 pip install -r requirements.txt
 ```
 
-Or install individually — only `yt-dlp` is strictly required:
+Or install individually:
+
 ```
-pip install yt-dlp                # Required
-pip install streamlink            # Required for Twitch
+pip install yt-dlp                # Required for YouTube, Rumble, custom URLs
+pip install streamlink            # Required for Twitch and Kick
 pip install psutil                # Recommended — cleaner process management
 pip install pystray Pillow plyer  # Optional — tray icon & notifications
+pip install curl_cffi             # Optional — Rumble Cloudflare bypass
 ```
 
 ### 3. Run
@@ -72,9 +80,13 @@ On first launch, the program creates a `config.ini` with sensible defaults. Edit
 ### 4. Add Channels
 
 Use the GUI to add channels:
+
 1. Select a platform from the dropdown (kick, twitch, youtube, custom)
 2. Enter the channel name (e.g., `asmongold` for Kick, `saruei` for Twitch)
-3. For custom URLs, paste the full URL (e.g., `https://rumble.com/some-stream.html`)
+3. For custom URLs, paste the full URL:
+   - Rumble channels: `https://rumble.com/c/ChannelName`
+   - Chaturbate: `https://chaturbate.com/username/`
+   - Any yt-dlp supported site: paste the stream URL
 4. Click **Add** or press **Enter**
 
 Press **Start Recording** — the program will monitor all channels and record any that go live.
@@ -96,7 +108,7 @@ The program auto-detects `cookies.txt` in your streams directory or the script's
 
 All settings are in `config.ini`, auto-created on first run:
 
-```ini
+```
 [Paths]
 streams_dir = E:\Streams          # Where recordings are saved
 channels_file = channels.json     # Channel list (managed by GUI)
@@ -134,7 +146,7 @@ notifications = true              # Desktop notifications
 The `filename_pattern` setting supports these tokens:
 
 | Token | Example | Description |
-|-------|---------|-------------|
+| --- | --- | --- |
 | `{username}` | `asmongold` | Channel name |
 | `{platform}` | `twitch` | Platform name |
 | `{timestamp}` | `20260211_213445` | Date and time |
@@ -150,19 +162,20 @@ Default: `{username}_{timestamp}` → `asmongold_20260211_213445.mp4`
 E:\Streams\
 ├── Recorded\              # Raw recordings organized by platform
 │   ├── kick\
-│   │   └── lifeismizzy\
-│   │       ├── lifeismizzy_20260211_213445.ts
-│   │       └── lifeismizzy_20260211_213445.meta.json
+│   │   └── asmongold\
+│   │       ├── asmongold_20260211_213445.ts
+│   │       └── asmongold_20260211_213445.meta.json
 │   ├── twitch\
 │   │   └── saruei\
-│   └── youtube\
-│       └── OhDough\
+│   ├── youtube\
+│   │   └── OhDough\
+│   └── custom\
+│       └── rumble\
 ├── Processed\             # Remuxed MP4 files
 │   ├── kick\
-│   │   └── lifeismizzy\
-│   │       └── lifeismizzy_20260211_213445.mp4
 │   ├── twitch\
-│   └── youtube\
+│   ├── youtube\
+│   └── custom\
 ├── PendingDeletion\       # Temp files awaiting cleanup
 ├── channels.json          # Channel list
 ├── config.ini             # Configuration
@@ -172,27 +185,28 @@ E:\Streams\
 ## Keyboard Shortcuts
 
 | Key | Action |
-|-----|--------|
+| --- | --- |
 | `Enter` | Add channel from text field |
 | `Delete` | Remove selected channel |
 | `Ctrl+Q` | Quit application |
 | `F1` | About dialog |
-| Right-click on channel | Context menu (Open in Browser, Copy, Remove) |
+| Right-click on channel | Context menu (Start/Stop Recording, Open in Browser, Copy, Remove) |
+| Right-click on status | Context menu (Restart/Stop Channel, Open in Browser) |
 
 ## How It Works
 
 1. **Monitoring**: Each channel gets its own worker process. Workers check if the stream is live at the configured polling interval with random jitter.
-2. **Detection**: Twitch streams are checked via streamlink. Kick, YouTube, and custom URLs use yt-dlp's `--dump-json` to detect live status.
-3. **Recording**: Live streams are recorded as MPEG-TS files. Twitch uses streamlink with ad-blocking and low-latency options. Everything else uses yt-dlp with ffmpeg as the HLS downloader.
+2. **Detection**: Kick streams are checked via streamlink (with Cloudflare JS challenge solver). Twitch streams are checked via streamlink. YouTube and custom URLs use yt-dlp's `--dump-json`. Rumble channel pages are resolved to their current live video URL.
+3. **Recording**: Live streams are recorded as MPEG-TS files. Kick and Twitch use streamlink. YouTube, Rumble, and custom URLs use yt-dlp with ffmpeg as the HLS downloader.
 4. **Reconnection**: If a recording drops unexpectedly (process exits after >10 seconds of recording), the worker enters a 3-minute fast-poll mode (every 15 seconds) to catch stream reconnects.
-5. **Processing**: When you click Stop (or the stream ends), raw .ts files are remuxed to .mp4 with ffmpeg, metadata sidecars are saved, and the originals are moved to PendingDeletion.
+5. **Processing**: When you click Stop (or the stream ends), raw .ts files are remuxed to .mp4 with ffmpeg (including `+faststart` for seekability), metadata sidecars are saved, and the originals are moved to PendingDeletion.
 
 ## Polling Behavior
 
 The polling system is designed to be responsive without being abusive to servers:
 
 | State | Check Interval | Behavior |
-|-------|---------------|----------|
+| --- | --- | --- |
 | **Offline** | Every 3 min ± jitter | Flat interval, no backoff. Catches streams within minutes of going live. |
 | **Error** | Doubles each time, max 15 min | Exponential backoff on server errors. Resets immediately on success. |
 | **Reconnect** | Every 15 seconds for 3 min | Fast polling after a stream drops unexpectedly. |
@@ -206,40 +220,48 @@ The GUI includes a **Polling** dropdown to switch between Relaxed (5 min), Norma
 
 **YouTube 403/503 errors** — Your cookies have likely expired. Re-export them from your browser. The cookie indicator in the GUI will warn you when this happens.
 
-**Kick streams not detected** — Kick uses Cloudflare protection. Cookies from a logged-in browser session usually resolve this. Try re-exporting cookies.
+**Kick 403 errors** — Make sure you don't have an old third-party Kick plugin overriding streamlink's built-in one. Check `%APPDATA%\streamlink\plugins\` for a `kick.py` file and delete it if present. Streamlink 8.x includes a built-in Kick plugin with Cloudflare bypass.
+
+**Kick streams not recording** — Kick requires streamlink 8.0+. Update streamlink: `pip install -U streamlink`. The program uses streamlink (not yt-dlp) for Kick detection and recording.
+
+**Rumble streams not detected** — Add Rumble channels as custom URLs using the channel page format: `https://rumble.com/c/ChannelName`. If you get 403 errors, install `curl_cffi` for browser impersonation: `pip install curl_cffi`.
 
 **Twitch recordings have no audio** — This is rare but can happen with certain streamlink versions. Update streamlink: `pip install -U streamlink`
 
+**Large recordings produce corrupt MP4** — The remux timeout scales automatically with file size (1 minute per GB + buffer). If you still have the `.ts` file in PendingDeletion, you can re-remux manually: `ffmpeg -i recording.ts -c copy -movflags +faststart output.mp4`
+
 **Large .ts files in Recorded folder** — These are raw recordings that haven't been remuxed yet. This happens if you force-quit the program instead of using Stop. Restart the program and it will clean them up.
 
-**Program won't close** — If the window is unresponsive, use Ctrl+Q. The program uses a multi-layered shutdown: graceful stop → process tree kill → orphan cleanup → os._exit as a final backstop.
+**Program won't close** — If the window is unresponsive, use Ctrl+Q. The program uses a multi-layered shutdown: graceful stop → process tree kill → orphan cleanup → os.\_exit as a final backstop.
 
 ## Platform Notes
 
-**Kick**: Uses yt-dlp. Most reliable when cookies are provided. Streams are recorded in 1080p by default.
+**Kick**: Uses streamlink for both detection and recording. Streamlink 8.x includes a built-in Cloudflare JS challenge solver that handles Kick's aggressive bot detection. Cookies are optional. Streams are recorded in 1080p by default. **Important**: Remove any old third-party `kick.py` plugins from `%APPDATA%\streamlink\plugins\` — they override the built-in plugin and break Cloudflare bypass.
 
 **Twitch**: Uses streamlink with `--twitch-disable-ads` and `--twitch-low-latency`. Cookies are optional but enable subscriber-only features.
 
 **YouTube**: Uses yt-dlp. Cookies are recommended to avoid throttling. YouTube Live DVR streams work but may produce "keepalive request failed" messages in verbose mode — these are harmless and don't affect the recording.
+
+**Rumble**: Uses yt-dlp. Add channels as custom URLs using the channel page format (`https://rumble.com/c/ChannelName`). The program automatically resolves channel pages to the current live video URL. If Cloudflare blocks access, the program falls back to browser impersonation via `curl_cffi` (install with `pip install curl_cffi`). When a Rumble channel is offline, the program correctly detects this without downloading previous VODs.
 
 **Custom URLs**: Uses yt-dlp, which supports [1,800+ sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md). Direct `.m3u8` HLS links also work. Select "custom" from the platform dropdown and paste the full URL.
 
 ## Requirements
 
 | Dependency | Required | Purpose |
-|-----------|----------|---------|
+| --- | --- | --- |
 | Python 3.10+ | Yes | Runtime |
 | ffmpeg | Yes | Remux .ts → .mp4 |
-| yt-dlp | Yes | Kick, YouTube, custom URL recording |
-| streamlink | For Twitch | Twitch stream recording |
+| yt-dlp | Yes | YouTube, Rumble, custom URL recording |
+| streamlink | Yes | Kick and Twitch stream recording |
 | psutil | Recommended | Clean process management |
+| curl_cffi | Recommended | Rumble Cloudflare bypass |
 | pystray + Pillow | Optional | System tray icon |
 | plyer | Optional | Desktop notifications |
-| curl_cffi | Recommended | Browser impersonation for Cloudflare-protected sites
 
 ## Author
 
-Created by ManletPride, built with assistance from Claude (Anthropic) and Grok (xAI).
+Created by ManletPride, built with assistance from Claude (Anthropic) and and Grok (xAI).
 
 ## License
 
