@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
-__version__ = "1.3"
+__version__ = "1.3.1"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -435,8 +435,8 @@ def check_disk_space(path, min_gb=5.0):
 
 # ── GitHub repository for version checks ──
 # Update these before publishing to GitHub
-GITHUB_OWNER = "ManletPride"   # ← The author's GitHub username
-GITHUB_REPO = "Multi-Stream-Recorder"   # ← The GitHub repo name
+GITHUB_OWNER = "ManletPride"   # ← Author's GitHub username
+GITHUB_REPO = "Multi-Stream-Recorder"   # ← GitHub repo name
 
 
 def check_for_updates(current_version, callback=None):
@@ -888,6 +888,85 @@ def setup_child_logging(root_path, channel_key):
 #          Stream Checking Functions
 # ────────────────────────────────────────────────
 
+def check_stream_kick_api(channel_name, logger, timeout=15, cookies_file=None):
+    """Check if a Kick stream is live using streamlink's Kick plugin.
+
+    Streamlink 8.x has a built-in JS challenge solver for Kick's Cloudflare
+    protection, which is far more reliable than yt-dlp or curl_cffi for
+    bypassing their bot detection.
+
+    Returns (is_live: bool, stream_title: str | None, error: str | None).
+    Returns (None, None, error) if streamlink check is inconclusive and
+    caller should fall back to yt-dlp.
+    """
+    if not HAS_STREAMLINK:
+        return None, None, "streamlink not available"
+
+    url = f"https://kick.com/{channel_name}"
+    check_cmd = ["streamlink", "--json", url]
+    logger.info(f"Kick check (streamlink): {' '.join(check_cmd)}")
+
+    try:
+        result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=timeout)
+        logger.info(f"Kick streamlink check returncode={result.returncode}")
+
+        if result.stdout:
+            try:
+                data = json.loads(result.stdout)
+
+                # streamlink --json returns {"streams": {...}} when live
+                # and {"error": "..."} when offline or errored
+                if "streams" in data and data["streams"]:
+                    # Channel is live — streamlink found available streams
+                    # Try to extract title from metadata if available
+                    title = data.get("metadata", {}).get("title")
+                    logger.info(f"Kick streamlink: channel is LIVE — title={title!r}")
+                    return True, title, None
+                elif "error" in data:
+                    error_msg = data["error"]
+                    error_lower = error_msg.lower()
+                    if "403" in error_lower or "forbidden" in error_lower:
+                        logger.warning(f"Kick streamlink: Cloudflare 403 — {error_msg}")
+                        return None, None, "403 (Cloudflare)"  # fall back
+                    elif "no playable streams" in error_lower or "could not find" in error_lower:
+                        logger.info("Kick streamlink: channel is offline (no streams)")
+                        return False, None, None
+                    else:
+                        logger.info(f"Kick streamlink: offline or error — {error_msg}")
+                        return False, None, None
+                else:
+                    logger.info("Kick streamlink: no streams found (offline)")
+                    return False, None, None
+
+            except json.JSONDecodeError:
+                pass
+
+        # Check stderr for common patterns
+        if result.stderr:
+            stderr_lower = result.stderr.lower()
+            if "403" in stderr_lower:
+                logger.warning(f"Kick streamlink: 403 in stderr")
+                return None, None, "403 (Cloudflare)"
+            elif "no plugin" in stderr_lower:
+                logger.warning("Kick streamlink: no plugin for Kick URLs")
+                return None, None, "no kick plugin"
+
+        if result.returncode != 0:
+            logger.info("Kick streamlink: non-zero exit (likely offline)")
+            return False, None, None
+
+        return None, None, "unexpected streamlink output"
+
+    except subprocess.TimeoutExpired:
+        logger.warning("Kick streamlink check timed out")
+        return None, None, "timeout"
+    except FileNotFoundError:
+        return None, None, "streamlink not found"
+    except Exception as e:
+        logger.warning(f"Kick streamlink check error: {e}")
+        return None, None, str(e)
+
+
 def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
     """Check if a stream is live using yt-dlp (Kick, YouTube, custom URLs).
 
@@ -1134,13 +1213,17 @@ def build_recording_command_streamlink_kick(url, raw_file, quality, verbose, str
 
 
 def build_recording_command_streamlink(url, raw_file, quality, platform, config, verbose, streamlink_debug):
-    """Build streamlink command for Twitch recording."""
+    """Build streamlink command for Twitch/Kick recording."""
     cmd = ["streamlink"]
 
     if platform == "twitch":
         cmd.extend([
             "--twitch-disable-ads",
             "--twitch-low-latency",
+            "--http-header", "User-Agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        ])
+    elif platform == "kick":
+        cmd.extend([
             "--http-header", "User-Agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         ])
     elif platform == "youtube":
@@ -1539,7 +1622,21 @@ def record_worker(args):
             # Check if stream is live
             need_impersonate = False
             recording_url = url  # may be overridden by resolved URL
-            if platform in ["kick", "youtube", "custom"]:
+            if platform == "kick":
+                # Try streamlink for Kick first — it has a JS challenge solver
+                # for Cloudflare that yt-dlp lacks.  Use longer timeout since
+                # the first check may need to launch a headless browser.
+                kick_timeout = max(stream_check_timeout, 45)
+                is_live, stream_title, error = check_stream_kick_api(
+                    username, logger, kick_timeout, cookies_file)
+                if is_live is None:
+                    # streamlink check failed — fall back to yt-dlp
+                    logger.info("Kick streamlink check inconclusive — falling back to yt-dlp")
+                    is_live, stream_title, error, need_impersonate, resolved_url = check_stream_ytdlp(url, logger, stream_check_timeout, cookies_file)
+                    if resolved_url:
+                        recording_url = resolved_url
+                        logger.info(f"Using resolved URL for recording: {recording_url}")
+            elif platform in ["youtube", "custom"]:
                 is_live, stream_title, error, need_impersonate, resolved_url = check_stream_ytdlp(url, logger, stream_check_timeout, cookies_file)
                 # If yt-dlp resolved to a different URL (e.g. Rumble channel -> video),
                 # use the resolved URL for recording so yt-dlp can actually download it
@@ -1619,7 +1716,11 @@ def record_worker(args):
                 last_status = new_status.copy()
 
             # Build recording command
-            if platform in ["kick", "youtube", "custom"]:
+            if platform == "kick":
+                # Use streamlink for Kick — it has a JS challenge solver for
+                # Cloudflare that yt-dlp lacks.  Same approach as Twitch.
+                record_cmd = build_recording_command_streamlink(url, raw_file, quality, platform, config, verbose, streamlink_debug)
+            elif platform in ["youtube", "custom"]:
                 record_cmd = build_recording_command_ytdlp(recording_url, raw_file, config, verbose,
                                                            streamlink_debug, cookies_file,
                                                            impersonate=need_impersonate)
@@ -1754,7 +1855,12 @@ def record_worker(args):
                 last_status = new_status.copy()
 
             mp4_file = os.path.join(processed_path, f"{base_name}.mp4")
-            success, mp4_size, error = remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, ffmpeg_timeout)
+            # Scale timeout based on file size: base timeout or 1 minute per GB, whichever is larger
+            file_size_gb = file_size / (1024**3)
+            scaled_timeout = max(ffmpeg_timeout, int(file_size_gb * 60) + 120)
+            if scaled_timeout > ffmpeg_timeout:
+                logger.info(f"Large file ({human_size(file_size)}) — remux timeout scaled to {scaled_timeout}s")
+            success, mp4_size, error = remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, scaled_timeout)
 
             if success:
                 # Save metadata sidecar
@@ -1926,9 +2032,11 @@ class BackgroundCleaner:
                     if os.path.exists(mp4_file) and os.path.getsize(mp4_file) > 5 * 1024**2:
                         logging.info(f"Cleanup: MP4 already exists for {filename}, just moving raw file")
                     else:
+                        file_size_gb = file_size / (1024**3)
+                        scaled_timeout = max(ffmpeg_timeout, int(file_size_gb * 60) + 120)
                         success, mp4_size, error = remux_to_mp4(
                             raw_file, mp4_file, ffmpeg_path,
-                            logging.getLogger(), ffmpeg_timeout
+                            logging.getLogger(), scaled_timeout
                         )
                         if not success:
                             logging.error(f"Cleanup: Failed to process {filename}: {error}")
@@ -2313,9 +2421,11 @@ class StreamRecorder:
                     if os.path.exists(mp4_file) and os.path.getsize(mp4_file) > 5 * 1024**2:
                         logging.info("Startup cleanup: MP4 already exists, moving raw file")
                     else:
+                        file_size_gb = file_size / (1024**3)
+                        scaled_timeout = max(ffmpeg_timeout, int(file_size_gb * 60) + 120)
                         success, mp4_size, error = remux_to_mp4(
                             raw_file, mp4_file, ffmpeg_path,
-                            logging.getLogger(), ffmpeg_timeout
+                            logging.getLogger(), scaled_timeout
                         )
                         if not success:
                             logging.error(f"Startup cleanup: Failed to process {filename}: {error}")
