@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -539,10 +539,17 @@ def validate_cookies(cookies_path):
         'SID', 'HSID', 'SSID', 'APISID', 'SAPISID', 'LOGIN_INFO',
         # Kick
         'session_token', 'cookie_preferences_set_v1',
+        # Fansly
+        'f-s-c',
+        # Chaturbate
+        'sbr',
+        # Rumble
+        'a_s',
     }
 
     now = time.time()
     domains = set()
+    meaningful_domains = set()   # domains with at least one non-zero-expiry cookie
     expired_auth_domains = set()
     auth_earliest = None
     count = 0
@@ -555,7 +562,13 @@ def validate_cookies(cookies_path):
                 if line.startswith('# Netscape HTTP Cookie File') or line.startswith('# HTTP Cookie File'):
                     has_netscape_header = True
                     continue
-                if not line or line.startswith('#'):
+                if not line:
+                    continue
+                # HttpOnly cookies are prefixed '#HttpOnly_' in the Netscape format —
+                # strip the prefix so the line parses normally.  Plain comments skip.
+                if line.startswith('#HttpOnly_'):
+                    line = line[len('#HttpOnly_'):]
+                elif line.startswith('#'):
                     continue
 
                 parts = line.split('\t')
@@ -572,6 +585,13 @@ def validate_cookies(cookies_path):
                 domains.add(domain)
                 count += 1
 
+                # A domain only counts as "meaningful" (green dot) if it has at least
+                # one cookie with a real expiry — expiry=0 means a session/tracking
+                # cookie that any anonymous visit produces (e.g. yt-dlp writing back
+                # "country=us"), which has no authentication value.
+                if expiry > 0:
+                    meaningful_domains.add(domain)
+
                 # Only track expiry for auth cookies (session=0 is ignored)
                 if expiry > 0 and cookie_name in AUTH_COOKIES:
                     if expiry < now:
@@ -581,6 +601,7 @@ def validate_cookies(cookies_path):
 
         result['total_cookies'] = count
         result['domains'] = sorted(domains)
+        result['meaningful_domains'] = sorted(meaningful_domains)
         result['expired_domains'] = sorted(expired_auth_domains)
         result['has_expired_auth'] = len(expired_auth_domains) > 0
 
@@ -610,6 +631,72 @@ def validate_cookies(cookies_path):
         result['warnings'].append(f"Failed to read cookies file: {e}")
 
     return result
+
+
+def get_cookie_domain_for_channel(channel_key):
+    """Return the cookie domain to match for a given channel key.
+
+    Examples:
+        'twitch:saruei'                          → 'twitch.tv'
+        'youtube:@OhDough'                       → 'youtube.com'
+        'xqc'  (bare Kick name)                  → 'kick.com'
+        'custom:https://fansly.com/live/YuukoVT' → 'fansly.com'
+        'custom:https://chaturbate.com/alice/'   → 'chaturbate.com'
+    """
+    from urllib.parse import urlparse
+    if channel_key.startswith('twitch:'):
+        return 'twitch.tv'
+    elif channel_key.startswith('youtube:'):
+        return 'youtube.com'
+    elif channel_key.startswith('custom:'):
+        url = channel_key.split(':', 1)[1]
+        try:
+            host = (urlparse(url).hostname or '').lower()
+            if host.startswith('www.'):
+                host = host[4:]
+            return host  # e.g. 'fansly.com', 'chaturbate.com', 'rumble.com'
+        except Exception:
+            return None
+    else:
+        return 'kick.com'  # bare name = Kick
+
+
+# Cookie status constants
+COOKIE_STATUS_PRESENT = 'present'   # valid, non-expired cookie found
+COOKIE_STATUS_MISSING = 'missing'   # no cookie for this domain at all
+COOKIE_STATUS_EXPIRED = 'expired'   # domain present but auth cookie expired
+COOKIE_STATUS_UNKNOWN = 'unknown'   # can't determine (no cookies file, etc.)
+
+COOKIE_DOT_COLORS = {
+    COOKIE_STATUS_PRESENT: '#4CAF50',   # green
+    COOKIE_STATUS_MISSING: '#F44336',   # red
+    COOKIE_STATUS_EXPIRED: '#FF9800',   # orange
+    COOKIE_STATUS_UNKNOWN: '#888888',   # grey
+}
+
+
+def get_cookie_status_for_channel(channel_key, cookie_info):
+    """Return one of the COOKIE_STATUS_* constants for this channel."""
+    if not cookie_info or not cookie_info.get('valid'):
+        return COOKIE_STATUS_UNKNOWN
+    target = get_cookie_domain_for_channel(channel_key)
+    if not target:
+        return COOKIE_STATUS_UNKNOWN
+
+    def _matches(cookie_domain, target_domain):
+        return cookie_domain == target_domain or cookie_domain.endswith('.' + target_domain)
+
+    domains = cookie_info.get('domains', [])
+    meaningful_domains = cookie_info.get('meaningful_domains', domains)  # fallback for old cache
+    expired_domains = cookie_info.get('expired_domains', [])
+
+    # A domain in `domains` but not `meaningful_domains` only has expiry=0 cookies
+    # (anonymous tracking cookies written by yt-dlp) — treat as missing.
+    if not any(_matches(d, target) for d in meaningful_domains):
+        return COOKIE_STATUS_MISSING
+    if any(_matches(d, target) for d in expired_domains):
+        return COOKIE_STATUS_EXPIRED
+    return COOKIE_STATUS_PRESENT
 
 
 def extract_domain_from_url(url):
@@ -1315,11 +1402,19 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
     """Monitor a recording subprocess and update status via queue.
 
     Spawns a background thread to read stderr for real-time logging.
-    Detects zero-byte stalls, max duration limits, and file creation timeouts.
+    Detects zero-byte stalls, file growth stalls, max duration limits, and
+    file creation timeouts.
     """
     tool_name = tool_name_override or ("yt-dlp" if platform in ["kick", "youtube", "custom"] else "streamlink")
     zero_byte_strikes = 0
     file_appeared = False
+
+    # Stall detection: kill the process if the file stops growing for this long.
+    # streamlink's --retry-streams keeps it alive even after the stream ends, so
+    # without this the worker would never notice the stream dropped.
+    STALL_TIMEOUT = 90  # seconds without file growth before terminating
+    last_size = 0
+    last_growth_time = time.monotonic()
 
     # Start stderr reader thread
     stderr_thread = threading.Thread(
@@ -1336,6 +1431,13 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                 file_appeared = True
                 size = os.path.getsize(raw_file)
 
+                # Track file growth for stall detection
+                if size > last_size:
+                    last_size = size
+                    last_growth_time = time.monotonic()
+
+                stall_duration = time.monotonic() - last_growth_time
+
                 # After 30 seconds with file existing but 0 bytes, something is wrong
                 if elapsed > 30 and size == 0:
                     zero_byte_strikes += 1
@@ -1343,6 +1445,14 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                         logger.error("File exists but remains 0 bytes after 60+ seconds — terminating")
                         kill_process_tree(proc.pid, logger)
                         break
+                # File grew at some point but has now stalled — stream likely ended
+                elif last_size > 0 and elapsed > 60 and stall_duration > STALL_TIMEOUT:
+                    logger.warning(
+                        f"File hasn't grown in {stall_duration:.0f}s (last size: {human_size(last_size)}) "
+                        f"— stream likely ended, terminating {tool_name}"
+                    )
+                    kill_process_tree(proc.pid, logger)
+                    break
                 else:
                     zero_byte_strikes = 0
 
@@ -2788,11 +2898,16 @@ def main_gui(config):
         tree.tag_configure("unknown", foreground=t['offline_fg'])
 
         # Tk widgets (non-ttk) — set all frame backgrounds
-        for w in [frame_left, platform_frame, btn_small_frame, move_btn_frame, frame_right,
-                  bottom_bar, btn_frame, toggle_frame]:
+        for w in [frame_left, ch_tree_frame, platform_frame, btn_small_frame, move_btn_frame,
+                  frame_right, bottom_bar, btn_frame, toggle_frame]:
             w.configure(bg=t['bg'])
         ch_tree.tag_configure("enabled", foreground=t['fg'])
         ch_tree.tag_configure("disabled", foreground="#777777")
+        try:
+            dot_canvas.configure(bg=t['bg'])
+            _redraw_dot_canvas()
+        except NameError:
+            pass  # not yet defined on first apply_theme call during startup
         entry.configure(bg=t['entry_bg'], fg=t['entry_fg'], insertbackground=t['fg'],
                         highlightbackground=border_color, highlightcolor=t['accent'],
                         highlightthickness=1, relief='flat')
@@ -2884,22 +2999,107 @@ def main_gui(config):
     frame_left = tk.Frame(root, padx=12, pady=12)
     frame_left.grid(row=0, column=0, sticky="ns", padx=(10, 5), pady=10)
 
-    # Treeview-based channel list with checkbox column
-    ch_tree = ttk.Treeview(frame_left, columns=("check", "name"), show="tree",
+    # Container so ch_tree and the dot canvas sit side by side
+    ch_tree_frame = tk.Frame(frame_left)
+    ch_tree_frame.pack(fill=tk.BOTH, expand=True)
+
+    # Treeview — no cookie column; dots are drawn on a Canvas overlay instead
+    ch_tree = ttk.Treeview(ch_tree_frame, columns=("check", "name"), show="tree",
                            height=20, selectmode="extended")
     ch_tree.column("#0", width=0, stretch=False)  # hidden tree column
     ch_tree.column("check", width=28, anchor="center", stretch=False)
     ch_tree.column("name", width=245, anchor="w")
     ch_tree.heading("check", text="")
     ch_tree.heading("name", text="")
-    ch_tree.pack(fill=tk.BOTH, expand=True)
+    ch_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-    # Tag-based styling for checked/unchecked
-    ch_tree.tag_configure("enabled", foreground="")    # themed dynamically
-    ch_tree.tag_configure("disabled", foreground="#777777")
+    # Narrow Canvas strip for cookie dots — drawn independently of row tags
+    DOT_CANVAS_W = 18
+    dot_canvas = tk.Canvas(ch_tree_frame, width=DOT_CANVAS_W, highlightthickness=0,
+                           borderwidth=0)
+    dot_canvas.pack(side=tk.LEFT, fill=tk.Y)
+
+    def _redraw_dot_canvas():
+        """Repaint the dot canvas to match current treeview row positions."""
+        t = DARK if dark_mode.get() else LIGHT
+        dot_canvas.configure(bg=t['bg'])
+        dot_canvas.delete("all")
+        for item in ch_tree.get_children():
+            bbox = ch_tree.bbox(item)
+            if not bbox:
+                continue  # row is scrolled out of view
+            x, y, w, h = bbox
+            ch_name = ch_tree.item(item, "values")[1]  # col 0=check, 1=name
+            _, color = _cookie_dot_for_channel(ch_name)
+            cx = DOT_CANVAS_W // 2
+            cy = y + h // 2
+            r = 4
+            dot_canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
+                                   fill=color, outline="")
+
+    # Redraw dots whenever the treeview content or scroll position changes
+    ch_tree.bind("<<TreeviewSelect>>", lambda e: dot_canvas.after(10, _redraw_dot_canvas))
+    ch_tree.bind("<Configure>", lambda e: dot_canvas.after(10, _redraw_dot_canvas))
+    ch_tree.bind("<MouseWheel>", lambda e: dot_canvas.after(10, _redraw_dot_canvas))
+    ch_tree.bind("<Button-4>", lambda e: dot_canvas.after(10, _redraw_dot_canvas))  # Linux scroll up
+    ch_tree.bind("<Button-5>", lambda e: dot_canvas.after(10, _redraw_dot_canvas))  # Linux scroll down
+    # Also schedule a periodic redraw to catch scroll and theme changes
+    def _dot_refresh_loop():
+        _redraw_dot_canvas()
+        dot_canvas.after(500, _dot_refresh_loop)
+    dot_canvas.after(100, _dot_refresh_loop)
+
+    # ── Tooltip explaining the cookie dot column ──
+    class _Tooltip:
+        def __init__(self, widget, text):
+            self._widget = widget
+            self._text = text
+            self._tip = None
+            widget.bind("<Enter>", self._show, add="+")
+            widget.bind("<Leave>", self._hide, add="+")
+        def _show(self, event=None):
+            if self._tip:
+                return
+            x = self._widget.winfo_rootx() + 20
+            y = self._widget.winfo_rooty() + self._widget.winfo_height() + 4
+            self._tip = tw = tk.Toplevel(self._widget)
+            tw.wm_overrideredirect(True)
+            tw.wm_geometry(f"+{x}+{y}")
+            t = DARK if dark_mode.get() else LIGHT
+            tk.Label(tw, text=self._text, justify=tk.LEFT,
+                     background=t['entry_bg'], foreground=t['fg'],
+                     relief='solid', borderwidth=1,
+                     font=("Segoe UI", 8), padx=6, pady=4).pack()
+        def _hide(self, event=None):
+            if self._tip:
+                self._tip.destroy()
+                self._tip = None
+
+    _TOOLTIP_TEXT = "● Green  = cookie present\n● Orange = auth cookie expired\n● Red    = no cookie for this site\n○ Grey   = unknown / no cookies.txt"
+    _Tooltip(ch_tree, _TOOLTIP_TEXT)
+    _Tooltip(dot_canvas, _TOOLTIP_TEXT)
 
     CHECK_ON = "☑"
     CHECK_OFF = "☐"
+
+    # Pre-fill the cookie cache immediately — before the first tree draw —
+    # so dots have real colours from the start rather than going grey first.
+    # This is just the data parse; widget updates happen later in update_cookie_status().
+    _cookie_info_cache = [validate_cookies(find_cookies_file(config))]
+
+    def _cookie_dot_for_channel(ch_name):
+        """Return (dot_char, fg_color) for the cookie indicator column."""
+        info = _cookie_info_cache[0]
+        if info is None:
+            return ("○", COOKIE_DOT_COLORS[COOKIE_STATUS_UNKNOWN])
+        status = get_cookie_status_for_channel(ch_name, info)
+        dot = "●" if status != COOKIE_STATUS_UNKNOWN else "○"
+        return (dot, COOKIE_DOT_COLORS[status])
+
+    # Simple row tags — just enabled/disabled for dimming.
+    # Cookie dot colours are drawn by the Canvas, not by row tags.
+    ch_tree.tag_configure("enabled", foreground="")   # themed by apply_theme
+    ch_tree.tag_configure("disabled", foreground="#777777")
 
     def _populate_channel_tree():
         """Rebuild the channel treeview from the channels list."""
@@ -2908,6 +3108,7 @@ def main_gui(config):
             check = CHECK_ON if ch.get("enabled", True) else CHECK_OFF
             tag = "enabled" if ch.get("enabled", True) else "disabled"
             ch_tree.insert("", tk.END, values=(check, ch["name"]), tags=(tag,))
+        dot_canvas.after(20, _redraw_dot_canvas)
 
     _populate_channel_tree()
 
@@ -2923,9 +3124,11 @@ def main_gui(config):
             idx = ch_tree.index(item)
             if 0 <= idx < len(channels):
                 channels[idx]["enabled"] = not channels[idx].get("enabled", True)
-                check = CHECK_ON if channels[idx]["enabled"] else CHECK_OFF
-                tag = "enabled" if channels[idx]["enabled"] else "disabled"
+                enabled = channels[idx]["enabled"]
+                check = CHECK_ON if enabled else CHECK_OFF
+                tag = "enabled" if enabled else "disabled"
                 ch_tree.item(item, values=(check, channels[idx]["name"]), tags=(tag,))
+                dot_canvas.after(20, _redraw_dot_canvas)
                 save_channels()
 
     ch_tree.bind("<ButtonRelease-1>", _toggle_channel_check)
@@ -2968,6 +3171,7 @@ def main_gui(config):
         ch = {"name": ch_name, "enabled": True}
         channels.append(ch)
         ch_tree.insert("", tk.END, values=(CHECK_ON, ch_name), tags=("enabled",))
+        dot_canvas.after(20, _redraw_dot_canvas)
         save_channels()
         if recorder:
             recorder.status_dict[ch_name] = {"status": "Initializing", "detail": "", "size": "", "time": ""}
@@ -3045,34 +3249,32 @@ def main_gui(config):
     cookie_label.pack(side=tk.LEFT)
 
     def update_cookie_status():
-        """Check cookies.txt and update the indicator."""
+        """Check cookies.txt, update the global indicator, and refresh per-channel dots."""
         cookies_path = find_cookies_file(config)
         info = validate_cookies(cookies_path)
+
+        # Refresh the cache so per-channel dots update on the next tree redraw
+        _cookie_info_cache[0] = info
 
         base_text = f"{info['total_cookies']} entries, {len(info['domains'])} domains"
 
         if not cookies_path:
-            # Gray: no file at all
             cookie_indicator.configure(text="○", fg="#888888")
             cookie_label.configure(text="No cookies.txt found")
         elif not info['valid']:
-            # Red: file is broken
             cookie_indicator.configure(text="●", fg="#F44336")
             warning = info['warnings'][0] if info['warnings'] else "Invalid format"
             cookie_label.configure(text=f"Cookies: {warning}")
         elif info['has_expired_auth']:
-            # Orange: auth cookies have expired
             cookie_indicator.configure(text="●", fg="#FF9800")
             domains = ", ".join(info['expired_domains'][:2])
             cookie_label.configure(text=f"Cookies: auth expired ({domains})")
         else:
-            # Check if auth cookies expire soon
             expiry_note = ""
             if info['auth_expiry']:
                 days_left = (info['auth_expiry'] - datetime.datetime.now()).days
                 if days_left < 7:
                     expiry_note = f" (auth renew in {days_left}d)"
-                    # Orange-ish only if very close (<2 days)
                     if days_left < 2:
                         cookie_indicator.configure(text="●", fg="#FF9800")
                     else:
@@ -3080,9 +3282,11 @@ def main_gui(config):
                 else:
                     cookie_indicator.configure(text="●", fg="#4CAF50")
             else:
-                # No auth cookies with expiry found — still green (session cookies work)
                 cookie_indicator.configure(text="●", fg="#4CAF50")
             cookie_label.configure(text=f"Cookies: {base_text}{expiry_note}")
+
+        # Refresh dots to reflect the updated cache
+        dot_canvas.after(20, _redraw_dot_canvas)
 
     # Run initial check, then re-check every 5 minutes
     update_cookie_status()
