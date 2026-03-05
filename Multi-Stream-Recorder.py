@@ -376,7 +376,7 @@ def validate_channel_name(name, platform, existing_channels):
     if platform == "twitch" and not HAS_STREAMLINK:
         return False, "Cannot add Twitch channels — streamlink is not installed.\n  Install: pip install streamlink"
 
-    if platform in ["kick", "youtube"] and not HAS_YTDLP:
+    if platform in ["kick", "youtube", "rumble"] and not HAS_YTDLP:
         return False, f"Cannot add {platform.title()} channels — yt-dlp is not installed.\n  Install: pip install yt-dlp"
 
     return True, None
@@ -1054,6 +1054,168 @@ def check_stream_kick_api(channel_name, logger, timeout=15, cookies_file=None):
         return None, None, str(e)
 
 
+
+
+def check_stream_rumble_html(channel_name, logger, timeout=20, cookies_file=None):
+    """Check if a Rumble channel is live by scraping the channel page HTML.
+
+    Fetches ``https://rumble.com/c/CHANNEL`` with cookies and looks for the
+    ``thumbnail__thumb--live`` CSS class, which Rumble adds to the thumbnail
+    wrapper of any currently-live video.  When found, the adjacent
+    ``videostream__link`` href gives the live video page URL directly.
+
+    The live video URL is then passed to yt-dlp (single video page, not a
+    playlist) to resolve the actual HLS stream for recording.
+
+    Returns (is_live: bool, stream_title: str | None, resolved_url: str | None,
+             error: str | None).
+    resolved_url is the full ``https://rumble.com/vXXXXX-slug.html`` URL of
+    the live video, ready to hand to yt-dlp for recording.
+    """
+    import urllib.request
+    import urllib.error
+    import http.cookiejar
+    import re as _re
+
+    channel_url = f"https://rumble.com/c/{channel_name}"
+    logger.info(f"Rumble HTML check: {channel_url}")
+
+    try:
+        # Build opener with cookie file if available
+        opener = urllib.request.build_opener()
+        if cookies_file:
+            try:
+                cj = http.cookiejar.MozillaCookieJar(cookies_file)
+                cj.load(ignore_discard=True, ignore_expires=True)
+                opener.add_handler(urllib.request.HTTPCookieProcessor(cj))
+            except Exception as ce:
+                logger.debug(f"Rumble HTML check: could not load cookies ({ce}), proceeding without")
+
+        req = urllib.request.Request(
+            channel_url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/122.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+            }
+        )
+        with opener.open(req, timeout=timeout) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+
+    except urllib.error.HTTPError as e:
+        logger.warning(f"Rumble HTML check HTTP error: {e.code}")
+        return False, None, None, f"HTTP {e.code}"
+    except urllib.error.URLError as e:
+        logger.warning(f"Rumble HTML check URL error: {e.reason}")
+        return False, None, None, str(e.reason)
+    except Exception as e:
+        logger.warning(f"Rumble HTML check error: {e}")
+        return False, None, None, str(e)
+
+    # Find every thumbnail__thumb--live occurrence in the HTML (not CSS).
+    # CSS occurrences are followed by { while HTML ones are followed by "
+    live_video_urls = []
+    for m in _re.finditer(r'thumbnail__thumb--live"', html):
+        # Look for the next videostream__link href within ~2000 chars
+        chunk = html[m.start(): m.start() + 2000]
+        href_m = _re.search(r'href="(/v[a-z0-9]+-[^"]+\.html)', chunk)
+        if href_m:
+            slug = href_m.group(1)
+            full_url = "https://rumble.com" + slug
+            if full_url not in live_video_urls:
+                live_video_urls.append(full_url)
+
+    if not live_video_urls:
+        logger.info("Rumble HTML check: no live stream found on channel page")
+        return False, None, None, None
+
+    live_url = live_video_urls[0]
+    logger.info(f"Rumble HTML check: found live video URL — {live_url}")
+    # Title will be resolved by yt-dlp when it processes the video URL
+    return True, None, live_url, None
+
+
+def _find_rumble_live_url(url, logger, timeout, cookies_file, impersonate=False):
+    """Scan a Rumble channel/user page playlist for a live stream entry.
+
+    Rumble channel and user pages return a playlist when scraped.  Using
+    ``--playlist-items 1`` only grabs whichever video is first (usually a
+    pinned trailer or VOD), so we need to scan the whole playlist to find
+    any item whose ``live_status`` is ``"is_live"``.
+
+    Returns the URL of the live stream entry, or None if none found.
+    Only called when ``url`` looks like a Rumble channel/user page (not a
+    direct video URL).
+    """
+    import re as _re
+    cmd = ["yt-dlp", "--flat-playlist", "--dump-json"]
+    if impersonate and HAS_CURL_CFFI:
+        cmd.extend(["--impersonate", "chrome"])
+    if cookies_file:
+        cmd.extend(["--cookies", cookies_file])
+    cmd.append(url)
+
+    logger.info(f"Rumble playlist scan: {' '.join(cmd)}")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        logger.warning("Rumble playlist scan timed out")
+        return None
+    except Exception as e:
+        logger.warning(f"Rumble playlist scan error: {e}")
+        return None
+
+    if result.returncode != 0 and not result.stdout:
+        logger.warning(f"Rumble playlist scan failed (code {result.returncode})")
+        return None
+
+    # --flat-playlist emits one JSON object per line
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        live_status = entry.get("live_status", "")
+        entry_url = entry.get("url") or entry.get("webpage_url")
+
+        if live_status == "is_live" and entry_url:
+            title = entry.get("title", "(unknown)")
+            logger.info(f"Rumble playlist scan: found live entry — {title!r} → {entry_url}")
+            return entry_url
+        # Rumble sometimes omits live_status in flat-playlist; fall back to is_live flag
+        if entry.get("is_live") and entry_url:
+            title = entry.get("title", "(unknown)")
+            logger.info(f"Rumble playlist scan: found is_live entry — {title!r} → {entry_url}")
+            return entry_url
+
+    logger.info("Rumble playlist scan: no live entry found in playlist")
+    return None
+
+
+def _is_rumble_channel_url(url):
+    """Return True if *url* is a Rumble channel/user page (not a direct video URL).
+
+    Direct Rumble video URLs look like /vXXXXX-slug.html
+    Channel/user pages look like /c/ChannelName, /user/Username, etc.
+    """
+    import re as _re
+    if "rumble.com" not in url.lower():
+        return False
+    path = url.split("rumble.com", 1)[-1].split("?")[0].rstrip("/")
+    # Direct video URLs start with /v followed by alphanumerics then a dash
+    if _re.match(r"^/v[a-z0-9]+-", path, _re.IGNORECASE):
+        return False
+    return True
+
+
 def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
     """Check if a stream is live using yt-dlp (Kick, YouTube, custom URLs).
 
@@ -1064,6 +1226,24 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
     The fifth value is the resolved video URL if yt-dlp found a different
     URL than the one provided (e.g. Rumble channel page -> video URL).
     """
+    # ── Rumble channel/user pages: scan playlist for live entry ──────────
+    # Unlike YouTube's @handle/live, Rumble has no "give me the live stream"
+    # URL convention — channel pages return a full playlist and --playlist-items 1
+    # just grabs whatever is pinned first (usually a trailer/VOD).  We scan
+    # the flat playlist to find any entry that is actually live.
+    if _is_rumble_channel_url(url):
+        live_url = _find_rumble_live_url(url, logger, timeout, cookies_file, impersonate=False)
+        if live_url is None and HAS_CURL_CFFI:
+            # Channel page may be Cloudflare-gated — retry with impersonation
+            logger.info("Rumble channel scan: retrying with --impersonate chrome")
+            live_url = _find_rumble_live_url(url, logger, timeout, cookies_file, impersonate=True)
+        if live_url is None:
+            # No live stream found in playlist right now — report as offline
+            return False, None, None, False, None
+        # Found a live entry — check it directly to get full metadata & confirm live status
+        logger.info(f"Rumble channel scan resolved live URL: {live_url}")
+        url = live_url  # proceed with the specific live video URL from here on
+
     if not HAS_YTDLP:
         logger.error("yt-dlp not installed — cannot check Kick/YouTube streams")
         return False, None, "yt-dlp not installed", False, None
@@ -1269,6 +1449,13 @@ def build_recording_command_ytdlp(url, raw_file, config, verbose, streamlink_deb
     if cookies_file:
         cmd.extend(["--cookies", cookies_file])
 
+    # For YouTube live streams, use the web player client directly.
+    # This avoids the n-challenge JS solver entirely (which produces noisy
+    # warnings when the bundled solver script is out of date), and is
+    # sufficient for live HLS streams where the JS challenge doesn't apply.
+    if "youtube.com" in url or "youtu.be" in url:
+        cmd.extend(["--extractor-args", "youtube:player_client=web"])
+
     if verbose or streamlink_debug:
         cmd.append("--verbose")
 
@@ -1405,7 +1592,7 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
     Detects zero-byte stalls, file growth stalls, max duration limits, and
     file creation timeouts.
     """
-    tool_name = tool_name_override or ("yt-dlp" if platform in ["kick", "youtube", "custom"] else "streamlink")
+    tool_name = tool_name_override or ("yt-dlp" if platform in ["kick", "youtube", "rumble", "custom"] else "streamlink")
     zero_byte_strikes = 0
     file_appeared = False
 
@@ -1488,6 +1675,181 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
     return last_status
 
 
+def _probe_duration(ffmpeg_path, raw_file):
+    """Return the duration of *raw_file* in seconds using ffprobe (or ffmpeg -i).
+
+    Returns None if the duration cannot be determined.
+    """
+    # Derive ffprobe path from ffmpeg path (lives alongside ffmpeg)
+    _ffmpeg_dir = os.path.dirname(ffmpeg_path)
+    if os.name == "nt":
+        ffprobe_path = os.path.join(_ffmpeg_dir, "ffprobe.exe") if _ffmpeg_dir else "ffprobe.exe"
+    else:
+        ffprobe_path = os.path.join(_ffmpeg_dir, "ffprobe") if _ffmpeg_dir else "ffprobe"
+    try:
+        result = subprocess.run(
+            [ffprobe_path, "-v", "error",
+             "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1",
+             raw_file],
+            capture_output=True, text=True, timeout=15,
+        )
+        val = result.stdout.strip()
+        if val and val != "N/A":
+            return float(val)
+    except Exception:
+        pass
+    # Fallback: parse "Duration: HH:MM:SS.ss" from ffmpeg -i stderr
+    try:
+        result = subprocess.run(
+            [ffmpeg_path, "-i", raw_file, "-hide_banner"],
+            capture_output=True, text=True, timeout=15,
+        )
+        import re as _re
+        m = _re.search(r"Duration:\s*(\d+):(\d{2}):(\d{2})\.(\d+)", result.stderr)
+        if m:
+            h, mn, s, cs = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+            return h * 3600 + mn * 60 + s + cs / 100
+    except Exception:
+        pass
+    return None
+
+
+def _run_remux_cmd(ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file, logger, timeout,
+                   file_size, label="Remux"):
+    """Run a single ffmpeg remux command, streaming progress to the logger.
+
+    ffmpeg is invoked with ``-progress pipe:1 -stats_period 5`` so it writes
+    structured key=value progress lines to stdout every 5 seconds.  Errors
+    still go to stderr.  A reader thread collects both streams; the main thread
+    waits for the process to finish (or timeout).
+
+    Progress log lines are emitted:
+      • Every 10 percentage-points of completion (10 %, 20 %, … 90 %)
+      • OR at least every 60 seconds if the file is very large and slow
+
+    Returns ``(returncode, stderr_text)``.
+    """
+    import re as _re
+
+    # Probe source duration so we can compute % complete from out_time_ms.
+    total_secs = _probe_duration(ffmpeg_path, raw_file)
+
+    # Inject progress reporting into the command.  Insert before the output
+    # path (last positional argument, just before "-y").
+    progress_flags = ["-progress", "pipe:1", "-stats_period", "5"]
+    # Replace "-loglevel error" with just error-level logging (keep stderr clean)
+    cmd = list(ffmpeg_cmd)
+    # Insert progress flags right before the output file ("-y" is last; output
+    # file is second-to-last)
+    insert_pos = len(cmd) - 2  # before <output> -y
+    cmd = cmd[:insert_pos] + progress_flags + cmd[insert_pos:]
+
+    stdout_lines = []
+    stderr_lines = []
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    def _read_stream(stream, buf):
+        for line in stream:
+            buf.append(line.rstrip())
+        stream.close()
+
+    t_err = threading.Thread(target=_read_stream, args=(proc.stderr, stderr_lines), daemon=True)
+    t_err.start()
+
+    # ── Progress state ────────────────────────────────────────────────────
+    remux_start   = time.monotonic()
+    last_log_time = remux_start
+    last_log_pct  = -10        # force a log at 0 % on first update
+    current_block = {}         # accumulates key=value pairs for one progress block
+    LOG_PCT_STEP  = 10         # log every N percentage points
+    LOG_TIME_GAP  = 60         # log at least every N seconds (large/slow files)
+
+    def _maybe_log_progress():
+        nonlocal last_log_time, last_log_pct
+
+        out_time_us = current_block.get("out_time_us") or current_block.get("out_time_ms")
+        if out_time_us is None:
+            return
+        try:
+            elapsed_media_us = int(out_time_us)
+        except ValueError:
+            return
+
+        now = time.monotonic()
+        wall_elapsed = now - remux_start
+
+        # Percentage complete (requires known duration)
+        pct = None
+        if total_secs and total_secs > 0:
+            pct = min(100.0, (elapsed_media_us / 1_000_000) / total_secs * 100)
+
+        # Decide whether to emit a log line
+        pct_trigger  = (pct is not None) and (pct - last_log_pct >= LOG_PCT_STEP)
+        time_trigger = (now - last_log_time) >= LOG_TIME_GAP
+
+        if not (pct_trigger or time_trigger):
+            return
+
+        # Build the progress message
+        speed_str = current_block.get("speed", "").strip()
+
+        if pct is not None:
+            bar = text_progress_bar(pct, width=10)
+            # ETA from wall time + pct
+            if pct > 1:
+                total_est = wall_elapsed / (pct / 100)
+                eta_secs  = max(0, total_est - wall_elapsed)
+                eta_str   = f"ETA {format_elapsed(eta_secs)}"
+            else:
+                eta_str = "ETA calculating…"
+            msg = f"{label}: {bar}  speed={speed_str}  {eta_str}"
+        else:
+            # No duration info — show elapsed wall time and speed only
+            media_secs = elapsed_media_us / 1_000_000
+            msg = (f"{label}: processed {format_elapsed(media_secs)} of stream  "
+                   f"speed={speed_str}  wall={format_elapsed(wall_elapsed)}")
+
+        logger.info(msg)
+        last_log_time = now
+        if pct is not None:
+            last_log_pct = pct
+
+    # ── Read stdout (ffmpeg progress blocks) ─────────────────────────────
+    for line in proc.stdout:
+        line = line.rstrip()
+        stdout_lines.append(line)
+        if "=" in line:
+            key, _, val = line.partition("=")
+            current_block[key.strip()] = val.strip()
+            if key.strip() == "progress":
+                # "progress=continue" or "progress=end" marks end of a block
+                _maybe_log_progress()
+                if val.strip() == "end":
+                    current_block = {}
+                else:
+                    current_block = {}
+    proc.stdout.close()
+
+    # Wait for process with timeout
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        t_err.join(timeout=5)
+        return -1, "\n".join(stderr_lines)
+
+    t_err.join(timeout=5)
+    return proc.returncode, "\n".join(stderr_lines)
+
+
 def remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, timeout=600):
     """Remux recorded .ts file to MP4 format."""
     # Probe for timed_id3 codec (common in Twitch streams)
@@ -1518,12 +1880,20 @@ def remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, timeout=600):
             "-loglevel", "error", mp4_file, "-y",
         ]
 
+    file_size = os.path.getsize(raw_file) if os.path.exists(raw_file) else 0
     logger.info("Starting remux...")
 
     try:
-        result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=timeout)
+        returncode, stderr_text = _run_remux_cmd(
+            ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file,
+            logger, timeout, file_size, label="Remux"
+        )
 
-        if result.returncode == 0 and os.path.exists(mp4_file):
+        if returncode == -1:
+            logger.error("Remux timed out")
+            return False, 0, "timeout"
+
+        if returncode == 0 and os.path.exists(mp4_file):
             mp4_size = os.path.getsize(mp4_file)
             if mp4_size > 5 * 1024**2:
                 logger.info(f"Remux successful: {human_size(mp4_size)}")
@@ -1533,10 +1903,10 @@ def remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, timeout=600):
                 return False, mp4_size, "output too small"
         else:
             import ctypes
-            signed_code = ctypes.c_int32(result.returncode).value
-            logger.error(f"Remux failed — returncode: {result.returncode} (signed: {signed_code})")
-            if result.stderr:
-                logger.error(f"FFmpeg stderr: {result.stderr}")
+            signed_code = ctypes.c_int32(returncode).value
+            logger.error(f"Remux failed — returncode: {returncode} (signed: {signed_code})")
+            if stderr_text:
+                logger.error(f"FFmpeg stderr: {stderr_text}")
 
             # Fallback: strip metadata streams
             if signed_code == -22 or has_timed_id3 is False:
@@ -1548,28 +1918,29 @@ def remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, timeout=600):
                     "-loglevel", "error", mp4_file, "-y",
                 ]
                 try:
-                    fb = subprocess.run(fallback_cmd, capture_output=True, text=True, timeout=timeout)
-                    if fb.returncode == 0 and os.path.exists(mp4_file):
+                    fb_code, fb_stderr = _run_remux_cmd(
+                        fallback_cmd, ffmpeg_path, raw_file, mp4_file,
+                        logger, timeout, file_size, label="Fallback remux"
+                    )
+                    if fb_code == 0 and os.path.exists(mp4_file):
                         mp4_size = os.path.getsize(mp4_file)
                         if mp4_size > 5 * 1024**2:
                             logger.info(f"Fallback remux successful: {human_size(mp4_size)}")
                             return True, mp4_size, None
-                    logger.error(f"Fallback remux also failed: {fb.returncode}")
-                    if fb.stderr:
-                        logger.error(f"Fallback stderr: {fb.stderr}")
+                    logger.error(f"Fallback remux also failed: {fb_code}")
+                    if fb_stderr:
+                        logger.error(f"Fallback stderr: {fb_stderr}")
                 except Exception as e:
                     logger.error(f"Fallback remux error: {e}")
             return False, 0, f"code {signed_code}"
 
-    except subprocess.TimeoutExpired:
-        logger.error("Remux timed out")
-        return False, 0, "timeout"
     except FileNotFoundError:
         logger.error("ffmpeg not found in PATH")
         return False, 0, "ffmpeg not found"
     except Exception as e:
         logger.error(f"Remux error: {e}")
         return False, 0, str(e)
+
 
 
 def save_metadata(mp4_file, username, platform, start_time_str, duration_seconds, title=None):
@@ -1667,6 +2038,8 @@ def record_worker(args):
                 url = f"https://youtube.com/watch?v={username}"
         else:
             url = f"https://youtube.com/@{username}/live"
+    elif platform == "rumble":
+        url = f"https://rumble.com/c/{username}"
     elif platform == "custom":
         # Custom: the username IS the full URL
         url = username
@@ -1746,6 +2119,19 @@ def record_worker(args):
                     if resolved_url:
                         recording_url = resolved_url
                         logger.info(f"Using resolved URL for recording: {recording_url}")
+            elif platform == "rumble":
+                is_live, stream_title, rumble_live_url, error = check_stream_rumble_html(username, logger, stream_check_timeout, cookies_file)
+                if is_live and rumble_live_url:
+                    # HTML scraper found the live video page URL.
+                    # Pass it directly to yt-dlp (single video page — works fine).
+                    recording_url = rumble_live_url
+                    logger.info(f"Rumble live video URL: {recording_url}")
+                    # Use yt-dlp to confirm live status and get the stream title
+                    is_live, stream_title, error, need_impersonate, resolved_url = check_stream_ytdlp(
+                        rumble_live_url, logger, stream_check_timeout, cookies_file
+                    )
+                    if resolved_url:
+                        recording_url = resolved_url
             elif platform in ["youtube", "custom"]:
                 is_live, stream_title, error, need_impersonate, resolved_url = check_stream_ytdlp(url, logger, stream_check_timeout, cookies_file)
                 # If yt-dlp resolved to a different URL (e.g. Rumble channel -> video),
@@ -1830,7 +2216,7 @@ def record_worker(args):
                 # Use streamlink for Kick — it has a JS challenge solver for
                 # Cloudflare that yt-dlp lacks.  Same approach as Twitch.
                 record_cmd = build_recording_command_streamlink(url, raw_file, quality, platform, config, verbose, streamlink_debug)
-            elif platform in ["youtube", "custom"]:
+            elif platform in ["youtube", "rumble", "custom"]:
                 record_cmd = build_recording_command_ytdlp(recording_url, raw_file, config, verbose,
                                                            streamlink_debug, cookies_file,
                                                            impersonate=need_impersonate)
@@ -1871,7 +2257,7 @@ def record_worker(args):
 
             exit_code = proc.returncode
             elapsed = time.monotonic() - start_time
-            tool_name = "yt-dlp" if platform in ["kick", "youtube", "custom"] else "streamlink"
+            tool_name = "yt-dlp" if platform in ["kick", "youtube", "rumble", "custom"] else "streamlink"
             logger.info(f"{tool_name} exited with code: {exit_code}")
 
             # If the recording ended on its own (not user-initiated stop) and
@@ -2090,7 +2476,7 @@ class BackgroundCleaner:
         found_any = False
         found_locked = False
 
-        for platform in ["twitch", "youtube", "kick", "custom"]:
+        for platform in ["twitch", "youtube", "kick", "rumble", "custom"]:
             platform_dir = os.path.join(self.recorded_base, platform)
             if not os.path.exists(platform_dir):
                 continue
@@ -2483,7 +2869,7 @@ class StreamRecorder:
         min_file_size_mb = self.config.getfloat('Recording', 'min_file_size_mb')
         processed_count = 0
 
-        for platform in ["twitch", "youtube", "kick", "custom"]:
+        for platform in ["twitch", "youtube", "kick", "rumble", "custom"]:
             platform_dir = os.path.join(self.recorded_base, platform)
             if not os.path.exists(platform_dir):
                 continue
@@ -3139,7 +3525,7 @@ def main_gui(config):
     platform_label.pack(side=tk.LEFT)
     platform_var = tk.StringVar(value="kick")
     ttk.Combobox(platform_frame, textvariable=platform_var,
-                 values=["kick", "twitch", "youtube", "custom"], state="readonly", width=10).pack(side=tk.LEFT, padx=6)
+                 values=["kick", "twitch", "youtube", "rumble", "custom"], state="readonly", width=10).pack(side=tk.LEFT, padx=6)
 
     entry = tk.Entry(frame_left, width=34, font=("Segoe UI", 10), borderwidth=0, relief="flat")
     entry.pack(pady=6)
@@ -3173,7 +3559,9 @@ def main_gui(config):
         ch_tree.insert("", tk.END, values=(CHECK_ON, ch_name), tags=("enabled",))
         dot_canvas.after(20, _redraw_dot_canvas)
         save_channels()
-        if recorder:
+        if recorder and recorder.is_running:
+            recorder.start_channel(ch_name)
+        elif recorder:
             recorder.status_dict[ch_name] = {"status": "Initializing", "detail": "", "size": "", "time": ""}
         entry.delete(0, tk.END)
 
