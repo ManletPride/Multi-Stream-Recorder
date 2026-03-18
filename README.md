@@ -1,12 +1,12 @@
 # Multi-Stream Recorder
 
-A desktop application for simultaneously recording live streams from **Kick**, **Twitch**, **YouTube**, **Rumble**, and any site supported by yt-dlp. Set it up, press record, and walk away — it monitors channels, auto-records when they go live, and produces clean MP4 files.
+A desktop application for simultaneously recording live streams from **Kick**, **Twitch**, **YouTube**, **Rumble**, **Fishtank.live**, and any site supported by yt-dlp. Set it up, press record, and walk away — it monitors channels, auto-records when they go live, and produces clean MP4 files.
 
 ![Dark Mode Screenshot](screenshots/dark-mode.png)
 
 ## Features
 
-* **Multi-platform** — Record from Kick, Twitch, YouTube Live, Rumble, and 1,800+ sites via custom URLs
+* **Multi-platform** — Record from Kick, Twitch, YouTube Live, Rumble, Fishtank.live, and 1,800+ sites via custom URLs
 * **Concurrent recording** — Monitor and record multiple streams simultaneously
 * **Automatic detection** — Polls channels and starts recording the moment a stream goes live
 * **Smart polling** — Configurable check intervals with jitter to avoid rate limiting; exponential backoff on errors only
@@ -169,8 +169,10 @@ E:\Streams\
 │   │   └── saruei\
 │   ├── youtube\
 │   │   └── OhDough\
-│   └── custom\
-│       └── rumble\
+│   ├── custom\
+│   │   └── rumble\
+│   └── fishtank\
+│       └── director\
 ├── Processed\             # Remuxed MP4 files
 │   ├── kick\
 │   ├── twitch\
@@ -234,6 +236,65 @@ The GUI includes a **Polling** dropdown to switch between Relaxed (5 min), Norma
 
 **Program won't close** — If the window is unresponsive, use Ctrl+Q. The program uses a multi-layered shutdown: graceful stop → process tree kill → orphan cleanup → os.\_exit as a final backstop.
 
+
+## Fishtank.live
+
+[Fishtank.live](https://www.fishtank.live/) is a reality TV live streaming site with multiple camera feeds broadcasting simultaneously. MSR supports recording any of its cameras with automatic authentication and live detection.
+
+### Setup
+
+Add a `[Fishtank]` section to your `config.ini` with your fishtank.live account credentials:
+
+```ini
+[Fishtank]
+email = your@email.com
+password = yourpassword
+```
+
+A free account is sufficient. The program handles authentication automatically — it logs in, obtains a 24-hour stream token, and refreshes it as needed. No manual cookie export is required.
+
+### Adding Cameras
+
+Select **fishtank** from the platform dropdown and enter a camera name:
+
+```
+fishtank:director
+fishtank:kitchen
+fishtank:bar
+```
+
+Or use raw stream IDs directly (e.g. `dirc-5`, `dmrm-5`) if you know them.
+
+### Available Cameras
+
+All Season 5 cameras are supported:
+
+| Camera name | Room |
+|---|---|
+| `director` | Director Mode |
+| `dorm` | Dorm |
+| `confessional` | Confessional |
+| `balcony` | Balcony |
+| `foyer` | Foyer |
+| `closet` | Closet |
+| `glassroom` | Glassroom |
+| `cameraman` | Cameraman |
+| `bar` | Bar |
+| `barptz` | Bar PTZ |
+| `corridor` | Corridor |
+| `kitchen` | Kitchen |
+| `jacuzzi` | Jacuzzi |
+| `dining` | Dining Room |
+| `market` | Market |
+| `hallwaydown` | Hallway Down |
+| `hallwayup` | Hallway Up |
+
+Short aliases also work — `cam` for Cameraman, `dirc` for Director, `dmrm` for Dorm, etc. Raw stream IDs like `dirc-5` and `dmrm-5` are accepted directly.
+
+### How It Works
+
+Detection and recording both use fishtank.live's HLS streams served by MistServer. On each poll the program queries the live-streams API to check which cameras are active, then records via ffmpeg's HLS downloader. The JWT token is obtained from the API at login and refreshed automatically before expiry.
+
 ## Platform Notes
 
 **Kick**: Uses streamlink for both detection and recording. Streamlink 8.x includes a built-in Cloudflare JS challenge solver that handles Kick's aggressive bot detection. Cookies are optional. Streams are recorded in 1080p by default. **Important**: Remove any old third-party `kick.py` plugins from `%APPDATA%\streamlink\plugins\` — they override the built-in plugin and break Cloudflare bypass.
@@ -243,6 +304,8 @@ The GUI includes a **Polling** dropdown to switch between Relaxed (5 min), Norma
 **YouTube**: Uses yt-dlp. Cookies are recommended to avoid throttling. YouTube Live DVR streams work but may produce "keepalive request failed" messages in verbose mode — these are harmless and don't affect the recording.
 
 **Rumble**: Uses yt-dlp. Add channels as custom URLs using the channel page format (`https://rumble.com/c/ChannelName`). The program automatically resolves channel pages to the current live video URL. If Cloudflare blocks access, the program falls back to browser impersonation via `curl_cffi` (install with `pip install curl_cffi`). When a Rumble channel is offline, the program correctly detects this without downloading previous VODs.
+
+**Fishtank.live**: Uses ffmpeg's HLS downloader with a token obtained from the Fishtank API. Requires a `[Fishtank]` section in `config.ini` with your account email and password. All Season 5 cameras are supported. The token is valid for 24 hours and refreshes automatically. No cookies required.
 
 **Custom URLs**: Uses yt-dlp, which supports [1,800+ sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md). Direct `.m3u8` HLS links also work. Select "custom" from the platform dropdown and paste the full URL.
 
@@ -255,7 +318,7 @@ The GUI includes a **Polling** dropdown to switch between Relaxed (5 min), Norma
 | yt-dlp | Yes | YouTube, Rumble, custom URL recording |
 | streamlink | Yes | Kick and Twitch stream recording |
 | psutil | Recommended | Clean process management |
-| curl_cffi | Recommended | Rumble Cloudflare bypass |
+| curl_cffi | Recommended | Rumble Cloudflare bypass; Fishtank.live API (HTTP/3) |
 | pystray + Pillow | Optional | System tray icon |
 | plyer | Optional | Desktop notifications |
 
