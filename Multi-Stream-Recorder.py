@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
-__version__ = "1.3.2"
+__version__ = "1.4.0"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -143,6 +143,32 @@ except Exception:
     pass
 
 
+def check_deno():
+    """Check if Deno is installed and return version string or None.
+
+    Deno is an optional but recommended dependency for YouTube recording.
+    yt-dlp uses it to solve YouTube's JS-based 'n challenge' (nsig), which
+    produces stable HLS segment URLs.  Without it, recordings may drop out
+    every ~15 seconds as YouTube serves short-lived URLs to unsolved clients.
+    """
+    try:
+        result = subprocess.run(
+            ["deno", "--version"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            # First line is like "deno 2.3.1"
+            first_line = result.stdout.split('\n')[0]
+            return first_line.replace("deno ", "").split(" ")[0]
+        return None
+    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+        return None
+
+
+DENO_VERSION = check_deno()
+HAS_DENO = DENO_VERSION is not None
+
+
 # ============ CONFIGURATION MANAGEMENT ============
 class Config:
     """Manages application configuration from config.ini"""
@@ -185,6 +211,16 @@ class Config:
             'minimize_to_tray': 'true',
             'notifications': 'true',
             'window_state_file': 'window_state.json',
+        },
+        'Fishtank': {
+            # Email and password for fishtank.live login.
+            # Used by the recorder to obtain a fresh MistServer JWT via
+            # POST /v1/auth/log-in — the only reliable auth method since
+            # the GET /v1/auth session-check endpoint returns null once the
+            # 15-minute Supabase access token expires.
+            # Leave blank to fall back to cookie-jar auth (requires fresh cookies).
+            'email': '',
+            'password': '',
         },
     }
 
@@ -329,6 +365,32 @@ def validate_startup(config):
     if not HAS_PSUTIL:
         warnings.append("psutil not installed — process cleanup may be less reliable.  Install: pip install psutil")
 
+    if not HAS_DENO:
+        # Only warn if YouTube channels are actually enabled — no point warning users
+        # who record Twitch/Kick only.
+        youtube_enabled = False
+        channels_file = config.get('Paths', 'channels_file')
+        if os.path.exists(channels_file):
+            try:
+                with open(channels_file, 'r') as f:
+                    ch_data = json.load(f)
+                youtube_enabled = any(
+                    ch.get('enabled', False) and
+                    (str(ch.get('name', '')).startswith('youtube:') or
+                     not any(str(ch.get('name', '')).startswith(p)
+                             for p in ('twitch:', 'custom:', 'rumble:')))
+                    for ch in ch_data if isinstance(ch, dict)
+                )
+            except Exception:
+                pass
+        if youtube_enabled:
+            warnings.append(
+                "Deno not found in PATH — YouTube n-challenge solving will be degraded.\n"
+                "  Without Deno, yt-dlp cannot solve YouTube's JS challenge, which may cause\n"
+                "  recordings to drop out every ~15s as YouTube serves short-lived stream URLs.\n"
+                "  Install Deno: https://deno.com  (then restart MSR)"
+            )
+
     return errors, warnings
 
 
@@ -378,6 +440,23 @@ def validate_channel_name(name, platform, existing_channels):
 
     if platform in ["kick", "youtube", "rumble"] and not HAS_YTDLP:
         return False, f"Cannot add {platform.title()} channels — yt-dlp is not installed.\n  Install: pip install yt-dlp"
+
+    if platform == "fishtank":
+        normalised = name.lower().replace(" ", "").replace("-", "")
+        all_aliases = set(FishtankAuth.CAMERA_ALIASES.keys()) | set(FishtankAuth.CAMERA_ALIASES.values())
+        if normalised not in all_aliases and name not in all_aliases:
+            known = ", ".join(sorted(
+                k for k in FishtankAuth.CAMERA_ALIASES
+                if not k.endswith("-5")
+            ))
+            return False, (
+                f"Unknown fishtank camera '{name}'.\n"
+                f"  Known names: {known}\n"
+                f"  Or use the raw stream ID (e.g. dirc-5, dmrm-5)"
+            )
+        ch_key = f"fishtank:{name}"
+        if ch_key in existing_channels:
+            return False, f"'{ch_key}' is already in the list."
 
     return True, None
 
@@ -545,6 +624,8 @@ def validate_cookies(cookies_path):
         'sbr',
         # Rumble
         'a_s',
+        # Fishtank
+        'sb-wcsaaupukpdmqdjcgaoo-auth-token',
     }
 
     now = time.time()
@@ -648,6 +729,8 @@ def get_cookie_domain_for_channel(channel_key):
         return 'twitch.tv'
     elif channel_key.startswith('youtube:'):
         return 'youtube.com'
+    elif channel_key.startswith('fishtank:'):
+        return 'fishtank.live'
     elif channel_key.startswith('custom:'):
         url = channel_key.split(':', 1)[1]
         try:
@@ -1364,6 +1447,631 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
         return False, None, str(e), False, None
 
 
+class FishtankAuth:
+    """Manages JWT authentication for fishtank.live streams.
+
+    Fishtank uses MistServer for streaming.  Every stream URL requires a
+    short-lived JWT obtained from api.fishtank.live/v1/auth.  This class
+    fetches and caches the token, refreshing it only when it has expired
+    (tokens are valid for ~24 hours).
+
+    Usage (in a worker):
+        auth = FishtankAuth(cookies_file, logger, email="", password="")
+        jwt = auth.get_jwt()          # returns None on failure
+        url = auth.build_stream_url("dirc-5")
+    """
+
+    # Base URLs
+    _AUTH_URL    = "https://api.fishtank.live/v1/auth"
+    _LOGIN_URL   = "https://api.fishtank.live/v1/auth/log-in"
+    _STREAMS_URL = "https://api.fishtank.live/v1/live-streams"
+    # Stream host is read dynamically from the loadBalancer API field.
+    # Fishtank rotates between streams-b, streams-c, etc. per session.
+    _DEFAULT_STREAM_HOST = "streams-c.fishtank.live"
+
+    # Stream IDs recognised as fishtank camera names
+    CAMERA_ALIASES = {
+        "director":   "dirc-5",
+        "dirc":       "dirc-5",
+        "dorm":       "dmrm-5",
+        "dmrm":       "dmrm-5",
+        "confessional":"cfsl-5",
+        "cfsl":       "cfsl-5",
+        "balcony":    "bkny-5",
+        "bkny":       "bkny-5",
+        "foyer":      "foyr-5",
+        "foyr":       "foyr-5",
+        "kitchen":    "ktch-5",
+        "ktch":       "ktch-5",
+        "bar":        "brrr-5",
+        "brrr":       "brrr-5",
+        "jacuzzi":    "jckz-5",
+        "jckz":       "jckz-5",
+        "dining":     "dnrm-5",
+        "dnrm":       "dnrm-5",
+        "glassroom":  "gsrm-5",
+        "gsrm":       "gsrm-5",
+        "corridor":   "codr-5",
+        "codr":       "codr-5",
+        "hallwayup":  "hwup-5",
+        "hwup":       "hwup-5",
+        "hallwaydown":"hwdn-5",
+        "hwdn":       "hwdn-5",
+        "closet":     "dmcl-5",
+        "dmcl":       "dmcl-5",
+        "cameraman":  "cameraman-5",
+        "cam":        "cameraman-5",
+        "barptz":     "brpz-5",
+        "brpz":       "brpz-5",
+        "market":     "mrke-5",
+        "mrke":       "mrke-5",
+    }
+
+    def __init__(self, cookies_file, logger, email="", password=""):
+        self._cookies_file = cookies_file
+        self._logger = logger
+        self._email = email
+        self._password = password
+        self._jwt = None
+        self._jwt_exp = 0       # unix timestamp when current JWT expires
+        self._stream_host = self._DEFAULT_STREAM_HOST  # fallback host (any online stream)
+        self._stream_hosts = {}  # per-stream hosts from loadBalancer, e.g. {"dirc-5": "streams-f.fishtank.live"}
+        self._all_stream_names = {}  # all stream id→name from API, populated by get_live_streams
+
+    # ── Public interface ──────────────────────────────────────────────────
+
+    def resolve_stream_id(self, name):
+        """Resolve a camera name or raw stream-ID to a canonical stream ID.
+
+        Accepts:
+            - Canonical IDs:   "dirc-5", "dmrm-5", …
+            - Friendly names:  "director", "dorm", "bar", …
+        Returns the canonical ID string, or the original value if not found.
+        """
+        normalised = name.lower().replace(" ", "").replace("-", "")
+        return self.CAMERA_ALIASES.get(normalised, name)
+
+    def get_jwt(self, force_refresh=False):
+        """Return a valid JWT, refreshing from the API if needed.
+
+        Returns the JWT string, or None if authentication failed.
+        """
+        now = time.time()
+        # Refresh if expired (with 5-minute buffer) or forced
+        if force_refresh or self._jwt is None or now >= (self._jwt_exp - 300):
+            self._refresh()
+        return self._jwt
+
+    def build_stream_url(self, stream_id, quality="maxbps"):
+        """Build the MistServer TS progressive HTTP URL for a given stream ID.
+
+        Returns (url, jwt) tuple, or (None, None) if auth failed.
+
+        MistServer serves HLS (confirmed from browser HAR):
+
+            https://<host>/hls/live+<stream_id>/index.m3u8?jwt=<token>
+
+        Note: uses literal + (not %2b) and ?jwt= (not ?tkn=).
+        The same 24h live_stream_token is used for all endpoints.
+        """
+        jwt = self.get_jwt()
+        if not jwt:
+            return None, None
+        # Use per-stream host if known, fall back to global cached host.
+        # Director Mode (dirc-5) is often on a different node than the other
+        # streams — always use the stream-specific host from loadBalancer.
+        host = self._stream_hosts.get(stream_id, self._stream_host)
+        # HLS master playlist — confirmed from browser HAR as the actual
+        # protocol used. Uses literal + (not %2b) and ?jwt= parameter.
+        url = f"https://{host}/hls/live+{stream_id}/index.m3u8?jwt={jwt}"
+        return url, jwt
+
+    def get_live_streams(self):
+        """Fetch the list of currently-live stream IDs from the API.
+
+        Host discovery uses the thumbnail endpoint rather than the loadBalancer
+        API field.  The loadBalancer field rotates to a different node on every
+        API call (round-robin) and that node may not be actually serving the
+        stream.  The thumbnail endpoint (/live%2B<id>.jpeg) is served directly
+        by the real streaming node with no auth required, so a 200 response
+        from a given host means that host is currently serving the stream.
+
+        Returns a dict mapping stream_id → stream_name, or {} on failure.
+        """
+        raw = self._fetch_json(self._STREAMS_URL)
+        if raw is None:
+            return {}
+        try:
+            data = json.loads(raw)
+            status = data.get("liveStreamStatus", {})
+            lb = data.get("loadBalancer", {})
+            streams = {}
+            all_stream_names = {}
+            for s in data.get("liveStreams", []):
+                sid = s["id"]
+                all_stream_names[sid] = s["name"]
+                if status.get(sid) == "online":
+                    streams[sid] = s["name"]
+
+            self._all_stream_names = all_stream_names
+
+            # Discover the real serving host for each online stream via thumbnail.
+            # Use the loadBalancer host as the starting point for the thumbnail
+            # request — the thumbnail always responds from the real node.
+            import urllib.request, urllib.error
+            for sid in list(streams.keys()):
+                candidate_host = lb.get(sid, self._stream_host)
+                thumb_url = (
+                    f"https://{candidate_host}/live%2B{sid}.jpeg"
+                )
+                try:
+                    req = urllib.request.Request(
+                        thumb_url, method="HEAD",
+                        headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        # The response URL's host is the real serving node
+                        real_host = resp.url.split("//")[1].split("/")[0]
+                        if real_host and "fishtank.live" in real_host:
+                            self._stream_hosts[sid] = real_host
+                            self._stream_host = real_host
+                        else:
+                            # Responded from candidate_host directly
+                            self._stream_hosts[sid] = candidate_host
+                            self._stream_host = candidate_host
+                except Exception:
+                    # Fallback: trust the loadBalancer host as-is
+                    if lb.get(sid):
+                        self._stream_hosts[sid] = lb[sid]
+                        self._stream_host = lb[sid]
+
+            if self._stream_host != self._DEFAULT_STREAM_HOST:
+                self._logger.info(
+                    f"[fishtank] Stream serving host: {self._stream_host}")
+            return streams
+        except Exception as e:
+            self._logger.warning(f"[fishtank] Failed to parse live streams: {e}")
+            return {}
+
+    def _fetch_json(self, url):
+        """Fetch a URL and return the response body as a string.
+
+        Tries curl_cffi first (handles HTTP/3, Cloudflare, better TLS),
+        falls back to urllib.  Returns None on failure.
+        """
+        headers = self._common_headers()
+
+        # ── curl_cffi (preferred — handles h3 and Cloudflare) ─────────────
+        if HAS_CURL_CFFI:
+            try:
+                from curl_cffi import requests as cffi_requests
+                resp = cffi_requests.get(
+                    url, headers=headers,
+                    impersonate="chrome", timeout=15,
+                )
+                if resp.status_code == 200:
+                    return resp.text
+                self._logger.warning(
+                    f"[fishtank] curl_cffi HTTP {resp.status_code} for {url}")
+                return None
+            except Exception as e:
+                self._logger.warning(
+                    f"[fishtank] curl_cffi fetch failed ({e}), retrying with urllib")
+
+        # ── urllib fallback ────────────────────────────────────────────────
+        import urllib.request, urllib.error
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return resp.read().decode("utf-8")
+        except Exception as e:
+            self._logger.warning(f"[fishtank] Failed to fetch {url}: {e}")
+            return None
+
+    # ── Private helpers ───────────────────────────────────────────────────
+
+    def _extract_supabase_jwt(self):
+        """Extract the Supabase access token from cookies.txt.
+
+        The cookie named 'sb-wcsaaupukpdmqdjcgaoo-auth-token' holds a
+        JSON-encoded array [access_token, refresh_token] stored as a
+        URL-encoded string.  We parse it out and return the access token.
+
+        Returns the JWT string, or None if not found / already expired.
+        """
+        import urllib.parse, base64
+        if not self._cookies_file or not os.path.isfile(self._cookies_file):
+            return None
+        try:
+            with open(self._cookies_file, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split('\t')
+                    if len(parts) < 7:
+                        continue
+                    name = parts[5]
+                    if 'sb-' in name and 'auth-token' in name:
+                        value = urllib.parse.unquote(parts[6])
+                        # Value is a JSON array: ["<access_token>", "<refresh_token>"]
+                        tokens = json.loads(value)
+                        if isinstance(tokens, list) and len(tokens) >= 1:
+                            access_token = tokens[0]
+                            # Quick expiry check — don't bother sending an
+                            # obviously expired token
+                            exp = self._decode_jwt_exp(access_token)
+                            if exp < time.time():
+                                self._logger.warning(
+                                    "[fishtank] Supabase access token in cookies.txt "
+                                    "has expired — please re-export cookies from your "
+                                    "browser while logged into fishtank.live"
+                                )
+                                return None
+                            return access_token
+        except Exception as e:
+            self._logger.warning(f"[fishtank] Could not extract Supabase JWT from cookies: {e}")
+        return None
+
+    def _refresh(self):
+        """Fetch a fresh MistServer JWT from the fishtank auth endpoint.
+
+        Authentication strategy (in priority order):
+          1. POST /v1/auth/log-in with email+password from config.ini — the
+             only method that works reliably regardless of cookie freshness.
+             The GET /v1/auth session-check endpoint returns {"session":null}
+             once the 15-minute Supabase access token expires, even with
+             valid cookies.
+          2. Authorization: Bearer header using the Supabase token extracted
+             from cookies.txt (works only within 15 min of cookie export).
+          3. Cookie jar fallback (legacy).
+
+        If all paths fail, self._jwt is set to None and the error is logged.
+        """
+        import urllib.request, urllib.error, http.cookiejar
+        self._logger.info("[fishtank] Refreshing JWT")
+
+        # ── Strategy 1: POST login with email+password (most reliable) ────
+        if self._email and self._password:
+            jwt = self._login_with_credentials()
+            if jwt:
+                self._jwt = jwt
+                self._jwt_exp = self._decode_jwt_exp(jwt)
+                exp_dt = datetime.datetime.fromtimestamp(
+                    self._jwt_exp).strftime("%Y-%m-%d %H:%M:%S")
+                self._logger.info(
+                    f"[fishtank] MistServer JWT obtained via login, "
+                    f"valid for 24h, expires {exp_dt}")
+                return
+            self._logger.warning(
+                "[fishtank] Login with credentials failed — falling back to cookie methods")
+
+        # ── Strategy 2: Authorization: Bearer header ──────────────────────
+        supabase_token = self._extract_supabase_jwt()
+        if supabase_token:
+            try:
+                headers = self._common_headers()
+                headers["Authorization"] = f"Bearer {supabase_token}"
+                # Use curl_cffi if available to handle HTTP/3
+                raw_text = None
+                if HAS_CURL_CFFI:
+                    try:
+                        from curl_cffi import requests as cffi_requests
+                        r = cffi_requests.get(
+                            self._AUTH_URL, headers=headers,
+                            impersonate="chrome", timeout=15)
+                        if r.status_code == 200:
+                            raw_text = r.text
+                    except Exception:
+                        pass
+                if raw_text is None:
+                    req = urllib.request.Request(self._AUTH_URL, headers=headers)
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        raw_text = resp.read().decode("utf-8")
+                raw = raw_text
+                data = json.loads(raw)
+                jwt = (
+                    # live_stream_token is the 24h MistServer JWT
+                    (data.get("session") or {}).get("live_stream_token")
+                    or data.get("token") or data.get("jwt")
+                    or data.get("accessToken") or data.get("mistToken")
+                    or (data.get("session") or {}).get("access_token")
+                )
+                if jwt:
+                    self._jwt = jwt
+                    self._jwt_exp = self._decode_jwt_exp(jwt)
+                    exp_dt = datetime.datetime.fromtimestamp(
+                        self._jwt_exp).strftime("%Y-%m-%d %H:%M:%S")
+                    self._logger.info(
+                        f"[fishtank] MistServer JWT obtained via Bearer auth, "
+                        f"valid for 24h, expires {exp_dt}")
+                    return
+                # Auth succeeded but response format unexpected — log all keys
+                # so we can adapt in the future
+                self._logger.warning(
+                    f"[fishtank] Auth response had no recognised token field "
+                    f"(keys: {list(data.keys())}) — raw: {raw[:200]}"
+                )
+                # Fall through to strategy 2
+            except urllib.error.HTTPError as e:
+                self._logger.warning(
+                    f"[fishtank] Bearer auth HTTP {e.code} — falling back to cookie jar")
+            except Exception as e:
+                self._logger.warning(
+                    f"[fishtank] Bearer auth error ({e}) — falling back to cookie jar")
+
+        # ── Strategy 2: Cookie jar (legacy fallback) ──────────────────────
+        try:
+            opener = urllib.request.build_opener()
+            if self._cookies_file and os.path.isfile(self._cookies_file):
+                try:
+                    cj = http.cookiejar.MozillaCookieJar(self._cookies_file)
+                    cj.load(ignore_discard=True, ignore_expires=True)
+                    opener.add_handler(urllib.request.HTTPCookieProcessor(cj))
+                except Exception as ce:
+                    self._logger.warning(
+                        f"[fishtank] Could not load cookies for fallback: {ce}")
+
+            # Try curl_cffi first for h3 support
+            raw = None
+            if HAS_CURL_CFFI:
+                try:
+                    from curl_cffi import requests as cffi_requests
+                    import http.cookiejar as _cj_mod
+                    cffi_headers = self._common_headers()
+                    r2 = cffi_requests.get(
+                        self._AUTH_URL, headers=cffi_headers,
+                        impersonate="chrome", timeout=15)
+                    if r2.status_code == 200:
+                        raw = r2.text
+                except Exception:
+                    pass
+            if raw is None:
+                req = urllib.request.Request(
+                    self._AUTH_URL, headers=self._common_headers())
+                with opener.open(req, timeout=15) as resp:
+                    raw = resp.read().decode("utf-8")
+            data = json.loads(raw)
+            jwt = (
+                # live_stream_token is the 24h MistServer JWT
+                (data.get("session") or {}).get("live_stream_token")
+                or data.get("token") or data.get("jwt")
+                or data.get("accessToken") or data.get("mistToken")
+                or (data.get("session") or {}).get("access_token")
+            )
+            if jwt:
+                self._jwt = jwt
+                self._jwt_exp = self._decode_jwt_exp(jwt)
+                exp_dt = datetime.datetime.fromtimestamp(
+                    self._jwt_exp).strftime("%Y-%m-%d %H:%M:%S")
+                self._logger.info(
+                    f"[fishtank] MistServer JWT obtained via cookie jar, "
+                    f"valid for 24h, expires {exp_dt}")
+                return
+
+            # Both strategies failed — give the user a clear action to take
+            self._logger.error(
+                f"[fishtank] Authentication failed — fishtank returned "
+                f"{raw[:200]}\n"
+                f"  ► Your fishtank.live session has most likely expired.\n"
+                f"  ► Fix: log into fishtank.live in your browser, then "
+                f"re-export cookies.txt via Cookie-Editor and replace "
+                f"E:\\Streams\\cookies.txt with the new file."
+            )
+            self._jwt = None
+
+        except urllib.error.HTTPError as e:
+            self._logger.error(
+                f"[fishtank] Auth HTTP error {e.code}: {e.reason}")
+            self._jwt = None
+        except urllib.error.URLError as e:
+            self._logger.error(f"[fishtank] Auth URL error: {e.reason}")
+            self._jwt = None
+        except Exception as e:
+            self._logger.error(f"[fishtank] Auth unexpected error: {e}")
+            self._jwt = None
+
+    def _login_with_credentials(self):
+        """POST to /v1/auth/log-in with email+password to get a fresh JWT.
+
+        This is the most reliable auth method — it works regardless of cookie
+        freshness and returns a 24h live_stream_token directly.
+
+        Returns the live_stream_token JWT string, or None on failure.
+        """
+        import json as _json
+
+        payload = _json.dumps({
+            "email": self._email,
+            "password": self._password,
+        }).encode("utf-8")
+
+        headers = self._common_headers()
+        headers["Content-Type"] = "application/json"
+
+        try:
+            if HAS_CURL_CFFI:
+                from curl_cffi import requests as cffi_requests
+                resp = cffi_requests.post(
+                    self._LOGIN_URL,
+                    data=payload,
+                    headers=headers,
+                    impersonate="chrome",
+                    timeout=15,
+                )
+                if resp.status_code == 200:
+                    data = _json.loads(resp.text)
+                    return (data.get("session") or {}).get("live_stream_token")
+                self._logger.warning(
+                    f"[fishtank] Login HTTP {resp.status_code}")
+                return None
+
+            # urllib fallback
+            import urllib.request, urllib.error
+            req = urllib.request.Request(
+                self._LOGIN_URL,
+                data=payload,
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+            return (data.get("session") or {}).get("live_stream_token")
+
+        except Exception as e:
+            self._logger.warning(f"[fishtank] Login error: {e}")
+            return None
+
+    @staticmethod
+    def _common_headers():
+        return {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json",
+            "Origin": "https://www.fishtank.live",
+            "Referer": "https://www.fishtank.live/",
+        }
+
+    @staticmethod
+    def _decode_jwt_exp(jwt_string):
+        """Extract the 'exp' claim from a JWT without verifying the signature.
+
+        Returns a unix timestamp, defaulting to (now + 23h) if decoding fails.
+        """
+        import base64
+        try:
+            payload_b64 = jwt_string.split(".")[1]
+            # Add padding if needed
+            padding = 4 - len(payload_b64) % 4
+            if padding != 4:
+                payload_b64 += "=" * padding
+            payload = json.loads(base64.b64decode(payload_b64).decode("utf-8"))
+            return int(payload.get("exp", time.time() + 82800))
+        except Exception:
+            return int(time.time() + 82800)  # fallback: treat as valid for 23h
+
+
+def check_stream_fishtank(stream_id, auth, logger, timeout=20):
+    """Check if a fishtank.live camera stream is currently live.
+
+    Primary check: /v1/live-streams API liveStreamStatus field.
+    Fallback check: some streams (e.g. dirc-5 / Director Mode) are served
+    from a dedicated node and never appear in liveStreamStatus even when live.
+    For those we probe the stream URL directly with a GET request and treat
+    a non-404 response as live.
+
+    Args:
+        stream_id: Canonical stream ID (e.g. "dirc-5") or friendly name.
+        auth: A FishtankAuth instance.
+        logger: Logger adapter.
+        timeout: Request timeout in seconds.
+
+    Returns (is_live: bool, stream_name: str | None, error: str | None).
+    """
+    import urllib.request, urllib.error
+
+    resolved_id = auth.resolve_stream_id(stream_id)
+
+    # Fetch the streams list — also populates auth._all_stream_names and
+    # caches the load balancer host from any online stream
+    live_streams = auth.get_live_streams()
+    if not live_streams and not auth._all_stream_names:
+        return False, None, "failed to reach fishtank API"
+
+    # Look up the friendly name for logging
+    stream_name = (
+        live_streams.get(resolved_id)
+        or auth._all_stream_names.get(resolved_id)
+        or resolved_id
+    )
+
+    # ── Fast path: stream is in liveStreamStatus ─────────────────────────
+    if resolved_id in live_streams:
+        logger.info(f"[fishtank] Stream '{resolved_id}' ({stream_name}) is listed as online")
+        jwt = auth.get_jwt()
+        if not jwt:
+            return False, stream_name, "could not obtain JWT for stream"
+        return True, stream_name, None
+
+    # ── Fallback: stream absent from liveStreamStatus — probe directly ────
+    # Director Mode and some other streams are never in liveStreamStatus even
+    # when live (confirmed from browser HAR: dirc-5 absent from status dict
+    # while clearly playing in browser).  We attempt a direct GET to the
+    # stream URL; anything other than 404 means the stream is accessible.
+    logger.info(
+        f"[fishtank] Stream '{resolved_id}' not in status list — probing directly")
+
+    jwt = auth.get_jwt()
+    if not jwt:
+        return False, stream_name, "could not obtain JWT for probe"
+
+    probe_host = auth._stream_hosts.get(resolved_id, auth._stream_host)
+    # Probe the HLS playlist — same endpoint we record from
+    probe_url = f"https://{probe_host}/hls/live+{resolved_id}/index.m3u8?jwt={jwt}"
+    try:
+        req = urllib.request.Request(
+            probe_url, method="GET",
+            headers=FishtankAuth._common_headers(),
+        )
+        # We only need the response headers — close immediately
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        resp.close()
+        logger.info(
+            f"[fishtank] Stream '{resolved_id}' probe succeeded "
+            f"(HTTP {resp.status}) — treating as live")
+        return True, stream_name, None
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            logger.info(
+                f"[fishtank] Stream '{resolved_id}' probe returned 404 — offline")
+            return False, None, None
+        # Any other HTTP status (200, 206, 302…) means the stream exists
+        logger.info(
+            f"[fishtank] Stream '{resolved_id}' probe HTTP {e.code} — treating as live")
+        return True, stream_name, None
+    except urllib.error.URLError as e:
+        logger.warning(
+            f"[fishtank] Stream '{resolved_id}' probe failed: {e.reason}")
+        return False, None, str(e.reason)
+    except Exception as e:
+        logger.warning(
+            f"[fishtank] Stream '{resolved_id}' probe error: {e}")
+        return False, None, str(e)
+
+
+def build_recording_command_fishtank(stream_url, raw_file, config, verbose):
+    """Build an ffmpeg command to record a fishtank MistServer stream.
+
+    We use ffmpeg directly rather than yt-dlp because the URL already contains
+    the token as ?jwt= and yt-dlp's generic extractor would mangle query params.
+
+    URL format (HLS master playlist, confirmed from browser HAR):
+        https://<host>/hls/live+<stream_id>/index.m3u8?jwt=<24h_jwt>
+
+    ffmpeg follows the HLS playlist, fetches segments, and writes MPEG-TS (.ts).
+    """
+    ffmpeg_path = config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg')
+    loglevel = "verbose" if verbose else "warning"
+    cmd = [
+        ffmpeg_path,
+        "-loglevel", loglevel,
+        "-protocol_whitelist", "file,http,https,tcp,tls,crypto,hls",
+        "-headers", (
+            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36\r\n"
+            "Origin: https://www.fishtank.live\r\n"
+            "Referer: https://www.fishtank.live/\r\n"
+        ),
+        "-i", stream_url,
+        "-c", "copy",
+        "-f", "mpegts",
+        raw_file,
+    ]
+    return cmd
+
+
 def check_stream_streamlink(url, logger, timeout=30):
     """Check if Twitch stream is live using streamlink.
 
@@ -2040,6 +2748,10 @@ def record_worker(args):
             url = f"https://youtube.com/@{username}/live"
     elif platform == "rumble":
         url = f"https://rumble.com/c/{username}"
+    elif platform == "fishtank":
+        # username is the camera name / stream ID (e.g. "director", "dirc-5")
+        # The real URL is built per-poll using the JWT; store a placeholder
+        url = f"fishtank:{username}"
     elif platform == "custom":
         # Custom: the username IS the full URL
         url = username
@@ -2073,6 +2785,18 @@ def record_worker(args):
     reconnect_mode = False
     reconnect_deadline = 0  # monotonic timestamp when grace period expires
     RECONNECT_POLL_INTERVAL = 15  # seconds between checks during grace period
+
+    # Fishtank: create a per-worker auth manager that caches the JWT
+    fishtank_auth = None
+    if platform == "fishtank":
+        ft_email = config.get('Fishtank', 'email', fallback='')
+        ft_password = config.get('Fishtank', 'password', fallback='')
+        fishtank_auth = FishtankAuth(cookies_file, logger,
+                                     email=ft_email, password=ft_password)
+        auth_method = "email+password" if (ft_email and ft_password) else "cookie jar"
+        logger.info(
+            f"[fishtank] Auth manager initialised for stream '{username}' "
+            f"(auth method: {auth_method})")
 
     # Initial stagger: randomize the very first check so workers don't all fire at once
     initial_delay = random.uniform(0, min(poll_base_seconds, 10))
@@ -2139,6 +2863,19 @@ def record_worker(args):
                 if resolved_url:
                     recording_url = resolved_url
                     logger.info(f"Using resolved URL for recording: {recording_url}")
+            elif platform == "fishtank":
+                stream_id = fishtank_auth.resolve_stream_id(username)
+                is_live, stream_title, error = check_stream_fishtank(
+                    stream_id, fishtank_auth, logger, stream_check_timeout
+                )
+                if is_live:
+                    # Build the authenticated HLS URL fresh each time we're about to record
+                    hls_url, _ = fishtank_auth.build_stream_url(stream_id)
+                    if hls_url:
+                        recording_url = hls_url
+                    else:
+                        is_live = False
+                        error = "could not build stream URL (JWT missing)"
             else:
                 is_live, stream_title, error = check_stream_streamlink(url, logger, stream_check_timeout)
 
@@ -2150,7 +2887,7 @@ def record_worker(args):
                 # Exponential backoff for errors (doubles each time, capped)
                 error_sleep_seconds = min(error_sleep_seconds * 2, error_backoff_max_seconds)
                 sleep_time = jittered_sleep(error_sleep_seconds, poll_jitter_percent)
-                logger.warning(f"Error (#{consecutive_errors}) — backing off {sleep_time:.0f}s")
+                logger.warning(f"Error (#{consecutive_errors}): {error} — backing off {sleep_time:.0f}s")
                 time.sleep(sleep_time)
                 continue
 
@@ -2216,6 +2953,9 @@ def record_worker(args):
                 # Use streamlink for Kick — it has a JS challenge solver for
                 # Cloudflare that yt-dlp lacks.  Same approach as Twitch.
                 record_cmd = build_recording_command_streamlink(url, raw_file, quality, platform, config, verbose, streamlink_debug)
+            elif platform == "fishtank":
+                # recording_url was set to the JWT-bearing HLS URL in the check block
+                record_cmd = build_recording_command_fishtank(recording_url, raw_file, config, verbose)
             elif platform in ["youtube", "rumble", "custom"]:
                 record_cmd = build_recording_command_ytdlp(recording_url, raw_file, config, verbose,
                                                            streamlink_debug, cookies_file,
@@ -2257,7 +2997,7 @@ def record_worker(args):
 
             exit_code = proc.returncode
             elapsed = time.monotonic() - start_time
-            tool_name = "yt-dlp" if platform in ["kick", "youtube", "rumble", "custom"] else "streamlink"
+            tool_name = "yt-dlp" if platform in ["kick", "youtube", "rumble", "custom"] else ("ffmpeg" if platform == "fishtank" else "streamlink")
             logger.info(f"{tool_name} exited with code: {exit_code}")
 
             # If the recording ended on its own (not user-initiated stop) and
@@ -2476,7 +3216,7 @@ class BackgroundCleaner:
         found_any = False
         found_locked = False
 
-        for platform in ["twitch", "youtube", "kick", "rumble", "custom"]:
+        for platform in ["twitch", "youtube", "kick", "rumble", "fishtank", "custom"]:
             platform_dir = os.path.join(self.recorded_base, platform)
             if not os.path.exists(platform_dir):
                 continue
@@ -2536,6 +3276,12 @@ class BackgroundCleaner:
                         )
                         if not success:
                             logging.error(f"Cleanup: Failed to process {filename}: {error}")
+                            try:
+                                pending_path = os.path.join(pending_dir, filename)
+                                shutil.move(raw_file, pending_path)
+                                logging.info(f"Cleanup: Moved unprocessable {filename} to PendingDeletion")
+                            except Exception as move_err:
+                                logging.warning(f"Cleanup: Could not move {filename} to PendingDeletion: {move_err}")
                             continue
 
                     pending_path = os.path.join(pending_dir, filename)
@@ -2869,7 +3615,7 @@ class StreamRecorder:
         min_file_size_mb = self.config.getfloat('Recording', 'min_file_size_mb')
         processed_count = 0
 
-        for platform in ["twitch", "youtube", "kick", "rumble", "custom"]:
+        for platform in ["twitch", "youtube", "kick", "rumble", "fishtank", "custom"]:
             platform_dir = os.path.join(self.recorded_base, platform)
             if not os.path.exists(platform_dir):
                 continue
@@ -2925,6 +3671,12 @@ class StreamRecorder:
                         )
                         if not success:
                             logging.error(f"Startup cleanup: Failed to process {filename}: {error}")
+                            try:
+                                pending_path = os.path.join(pending_dir, filename)
+                                shutil.move(raw_file, pending_path)
+                                logging.info(f"Startup cleanup: Moved unprocessable {filename} to PendingDeletion")
+                            except Exception as move_err:
+                                logging.warning(f"Startup cleanup: Could not move {filename} to PendingDeletion: {move_err}")
                             continue
 
                     try:
@@ -3525,7 +4277,7 @@ def main_gui(config):
     platform_label.pack(side=tk.LEFT)
     platform_var = tk.StringVar(value="kick")
     ttk.Combobox(platform_frame, textvariable=platform_var,
-                 values=["kick", "twitch", "youtube", "rumble", "custom"], state="readonly", width=10).pack(side=tk.LEFT, padx=6)
+                 values=["kick", "twitch", "youtube", "rumble", "fishtank", "custom"], state="readonly", width=10).pack(side=tk.LEFT, padx=6)
 
     entry = tk.Entry(frame_left, width=34, font=("Segoe UI", 10), borderwidth=0, relief="flat")
     entry.pack(pady=6)
@@ -4524,6 +5276,7 @@ examples:
     logging.info(f"ffmpeg available: {HAS_FFMPEG} (version: {FFMPEG_VERSION})")
     logging.info(f"psutil available: {HAS_PSUTIL}")
     logging.info(f"curl_cffi available: {HAS_CURL_CFFI} (browser impersonation)")
+    logging.info(f"deno available: {HAS_DENO} (version: {DENO_VERSION}) (YouTube n-challenge solving)")
     logging.info(f"System tray available: {HAS_TRAY}")
     logging.info(f"Notifications available: {HAS_NOTIFICATIONS}")
     logging.info(f"Streams directory: {config.get('Paths', 'streams_dir')}")
