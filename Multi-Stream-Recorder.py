@@ -4839,6 +4839,10 @@ def main_gui(config):
             return "Twitch"
         elif ch_name.startswith("youtube:"):
             return "YouTube"
+        elif ch_name.startswith("fishtank:"):
+            return "Fishtank"
+        elif ch_name.startswith("rumble:"):
+            return "Rumble"
         elif ch_name.startswith("custom:"):
             platform, _ = parse_custom_url(ch_name.split(":", 1)[1])
             return platform.capitalize()
