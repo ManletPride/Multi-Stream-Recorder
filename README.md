@@ -288,8 +288,9 @@ All Season 5 cameras are supported:
 | `market` | Market |
 | `hallwaydown` | Hallway Down |
 | `hallwayup` | Hallway Up |
+| `jungle` | Jungle Room |
 
-Short aliases also work — `cam` for Cameraman, `dirc` for Director, `dmrm` for Dorm, etc. Raw stream IDs like `dirc-5` and `dmrm-5` are accepted directly.
+Short aliases also work — `cam` for Cameraman, `dirc` for Director, `dmrm` for Dorm, etc. Raw stream IDs like `dirc-5` and `dmrm-5` are accepted directly. Some rooms might require a **season pass** subscription.
 
 ### How It Works
 
