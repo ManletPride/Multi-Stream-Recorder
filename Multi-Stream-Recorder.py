@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -2061,6 +2061,11 @@ def build_recording_command_fishtank(stream_url, raw_file, config, verbose):
         ffmpeg_path,
         "-loglevel", loglevel,
         "-protocol_whitelist", "file,http,https,tcp,tls,crypto,hls",
+        # Increase analyzeduration and probesize to avoid repeated
+        # "Consider increasing analyzeduration/probesize" warnings on
+        # fishtank HLS streams that have slow segment delivery.
+        "-analyzeduration", "2000000",
+        "-probesize", "10000000",
         "-headers", (
             "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36\r\n"
@@ -3397,10 +3402,17 @@ class StreamRecorder:
         for ch in channels:
             self.status_dict[ch] = {"status": "Initializing", "detail": "", "size": "", "time": "", "progress": 0}
 
-        self.processes = []
+        # Maps channel_name -> list[mp.Process].  A channel may temporarily have
+        # more than one entry while the old process is dying and the new one is
+        # starting; the list is pruned of dead entries on every monitor tick.
+        self.processes: dict = {}  # {channel_name: [mp.Process, ...]}
         self.should_stop = mp.Event()
         self.is_running = False
         self.stopped_channels = set()  # channels individually stopped by user
+        # Guards against spawning a second worker for a channel while start_channel
+        # is already in progress for that same channel (e.g. rapid double-click).
+        self._spawning: set = set()
+        self._spawn_lock = threading.Lock()
         self.cleaner = BackgroundCleaner(config)
 
     def update_status_from_queue(self):
@@ -3413,39 +3425,48 @@ class StreamRecorder:
                 break
 
     def stop_channel(self, channel_name):
-        """Stop a single channel's worker process and trigger cleanup for its files.
+        """Stop ALL worker processes for a channel and trigger cleanup for its files.
 
         The channel is marked as individually stopped so refresh_status can show
         'Stopped' instead of 'Offline', and so the master Stop doesn't double-kill it.
+
+        Important: a channel may have more than one live process if start_channel was
+        called while the old process was still alive (e.g. rapid stop/restart).  We
+        kill every one of them so no ghost workers keep running after a 'stop'.
         """
         if not self.is_running:
             return
 
-        # Find and kill the process for this channel
-        target_proc = None
-        for ch, proc in self.processes:
-            if ch == channel_name and proc.is_alive():
-                target_proc = proc
-                break
-
-        if target_proc is None:
-            logging.info(f"Channel {channel_name} is not actively running")
-            self.status_dict[channel_name] = {
-                "status": "Stopped", "detail": "by user", "size": "", "time": "", "progress": 0
-            }
-            return
-
-        # Collect recording info before killing
+        # Collect recording info before killing (from any still-running process)
         st = self.status_dict.get(channel_name, {})
         size_str = st.get("size", "")
         time_str = st.get("time", "")
 
-        logging.info(f"Stopping channel {channel_name} (PID {target_proc.pid})")
-        kill_process_tree(target_proc.pid)
-        target_proc.join(timeout=10)
-        if target_proc.is_alive():
-            target_proc.kill()
-            target_proc.join(timeout=5)
+        # Find every process registered for this channel
+        procs = self.processes.get(channel_name, [])
+        alive_procs = [p for p in procs if p.is_alive()]
+
+        if not alive_procs:
+            logging.info(f"Channel {channel_name} is not actively running")
+            self.status_dict[channel_name] = {
+                "status": "Stopped", "detail": "by user", "size": "", "time": "", "progress": 0
+            }
+            # Still mark as stopped so the monitor loop doesn't auto-restart it
+            self.stopped_channels.add(channel_name)
+            # Drain any lingering dead processes from the list
+            self.processes[channel_name] = []
+            return
+
+        # Kill them all
+        for proc in alive_procs:
+            logging.info(f"Stopping channel {channel_name} (PID {proc.pid})")
+            kill_process_tree(proc.pid)
+
+        for proc in alive_procs:
+            proc.join(timeout=10)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=5)
 
         # Log summary for this channel
         if size_str and time_str:
@@ -3455,6 +3476,7 @@ class StreamRecorder:
 
         # Update status to Stopped and mark as intentionally stopped
         self.stopped_channels.add(channel_name)
+        self.processes[channel_name] = []
         self.status_dict[channel_name] = {
             "status": "Stopped", "detail": "by user", "size": "", "time": "", "progress": 0
         }
@@ -3474,41 +3496,75 @@ class StreamRecorder:
 
         Can be used to restart a channel that was individually stopped, or to add
         a new channel mid-session.
+
+        Before spawning a new worker this method kills any existing processes for
+        the channel so we never end up with two workers racing on the same files.
+        A per-channel spawn guard prevents a second call from racing through before
+        the first one has registered its new process.
         """
         if not self.is_running:
             logging.warning("Cannot start channel — no active recording session")
             return
 
-        # Check if this channel is already running
-        for ch, proc in self.processes:
-            if ch == channel_name and proc.is_alive():
-                logging.info(f"Channel {channel_name} is already running (PID {proc.pid})")
+        # Prevent concurrent start_channel calls for the same channel
+        with self._spawn_lock:
+            if channel_name in self._spawning:
+                logging.info(f"start_channel({channel_name}): already in progress, ignoring duplicate call")
                 return
+            self._spawning.add(channel_name)
 
-        logging.info(f"Starting channel {channel_name} mid-session")
+        try:
+            # Kill every currently-registered process for this channel before spawning
+            # a new one.  This prevents duplicate workers and avoids the situation
+            # where the monitor loop kills our old proc, sees exit-code 15 (SIGTERM),
+            # and also spawns a replacement — resulting in two workers at once.
+            existing = self.processes.get(channel_name, [])
+            alive_existing = [p for p in existing if p.is_alive()]
+            if alive_existing:
+                logging.info(
+                    f"start_channel({channel_name}): killing {len(alive_existing)} "
+                    f"existing worker(s) before spawning replacement"
+                )
+                for proc in alive_existing:
+                    kill_process_tree(proc.pid)
+                for proc in alive_existing:
+                    proc.join(timeout=8)
+                    if proc.is_alive():
+                        proc.kill()
+                        proc.join(timeout=3)
 
-        # Clear the individually-stopped flag
-        self.stopped_channels.discard(channel_name)
+            # Clear the process list for this channel — monitor loop won't restart
+            # dead procs while the channel is in self._spawning.
+            self.processes[channel_name] = []
 
-        # Build config dict the same way run() does
-        config_dict = {section: dict(self.config.config.items(section))
-                       for section in self.config.config.sections()}
-        cookies_file = find_cookies_file(self.config)
-        if cookies_file:
-            config_dict.setdefault('Paths', {})['cookies_file'] = cookies_file
+            logging.info(f"Starting channel {channel_name} mid-session")
 
-        # Initialize status
-        self.status_dict[channel_name] = {
-            "status": "Initializing", "detail": "", "size": "", "time": "", "progress": 0
-        }
+            # Clear the individually-stopped flag
+            self.stopped_channels.discard(channel_name)
 
-        # Spawn worker
-        worker_args = (channel_name, config_dict, self.should_stop, self.status_queue)
-        proc = mp.Process(target=record_worker, args=(worker_args,))
-        proc.daemon = True
-        proc.start()
-        self.processes.append((channel_name, proc))
-        logging.info(f"Started process for {channel_name} (PID {proc.pid})")
+            # Build config dict the same way run() does
+            config_dict = {section: dict(self.config.config.items(section))
+                           for section in self.config.config.sections()}
+            cookies_file = find_cookies_file(self.config)
+            if cookies_file:
+                config_dict.setdefault('Paths', {})['cookies_file'] = cookies_file
+
+            # Initialize status
+            self.status_dict[channel_name] = {
+                "status": "Initializing", "detail": "", "size": "", "time": "", "progress": 0
+            }
+
+            # Spawn exactly one worker
+            worker_args = (channel_name, config_dict, self.should_stop, self.status_queue)
+            proc = mp.Process(target=record_worker, args=(worker_args,))
+            proc.daemon = True
+            proc.start()
+            self.processes[channel_name] = [proc]
+            logging.info(f"Started process for {channel_name} (PID {proc.pid})")
+
+        finally:
+            with self._spawn_lock:
+                self._spawning.discard(channel_name)
 
     def stop(self):
         if not self.is_running:
@@ -3517,23 +3573,26 @@ class StreamRecorder:
         logging.info("Stop requested — shutting down processes...")
         self.should_stop.set()
 
+        # Collect all alive processes across every channel
         pids_to_kill = []
-        for ch, proc in self.processes:
-            if proc.is_alive():
-                pids_to_kill.append((ch, proc.pid))
+        for ch, procs in self.processes.items():
+            for proc in procs:
+                if proc.is_alive():
+                    pids_to_kill.append((ch, proc.pid))
 
         for ch, pid in pids_to_kill:
             logging.info(f"Killing process tree for {ch} (PID {pid})")
             kill_process_tree(pid)
 
-        for ch, proc in self.processes:
-            proc.join(timeout=10)
-            if proc.is_alive():
-                logging.warning(f"Process {ch} did not terminate, force killing...")
-                proc.kill()
-                proc.join(timeout=5)
+        for ch, procs in self.processes.items():
+            for proc in procs:
+                proc.join(timeout=10)
+                if proc.is_alive():
+                    logging.warning(f"Process {ch} (PID {proc.pid}) did not terminate, force killing...")
+                    proc.kill()
+                    proc.join(timeout=5)
 
-        self.processes = []
+        self.processes = {}
 
         logging.info("Checking for orphaned ffmpeg processes...")
         kill_orphan_ffmpeg_processes(logging.getLogger())
@@ -3579,20 +3638,55 @@ class StreamRecorder:
             proc = mp.Process(target=record_worker, args=(worker_args,))
             proc.daemon = True
             proc.start()
-            self.processes.append((ch, proc))
+            self.processes[ch] = [proc]
             logging.info(f"Started process for {ch} (PID {proc.pid})")
 
-        # Monitor processes
+        # Monitor processes — restart any that exit unexpectedly
         while self.is_running and not self.should_stop.is_set():
             self.update_status_from_queue()
 
-            for i, (ch, proc) in enumerate(self.processes):
-                if not proc.is_alive() and not self.should_stop.is_set():
-                    # Skip channels that were individually stopped by the user
-                    if ch in self.stopped_channels:
+            for ch in list(self.processes.keys()):
+                if self.should_stop.is_set():
+                    break
+
+                # Skip channels individually stopped by the user
+                if ch in self.stopped_channels:
+                    continue
+
+                # Skip channels that have an active start_channel() in progress
+                with self._spawn_lock:
+                    if ch in self._spawning:
                         continue
 
-                    exit_code = proc.exitcode
+                procs = self.processes.get(ch, [])
+
+                # Prune dead processes from the list
+                alive = [p for p in procs if p.is_alive()]
+                self.processes[ch] = alive
+
+                if not alive:
+                    # All processes for this channel have exited — examine the last
+                    # one to decide whether to restart.
+                    dead = [p for p in procs if not p.is_alive()]
+                    if not dead:
+                        # Channel was never started (shouldn't happen in run(), but
+                        # handle gracefully)
+                        continue
+
+                    last_proc = dead[-1]
+                    exit_code = last_proc.exitcode
+
+                    # Exit code -15 (SIGTERM on Unix) or 15 (Windows-mapped) means
+                    # we killed the process ourselves (stop_channel / stop).
+                    # Do NOT restart in that case — it was intentional.
+                    if exit_code in (-15, 15):
+                        logging.info(
+                            f"Process for {ch} exited with code {exit_code} (SIGTERM) "
+                            f"— not restarting (intentional kill)"
+                        )
+                        self.stopped_channels.add(ch)
+                        continue
+
                     if exit_code != 0:
                         logging.warning(f"Process for {ch} crashed (exit code {exit_code}) — restarting...")
                     else:
@@ -3602,7 +3696,7 @@ class StreamRecorder:
                     new_proc = mp.Process(target=record_worker, args=(worker_args,))
                     new_proc.daemon = True
                     new_proc.start()
-                    self.processes[i] = (ch, new_proc)
+                    self.processes[ch] = [new_proc]
                     logging.info(f"Restarted process for {ch} (PID {new_proc.pid})")
 
             time.sleep(2)
