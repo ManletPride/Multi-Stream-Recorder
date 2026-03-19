@@ -178,6 +178,7 @@ E:\Streams\
 │   ├── twitch\
 │   ├── youtube\
 │   └── custom\
+│   └── fishtank\
 ├── PendingDeletion\       # Temp files awaiting cleanup
 ├── channels.json          # Channel list
 ├── config.ini             # Configuration
@@ -278,7 +279,7 @@ All Season 5 cameras are supported:
 | `foyer` | Foyer |
 | `closet` | Closet |
 | `glassroom` | Glassroom |
-| `cameraman` | Cameraman |
+| `cameraman` | Cameraman (requires Season Pass XL) |
 | `bar` | Bar |
 | `barptz` | Bar PTZ |
 | `corridor` | Corridor |
@@ -295,6 +296,8 @@ Short aliases also work — `cam` for Cameraman, `dirc` for Director, `dmrm` for
 ### How It Works
 
 Detection and recording both use fishtank.live's HLS streams served by MistServer. On each poll the program queries the live-streams API to check which cameras are active, then records via ffmpeg's HLS downloader. The JWT token is obtained from the API at login and refreshed automatically before expiry.
+
+Before each recording starts, MSR fetches the HLS master playlist and selects the highest-bandwidth variant automatically — this ensures recordings are always captured at the best available quality rather than whichever rendition the server happens to list first.
 
 ## Platform Notes
 
@@ -325,7 +328,7 @@ Detection and recording both use fishtank.live's HLS streams served by MistServe
 
 ## Author
 
-Created by ManletPride, built with assistance from Claude (Anthropic) and and Grok (xAI).
+Created by ManletPride, built with assistance from Claude (Anthropic) and Grok (xAI).
 
 ## License
 
