@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
-__version__ = "1.4.2"
+__version__ = "1.4.4"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -1499,8 +1499,9 @@ class FishtankAuth:
         "hwdn":       "hwdn-5",
         "closet":     "dmcl-5",
         "dmcl":       "dmcl-5",
-        "cameraman":  "cameraman-5",
-        "cam":        "cameraman-5",
+        "cameraman":  "cameraman2-5",
+        "cameraman2": "cameraman2-5",
+        "cam":        "cameraman2-5",
         "barptz":     "brpz-5",
         "brpz":       "brpz-5",
         "market":     "mrke-5",
@@ -2042,6 +2043,94 @@ def check_stream_fishtank(stream_id, auth, logger, timeout=20):
         logger.warning(
             f"[fishtank] Stream '{resolved_id}' probe error: {e}")
         return False, None, str(e)
+
+
+def resolve_best_fishtank_variant(master_url, jwt, logger, timeout=10):
+    """Fetch a MistServer HLS master playlist and return the highest-bandwidth variant URL.
+
+    MistServer's master playlist (`index.m3u8`) lists multiple quality renditions.
+    ffmpeg, when given a master playlist directly, simply picks whichever rendition
+    appears *first* in the file — and MistServer does not guarantee a consistent
+    ordering across different streaming nodes or reconnections.  This means ffmpeg
+    can silently grab the 360p/500kbps rendition one session and 1080p/5000kbps
+    the next, depending solely on how the backend ordered the playlist that time.
+
+    This function parses the master playlist, finds the EXT-X-STREAM-INF entry
+    with the highest BANDWIDTH value, and returns its absolute URL so ffmpeg
+    receives a specific variant playlist rather than the master.
+
+    Returns the best-variant URL string, or master_url unchanged if the playlist
+    cannot be fetched/parsed (fail-open so recording still proceeds).
+    """
+    import urllib.request, urllib.error, re as _re
+
+    try:
+        req = urllib.request.Request(
+            master_url,
+            headers=FishtankAuth._common_headers(),
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            content = resp.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        logger.warning(f"[fishtank] Could not fetch master playlist for variant selection: {e} — using master URL")
+        return master_url
+
+    # Parse EXT-X-STREAM-INF lines.  Each entry looks like:
+    #   #EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,...
+    #   <relative or absolute URI on the next line>
+    best_bandwidth = -1
+    best_uri = None
+    lines = content.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if line.startswith("#EXT-X-STREAM-INF:"):
+            # Extract BANDWIDTH value
+            bw_match = _re.search(r"BANDWIDTH=(\d+)", line)
+            bandwidth = int(bw_match.group(1)) if bw_match else 0
+            res_match = _re.search(r"RESOLUTION=(\S+)", line)
+            resolution = res_match.group(1) if res_match else "unknown"
+            # URI is on the very next non-empty line
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j < len(lines):
+                uri = lines[j].strip()
+                if uri and not uri.startswith("#"):
+                    if bandwidth > best_bandwidth:
+                        best_bandwidth = bandwidth
+                        best_uri = uri
+            i = j + 1
+            continue
+        i += 1
+
+    if best_uri is None:
+        logger.info("[fishtank] Master playlist has no EXT-X-STREAM-INF entries — using master URL")
+        return master_url
+
+    # Resolve relative URI against the master playlist base URL
+    if best_uri.startswith("http://") or best_uri.startswith("https://"):
+        # Absolute URI — use as-is; it already contains whatever auth it needs
+        variant_url = best_uri
+    else:
+        # Relative path — resolve against the directory of the master URL
+        base = master_url.split("?")[0]  # strip query string from master
+        base_dir = base.rsplit("/", 1)[0]
+        variant_url = f"{base_dir}/{best_uri}"
+        # Only append the JWT if the variant URI doesn't already carry an auth
+        # token of its own.  MistServer variant entries include ?tkn=<jwt>
+        # directly in the URI; appending a second ?jwt= produces a malformed
+        # double-token URL that the server rejects.
+        has_own_token = "?tkn=" in best_uri or "?jwt=" in best_uri or "&tkn=" in best_uri or "&jwt=" in best_uri
+        if not has_own_token and "?jwt=" in master_url:
+            jwt_param = master_url.split("?jwt=", 1)[1]
+            variant_url = f"{variant_url}?jwt={jwt_param}"
+
+    logger.info(
+        f"[fishtank] Selected best variant: {best_bandwidth // 1000}kbps "
+        f"— using variant playlist instead of master"
+    )
+    return variant_url
 
 
 def build_recording_command_fishtank(stream_url, raw_file, config, verbose):
@@ -2878,9 +2967,14 @@ def record_worker(args):
                 )
                 if is_live:
                     # Build the authenticated HLS URL fresh each time we're about to record
-                    hls_url, _ = fishtank_auth.build_stream_url(stream_id)
+                    hls_url, jwt = fishtank_auth.build_stream_url(stream_id)
                     if hls_url:
-                        recording_url = hls_url
+                        # Resolve the best-quality variant from the master playlist
+                        # so ffmpeg always records at the highest available bitrate
+                        # rather than whichever rendition the server lists first.
+                        recording_url = resolve_best_fishtank_variant(
+                            hls_url, jwt, logger, timeout=stream_check_timeout
+                        )
                     else:
                         is_live = False
                         error = "could not build stream URL (JWT missing)"
