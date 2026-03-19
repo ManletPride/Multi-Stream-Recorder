@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -1505,6 +1505,9 @@ class FishtankAuth:
         "brpz":       "brpz-5",
         "market":     "mrke-5",
         "mrke":       "mrke-5",
+        "jungleroom": "br4j-5",
+        "jungle":     "br4j-5",
+        "br4j":       "br4j-5",
     }
 
     def __init__(self, cookies_file, logger, email="", password=""):
