@@ -270,28 +270,30 @@ Or use raw stream IDs directly (e.g. `dirc-5`, `dmrm-5`) if you know them.
 
 All Season 5 cameras are supported:
 
-| Camera name | Room |
-|---|---|
-| `director` | Director Mode |
-| `dorm` | Dorm |
-| `confessional` | Confessional |
-| `balcony` | Balcony |
-| `foyer` | Foyer |
-| `closet` | Closet |
-| `glassroom` | Glassroom |
-| `cameraman` | Cameraman (requires Season Pass XL) |
-| `bar` | Bar |
-| `barptz` | Bar PTZ |
-| `corridor` | Corridor |
-| `kitchen` | Kitchen |
-| `jacuzzi` | Jacuzzi |
-| `dining` | Dining Room |
-| `market` | Market |
-| `hallwaydown` | Hallway Down |
-| `hallwayup` | Hallway Up |
-| `jungle` | Jungle Room |
+| Camera name | Room | Access |
+|---|---|---|
+| `director` | Director Mode | Free |
+| `dorm` | Dorm | Normal |
+| `closet` | Closet | Normal |
+| `bar` | Bar | Normal |
+| `kitchen` | Kitchen | Normal |
+| `hallway` | Hallway | Normal |
+| `dining` | Dining Room | Normal |
+| `market` | Market | Normal |
+| `foyer` | Foyer | Normal |
+| `glassroom` | Glassroom | Normal |
+| `corridor` | Corridor | Normal |
+| `eastwing` | East Wing | Normal |
+| `westwing` | West Wing | Normal |
+| `cameraman` | Cameraman | Season Pass XL |
+| `jacuzzi` | Jacuzzi | Season Pass |
+| `barptz` | Bar PTZ | Season Pass |
+| `confessional` | Confessional | Season Pass |
+| `jungle` | Jungle Room | Season Pass |
 
-Short aliases also work — `cam` for Cameraman, `dirc` for Director, `dmrm` for Dorm, etc. Raw stream IDs like `dirc-5` and `dmrm-5` are accepted directly. Some rooms might require a **season pass** subscription.
+Short aliases also work — `cam` for Cameraman, `dirc` for Director, `dmrm` for Dorm, etc. Raw stream IDs like `dirc-5` and `dmrm-5` are accepted directly. Some rooms require a **season pass** subscription.
+
+> **Season 5 renames**: `balcony` → `eastwing` (`bkny-5`), `hallwayup` → `westwing` (`hwup-5`), `hallwaydown` → `hallway` (`hwdn-5`). The old aliases still work for backwards compatibility.
 
 ### How It Works
 
