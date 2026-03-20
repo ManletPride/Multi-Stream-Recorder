@@ -1477,8 +1477,11 @@ class FishtankAuth:
         "dmrm":       "dmrm-5",
         "confessional":"cfsl-5",
         "cfsl":       "cfsl-5",
-        "balcony":    "bkny-5",
+        # Season 5: "Balcony" renamed to "East Wing" (bkny-5 stream ID unchanged)
+        "eastwing":   "bkny-5",
+        "east":       "bkny-5",
         "bkny":       "bkny-5",
+        "balcony":    "bkny-5",   # old alias kept for backwards compatibility
         "foyer":      "foyr-5",
         "foyr":       "foyr-5",
         "kitchen":    "ktch-5",
@@ -1493,9 +1496,14 @@ class FishtankAuth:
         "gsrm":       "gsrm-5",
         "corridor":   "codr-5",
         "codr":       "codr-5",
-        "hallwayup":  "hwup-5",
+        # Season 5: "Hallway Up" renamed to "West Wing" (hwup-5 stream ID unchanged)
+        "westwing":   "hwup-5",
+        "west":       "hwup-5",
         "hwup":       "hwup-5",
-        "hallwaydown":"hwdn-5",
+        "hallwayup":  "hwup-5",   # old alias kept for backwards compatibility
+        # Season 5: "Hallway Down" renamed to "Hallway" (hwdn-5 stream ID unchanged)
+        "hallway":    "hwdn-5",
+        "hallwaydown":"hwdn-5",   # old alias kept for backwards compatibility
         "hwdn":       "hwdn-5",
         "closet":     "dmcl-5",
         "dmcl":       "dmcl-5",
@@ -1509,6 +1517,10 @@ class FishtankAuth:
         "jungleroom": "br4j-5",
         "jungle":     "br4j-5",
         "br4j":       "br4j-5",
+        # Season 5: new rooms detected in API (names TBD — use raw stream IDs for now)
+        "bbcl":       "bbcl-5",   # unknown room
+        "bare":       "bare-5",   # unknown room
+        "br3g":       "br3g-5",   # unknown room
     }
 
     def __init__(self, cookies_file, logger, email="", password=""):
