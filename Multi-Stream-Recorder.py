@@ -2350,6 +2350,7 @@ def _stderr_reader_thread(proc, logger, tool_name, verbose=False):
         'handler_name', '[mpegts @', '[h264 @', '[aac @',
         'reinit context', 'increasing reorder',
         'parser not found', 'pix_fmt',
+        '[vist#', '[aist#',             # ffmpeg internal stream context verbose lines
         # ffmpeg progress lines
         'size=', 'bitrate=', 'speed=',
         # yt-dlp debug noise
@@ -2365,12 +2366,25 @@ def _stderr_reader_thread(proc, logger, tool_name, verbose=False):
         'retrying with new connection', # ffmpeg successfully retries, no data loss
     )
 
+    # Patterns suppressed even in verbose mode — lines that are genuinely harmless
+    # but can flood the log at hundreds or thousands of lines per recording session.
+    ALWAYS_SUPPRESS = (
+        'timestamp discontinuity',      # MistServer HLS segments have inconsistent timestamps
+                                        # at segment boundaries; ffmpeg corrects the offset
+                                        # automatically with no data loss.  Fires ~2x per segment
+                                        # (~every 2s), producing thousands of lines per session.
+    )
+
     try:
         for line in proc.stderr:
             line = line.rstrip()
             if not line:
                 continue
             lower = line.lower()
+
+            # Always suppress these regardless of verbose setting
+            if any(pat in lower for pat in ALWAYS_SUPPRESS):
+                continue
 
             # Check if line looks like an error but is actually benign noise
             is_benign = any(pat in lower for pat in BENIGN_ERROR_PATTERNS)
