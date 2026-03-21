@@ -11,13 +11,15 @@ A desktop application for simultaneously recording live streams from **Kick**, *
 * **Automatic detection** — Polls channels and starts recording the moment a stream goes live
 * **Smart polling** — Configurable check intervals with jitter to avoid rate limiting; exponential backoff on errors only
 * **Fast reconnect** — If a stream drops briefly (streamer disconnect), re-detects within 15 seconds
+* **File splitting** — Automatically splits recordings at a configurable size limit (default 8 GB) for easier archiving and editing
 * **Clean MP4 output** — Automatically remuxes raw .ts recordings to .mp4 with ffmpeg
 * **Cloudflare bypass** — Kick streams use streamlink's built-in JS challenge solver; Rumble uses browser impersonation fallback
 * **Dark mode GUI** — Full dark/light theme with system tray support and desktop notifications
+* **Live stream info** — Status table shows resolution, frame rate, and bitrate for active recordings
 * **Cookie support** — Use browser cookies for authenticated access (subscriber-only streams, age-gated content)
 * **Cookie health indicator** — Visual status showing if your cookies are valid, expiring, or need renewal
 * **Per-channel control** — Start or stop individual channels mid-session via right-click context menu
-* **Channel reorder** — Rearrange your channel list with ▲/▼ buttons
+* **Channel reorder** — Rearrange your channel list with ▲/▼ buttons or double-click a row to toggle it on/off
 * **Recording metadata** — JSON sidecar files with channel info, stream title, duration, and timestamps
 * **Auto-cleanup** — Configurable retention period for processed files
 * **Robust shutdown** — No orphaned processes, no zombie ffmpeg instances
@@ -116,7 +118,8 @@ cookies_file =                    # Auto-detected if empty
 
 [Recording]
 quality = best                    # Stream quality
-max_record_hours = 12.0           # Auto-stop after N hours
+max_record_hours = 12.0           # Auto-stop after N hours (0 = no limit)
+max_file_size_gb = 8.0            # Split recording when file exceeds this size (0 = disabled)
 min_disk_space_gb = 5.0           # Pause if disk space falls below
 min_file_size_mb = 2.0            # Delete recordings smaller than this
 filename_pattern = {username}_{timestamp}  # Output filename pattern
@@ -193,6 +196,7 @@ E:\Streams\
 | `Delete` | Remove selected channel |
 | `Ctrl+Q` | Quit application |
 | `F1` | About dialog |
+| Double-click on channel | Toggle channel on/off |
 | Right-click on channel | Context menu (Start/Stop Recording, Open in Browser, Copy, Remove) |
 | Right-click on status | Context menu (Restart/Stop Channel, Open in Browser) |
 
@@ -290,8 +294,13 @@ All Season 5 cameras are supported:
 | `barptz` | Bar PTZ | Season Pass |
 | `confessional` | Confessional | Season Pass |
 | `jungle` | Jungle Room | Season Pass |
+| `bbcl` | ??? (unlocking soon) | TBD |
+| `br3g` | ??? (unlocking soon) | TBD |
+| `bare` | ??? (unlocking soon) | TBD |
 
 Short aliases also work — `cam` for Cameraman, `dirc` for Director, `dmrm` for Dorm, etc. Raw stream IDs like `dirc-5` and `dmrm-5` are accepted directly. Some rooms require a **season pass** subscription.
+
+Three additional rooms (`bbcl-5`, `br3g-5`, `bare-5`) are accessible via their raw stream IDs or the aliases above. Their display names will be added here once officially revealed.
 
 > **Season 5 renames**: `balcony` → `eastwing` (`bkny-5`), `hallwayup` → `westwing` (`hwup-5`), `hallwaydown` → `hallway` (`hwdn-5`). The old aliases still work for backwards compatibility.
 
