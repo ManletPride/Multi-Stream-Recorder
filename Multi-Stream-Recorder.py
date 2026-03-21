@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
-__version__ = "1.4.4"
+__version__ = "1.5.0"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -182,6 +182,7 @@ class Config:
         'Recording': {
             'quality': 'best',
             'max_record_hours': '12.0',
+            'max_file_size_gb': '8.0',   # split recording when file exceeds this size (0 = disabled)
             'min_disk_space_gb': '5.0',
             'min_file_size_mb': '2.0',
             # Pattern tokens: {username}, {platform}, {date}, {time}, {timestamp}, {title}
@@ -335,6 +336,15 @@ def validate_startup(config):
             warnings.append("max_record_hours is <= 0 — recordings will have no time limit")
     except (ValueError, configparser.Error):
         warnings.append("max_record_hours is not a valid number — using default (12)")
+
+    try:
+        max_size = config.getfloat('Recording', 'max_file_size_gb')
+        if max_size < 0:
+            warnings.append("max_file_size_gb is negative — using default (8 GB)")
+        elif max_size == 0:
+            warnings.append("max_file_size_gb is 0 — file size splitting is disabled")
+    except (ValueError, configparser.Error):
+        warnings.append("max_file_size_gb is not a valid number — using default (8 GB)")
 
     try:
         min_space = config.getfloat('Recording', 'min_disk_space_gb')
@@ -1517,10 +1527,18 @@ class FishtankAuth:
         "jungleroom": "br4j-5",
         "jungle":     "br4j-5",
         "br4j":       "br4j-5",
-        # Season 5: new rooms detected in API (names TBD — use raw stream IDs for now)
-        "bbcl":       "bbcl-5",   # unknown room
-        "bare":       "bare-5",   # unknown room
-        "br3g":       "br3g-5",   # unknown room
+        # Season 5: three additional rooms detected in API — names TBD pending unlock
+        # From the website unlock countdown (as of 2026-03-21):
+        #   bbcl-5  — unlocks today
+        #   br3g-5  — unlocks in ~8 days
+        #   bare-5  — unlocks in ~12 days
+        # Raw stream IDs work now; friendly name aliases will be added once confirmed.
+        "bbcl":       "bbcl-5",
+        "bbcl5":      "bbcl-5",
+        "bare":       "bare-5",
+        "bare5":      "bare-5",
+        "br3g":       "br3g-5",
+        "br3g5":      "br3g-5",
     }
 
     def __init__(self, cookies_file, logger, email="", password=""):
@@ -2088,10 +2106,12 @@ def resolve_best_fishtank_variant(master_url, jwt, logger, timeout=10):
         return master_url
 
     # Parse EXT-X-STREAM-INF lines.  Each entry looks like:
-    #   #EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,...
+    #   #EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,FRAME-RATE=30,...
     #   <relative or absolute URI on the next line>
     best_bandwidth = -1
     best_uri = None
+    best_resolution = "unknown"   # track resolution of the winning entry, not the last-parsed
+    best_frame_rate = None        # track frame rate of the winning entry
     lines = content.splitlines()
     i = 0
     while i < len(lines):
@@ -2100,8 +2120,13 @@ def resolve_best_fishtank_variant(master_url, jwt, logger, timeout=10):
             # Extract BANDWIDTH value
             bw_match = _re.search(r"BANDWIDTH=(\d+)", line)
             bandwidth = int(bw_match.group(1)) if bw_match else 0
-            res_match = _re.search(r"RESOLUTION=(\S+)", line)
+            # RESOLUTION value is terminated by a comma or end-of-field — NOT \S+ which would
+            # greedily consume FRAME-RATE=...,CODECS=... into the captured group.
+            res_match = _re.search(r"RESOLUTION=(\d+x\d+)", line)
             resolution = res_match.group(1) if res_match else "unknown"
+            # FRAME-RATE is a decimal like 30.000 or 29.97
+            fr_match = _re.search(r"FRAME-RATE=([\d.]+)", line)
+            frame_rate = fr_match.group(1) if fr_match else None
             # URI is on the very next non-empty line
             j = i + 1
             while j < len(lines) and not lines[j].strip():
@@ -2112,13 +2137,15 @@ def resolve_best_fishtank_variant(master_url, jwt, logger, timeout=10):
                     if bandwidth > best_bandwidth:
                         best_bandwidth = bandwidth
                         best_uri = uri
+                        best_resolution = resolution   # only update when this entry wins
+                        best_frame_rate = frame_rate
             i = j + 1
             continue
         i += 1
 
     if best_uri is None:
         logger.info("[fishtank] Master playlist has no EXT-X-STREAM-INF entries — using master URL")
-        return master_url
+        return master_url, ""
 
     # Resolve relative URI against the master playlist base URL
     if best_uri.startswith("http://") or best_uri.startswith("https://"):
@@ -2138,11 +2165,40 @@ def resolve_best_fishtank_variant(master_url, jwt, logger, timeout=10):
             jwt_param = master_url.split("?jwt=", 1)[1]
             variant_url = f"{variant_url}?jwt={jwt_param}"
 
+    # Build a compact stream-info string for the status table
+    # e.g. "1080p · 30fps · 4.3Mbps" — best-effort, gracefully omits unknowns
+    _res = best_resolution if best_resolution and best_resolution != "unknown" else None
+    _kbps = best_bandwidth // 1000 if best_bandwidth > 0 else None
+    _parts = []
+    if _res:
+        # Normalise "1920x1080" → "1080p", "1280x720" → "720p", passthrough otherwise
+        if "x" in _res:
+            try:
+                _h = int(_res.split("x", 1)[1])
+                _parts.append(f"{_h}p")
+            except ValueError:
+                _parts.append(_res)
+        else:
+            _parts.append(_res)
+    if best_frame_rate:
+        # Round to nearest integer: "30.000" → "30fps", "29.97" → "30fps"
+        try:
+            _fps = round(float(best_frame_rate))
+            _parts.append(f"{_fps}fps")
+        except ValueError:
+            pass
+    if _kbps:
+        if _kbps >= 1000:
+            _parts.append(f"{_kbps/1000:.1f}Mbps")
+        else:
+            _parts.append(f"{_kbps}kbps")
+    stream_info_str = " · ".join(_parts)
+
     logger.info(
         f"[fishtank] Selected best variant: {best_bandwidth // 1000}kbps "
         f"— using variant playlist instead of master"
     )
-    return variant_url
+    return variant_url, stream_info_str
 
 
 def build_recording_command_fishtank(stream_url, raw_file, config, verbose):
@@ -2385,6 +2441,14 @@ def _stderr_reader_thread(proc, logger, tool_name, verbose=False):
                                         # at segment boundaries; ffmpeg corrects the offset
                                         # automatically with no data loss.  Fires ~2x per segment
                                         # (~every 2s), producing thousands of lines per session.
+        'non-monotonic dts',            # Same root cause as timestamp discontinuity — MistServer
+                                        # sends segments with out-of-order decode timestamps when
+                                        # reconnecting to the master URL fallback.  ffmpeg fixes
+                                        # them in place (incrementing each by 1) with no data loss.
+                                        # Can produce hundreds of lines in a single burst.
+        'consider increasing the value for the',  # ffmpeg advisory suggesting higher analyzeduration
+                                        # / probesize when falling back to master URL.  Harmless;
+                                        # our values are already set generously.
     )
 
     try:
@@ -2416,16 +2480,22 @@ def _stderr_reader_thread(proc, logger, tool_name, verbose=False):
 def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                               platform, logger, status_queue, channel_key,
                               stop_event, last_status, file_creation_timeout=60,
-                              tool_name_override=None, verbose=False):
+                              tool_name_override=None, verbose=False,
+                              max_file_size_gb=0.0, stream_info=""):
     """Monitor a recording subprocess and update status via queue.
 
     Spawns a background thread to read stderr for real-time logging.
-    Detects zero-byte stalls, file growth stalls, max duration limits, and
-    file creation timeouts.
+    Detects zero-byte stalls, file growth stalls, max duration limits,
+    file creation timeouts, and optional max-file-size splits.
+
+    Returns (last_status, split_requested) where split_requested=True means
+    the caller should immediately start a new segment rather than entering
+    the reconnect grace period.
     """
     tool_name = tool_name_override or ("yt-dlp" if platform in ["kick", "youtube", "rumble", "custom"] else "streamlink")
     zero_byte_strikes = 0
     file_appeared = False
+    split_requested = False
 
     # Stall detection: kill the process if the file stops growing for this long.
     # streamlink's --retry-streams keeps it alive even after the stream ends, so
@@ -2433,6 +2503,9 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
     STALL_TIMEOUT = 90  # seconds without file growth before terminating
     last_size = 0
     last_growth_time = time.monotonic()
+
+    # Max-file-size limit (0 = disabled)
+    max_file_size_bytes = int(max_file_size_gb * 1024 ** 3) if max_file_size_gb > 0 else 0
 
     # Start stderr reader thread
     stderr_thread = threading.Thread(
@@ -2474,10 +2547,25 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                 else:
                     zero_byte_strikes = 0
 
+                # Max-file-size split: gracefully stop so the caller can remux
+                # this segment and immediately start a fresh one.
+                if max_file_size_bytes > 0 and size >= max_file_size_bytes:
+                    logger.info(
+                        f"File reached {human_size(size)} — splitting "
+                        f"(limit: {max_file_size_gb:.1f} GB)"
+                    )
+                    split_requested = True
+                    kill_process_tree(proc.pid, logger)
+                    break
+
                 progress_pct = min(100, (elapsed / (max_record_hours * 3600)) * 100) if max_record_hours > 0 else 50
+
+                # Build detail string: stream info when available, otherwise empty
+                detail = stream_info if stream_info else ""
+
                 new_status = {
                     "status": "Recording",
-                    "detail": "",
+                    "detail": detail,
                     "size": human_size(size),
                     "time": format_elapsed(elapsed),
                     "progress": progress_pct,
@@ -2503,7 +2591,7 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
     # Wait for stderr thread to finish reading
     stderr_thread.join(timeout=5)
 
-    return last_status
+    return last_status, split_requested
 
 
 def _probe_duration(ffmpeg_path, raw_file):
@@ -2822,6 +2910,7 @@ def record_worker(args):
     max_record_hours = config.getfloat('Recording', 'max_record_hours')
     min_file_size_mb = config.getfloat('Recording', 'min_file_size_mb')
     min_disk_space_gb = config.getfloat('Recording', 'min_disk_space_gb')
+    max_file_size_gb  = config.getfloat('Recording', 'max_file_size_gb')
     verbose = config.getboolean('Advanced', 'verbose')
     streamlink_debug = config.getboolean('Advanced', 'streamlink_debug')
     ffmpeg_path = config.get('Advanced', 'ffmpeg_path')
@@ -2908,6 +2997,9 @@ def record_worker(args):
     reconnect_mode = False
     reconnect_deadline = 0  # monotonic timestamp when grace period expires
     RECONNECT_POLL_INTERVAL = 15  # seconds between checks during grace period
+
+    # Stream metadata shown in the status table (set when variant is resolved)
+    stream_info = ""
 
     # Fishtank: create a per-worker auth manager that caches the JWT
     fishtank_auth = None
@@ -2998,7 +3090,7 @@ def record_worker(args):
                         # Resolve the best-quality variant from the master playlist
                         # so ffmpeg always records at the highest available bitrate
                         # rather than whichever rendition the server lists first.
-                        recording_url = resolve_best_fishtank_variant(
+                        recording_url, stream_info = resolve_best_fishtank_variant(
                             hls_url, jwt, logger, timeout=stream_check_timeout
                         )
                     else:
@@ -3102,11 +3194,13 @@ def record_worker(args):
             )
 
             # Monitor
-            last_status = monitor_recording_process(
+            last_status, split_requested = monitor_recording_process(
                 proc, raw_file, start_time, max_record_hours,
                 platform, logger, status_queue, channel_key,
                 stop_event, last_status, file_creation_timeout,
                 verbose=verbose,
+                max_file_size_gb=max_file_size_gb,
+                stream_info=stream_info,
             )
 
             # Clean up process tree
@@ -3131,7 +3225,11 @@ def record_worker(args):
             # If the recording ended on its own (not user-initiated stop) and
             # we captured at least some data, the stream likely dropped.
             # Enter fast reconnect mode to re-check quickly.
-            if not stop_event.is_set() and elapsed > 10:
+            # Exception: a size-based split should skip the grace period entirely —
+            # the stream is still live, so remux and immediately start the next segment.
+            if split_requested:
+                reconnect_mode = False   # don't wait — fall straight through to remux+restart
+            elif not stop_event.is_set() and elapsed > 10:
                 reconnect_mode = True
                 reconnect_deadline = time.monotonic() + (reconnect_grace_minutes * 60)
                 logger.info(f"Recording ended after {format_elapsed(elapsed)} — entering {reconnect_grace_minutes}min reconnect grace period")
@@ -3163,11 +3261,12 @@ def record_worker(args):
                         bufsize=1,
                     )
 
-                    last_status = monitor_recording_process(
+                    last_status, _ = monitor_recording_process(
                         proc, raw_file, start_time, max_record_hours,
                         platform, logger, status_queue, channel_key,
                         stop_event, last_status, file_creation_timeout,
                         tool_name_override="streamlink", verbose=verbose,
+                        max_file_size_gb=max_file_size_gb,
                     )
 
                     if proc.poll() is None:
@@ -4203,7 +4302,7 @@ def main_gui(config):
                   darkcolor=[('selected', border_color), ('!selected', border_color)],
                   bordercolor=[('selected', border_color), ('!selected', border_color)])
         style.configure('Treeview', background=t['tree_field'], foreground=t['tree_fg'],
-                        fieldbackground=t['tree_field'], rowheight=26,
+                        fieldbackground=t['tree_field'], rowheight=22,
                         bordercolor=border_color, lightcolor=border_color,
                         darkcolor=border_color)
         style.configure('Treeview.Heading', background=t['tree_heading_bg'],
@@ -4360,10 +4459,10 @@ def main_gui(config):
 
     # Treeview — no cookie column; dots are drawn on a Canvas overlay instead
     ch_tree = ttk.Treeview(ch_tree_frame, columns=("check", "name"), show="tree",
-                           height=20, selectmode="extended")
+                           height=22, selectmode="extended")
     ch_tree.column("#0", width=0, stretch=False)  # hidden tree column
     ch_tree.column("check", width=28, anchor="center", stretch=False)
-    ch_tree.column("name", width=245, anchor="w")
+    ch_tree.column("name", width=270, anchor="w")
     ch_tree.heading("check", text="")
     ch_tree.heading("name", text="")
     ch_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -4487,6 +4586,23 @@ def main_gui(config):
                 save_channels()
 
     ch_tree.bind("<ButtonRelease-1>", _toggle_channel_check)
+
+    def _double_click_toggle(event):
+        """Double-clicking anywhere on a row toggles its enabled state."""
+        item = ch_tree.identify_row(event.y)
+        if not item:
+            return
+        idx = ch_tree.index(item)
+        if 0 <= idx < len(channels):
+            channels[idx]["enabled"] = not channels[idx].get("enabled", True)
+            enabled = channels[idx]["enabled"]
+            check = CHECK_ON if enabled else CHECK_OFF
+            tag = "enabled" if enabled else "disabled"
+            ch_tree.item(item, values=(check, channels[idx]["name"]), tags=(tag,))
+            dot_canvas.after(20, _redraw_dot_canvas)
+            save_channels()
+
+    ch_tree.bind("<Double-ButtonRelease-1>", _double_click_toggle)
 
     platform_frame = tk.Frame(frame_left)
     platform_frame.pack(fill=tk.X, pady=(10, 5))
@@ -4825,11 +4941,11 @@ def main_gui(config):
     tree.heading("Size", text="Size")
     tree.heading("Elapsed", text="Elapsed")
     tree.heading("Platform", text="Platform")
-    tree.column("Channel", width=240, anchor="w")
-    tree.column("Status", width=250, anchor="w")
-    tree.column("Size", width=100, anchor="center")
-    tree.column("Elapsed", width=90, anchor="center")
-    tree.column("Platform", width=80, anchor="center")
+    tree.column("Channel", width=200, anchor="w")
+    tree.column("Status", width=300, anchor="w")
+    tree.column("Size", width=90, anchor="center")
+    tree.column("Elapsed", width=80, anchor="center")
+    tree.column("Platform", width=75, anchor="center")
     tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
     # ── Status tree right-click context menu ──
@@ -5095,9 +5211,20 @@ def main_gui(config):
                 st = recorder.status_dict.get(ch_name, {"status": "Unknown", "detail": "", "size": "", "time": ""})
                 curr = st["status"].lower()
 
-                display = st["status"]
-                if st["detail"]:
-                    display += f" ({st['detail']})"
+                # Build the Status cell text.
+                # While recording: show stream info (resolution/bitrate) if available,
+                # otherwise fall back to any detail text (e.g. "starting", "fallback (streamlink)").
+                # For all other states: status + detail in parens as before.
+                if "recording" in curr:
+                    detail = st.get("detail", "")
+                    if detail:
+                        display = f"Recording  {detail}"
+                    else:
+                        display = "Recording"
+                else:
+                    display = st["status"]
+                    if st.get("detail"):
+                        display += f" ({st['detail']})"
 
                 platform_label = _get_platform_label(ch_name)
 
@@ -5132,7 +5259,6 @@ def main_gui(config):
                     tag = "unknown"
 
                 display_name = _get_display_name(ch_name)
-
                 item_id = tree.insert("", tk.END, values=(display_name, display, st["size"], st["time"], platform_label), tags=(tag,))
 
                 # Restore selection if this was the previously selected channel
