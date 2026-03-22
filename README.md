@@ -294,13 +294,13 @@ All Season 5 cameras are supported:
 | `barptz` | Bar PTZ | Season Pass |
 | `confessional` | Confessional | Season Pass |
 | `jungle` | Jungle Room | Season Pass |
-| `bbcl` | ??? (unlocking soon) | TBD |
+| `computerlab`, `bbcl` | Computer Lab | Season Pass |
 | `br3g` | ??? (unlocking soon) | TBD |
 | `bare` | ??? (unlocking soon) | TBD |
 
 Short aliases also work — `cam` for Cameraman, `dirc` for Director, `dmrm` for Dorm, etc. Raw stream IDs like `dirc-5` and `dmrm-5` are accepted directly. Some rooms require a **season pass** subscription.
 
-Three additional rooms (`bbcl-5`, `br3g-5`, `bare-5`) are accessible via their raw stream IDs or the aliases above. Their display names will be added here once officially revealed.
+Two rooms (`br3g-5`, `bare-5`) remain unrevealed and are accessible via their raw stream IDs or aliases. The Computer Lab (`bbcl-5`) was revealed and is now fully supported via the `computerlab` alias.
 
 > **Season 5 renames**: `balcony` → `eastwing` (`bkny-5`), `hallwayup` → `westwing` (`hwup-5`), `hallwaydown` → `hallway` (`hwdn-5`). The old aliases still work for backwards compatibility.
 
