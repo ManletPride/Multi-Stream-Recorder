@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -1534,7 +1534,7 @@ class FishtankAuth:
         #   bare-5  — unlocks in ~12 days
         # Raw stream IDs work now; friendly name aliases will be added once confirmed.
         "bbcl":       "bbcl-5",
-        "bbcl5":      "bbcl-5",
+        "computerlab":"bbcl-5",
         "bare":       "bare-5",
         "bare5":      "bare-5",
         "br3g":       "br3g-5",
@@ -2998,6 +2998,16 @@ def record_worker(args):
     reconnect_deadline = 0  # monotonic timestamp when grace period expires
     RECONNECT_POLL_INTERVAL = 15  # seconds between checks during grace period
 
+    # Consecutive small-file / bad-stream detection.
+    # If the stream keeps producing tiny recordings that fail the remux size check
+    # (e.g. a stub HLS playlist serving ~20 s of garbage), we back off rather than
+    # hammering the server in a tight loop.  Counter resets on any successful remux.
+    consecutive_small_remux_fails = 0
+    SMALL_REMUX_FAIL_LIMIT = 3        # enter backoff after this many in a row
+    SMALL_REMUX_BACKOFF_BASE = 60     # first backoff: 60 s
+    SMALL_REMUX_BACKOFF_MAX = 900     # cap at 15 min
+    _small_remux_backoff = SMALL_REMUX_BACKOFF_BASE
+
     # Stream metadata shown in the status table (set when variant is resolved)
     stream_info = ""
 
@@ -3326,6 +3336,10 @@ def record_worker(args):
             success, mp4_size, error = remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, scaled_timeout)
 
             if success:
+                # Successful remux — reset bad-stream counters
+                consecutive_small_remux_fails = 0
+                _small_remux_backoff = SMALL_REMUX_BACKOFF_BASE
+
                 # Save metadata sidecar
                 save_metadata(
                     mp4_file, username, platform,
@@ -3362,6 +3376,53 @@ def record_worker(args):
                 logger.error(f"Remux failed: {error}")
                 new_status = {"status": "Remux failed", "detail": error or "unknown", "size": "", "time": "", "progress": 0}
 
+                # ── Bad-stream backoff (Bug #1 fix) ──────────────────────────
+                # "output too small" means the stream is handing us stub/garbage
+                # data that passes the raw min_file_size_mb check but produces a
+                # worthless remux.  Delete the tiny mp4 artifact and back off
+                # instead of hammering the server in a tight 5-second loop.
+                if error == "output too small":
+                    # Delete the useless sub-threshold mp4 that was written
+                    if os.path.exists(mp4_file):
+                        try:
+                            os.remove(mp4_file)
+                            logger.info(f"Deleted undersized mp4 artifact: {os.path.basename(mp4_file)}")
+                        except Exception as del_err:
+                            logger.warning(f"Could not delete undersized mp4: {del_err}")
+
+                    # Also move the raw .ts to PendingDeletion so it doesn't
+                    # accumulate in the Recorded directory
+                    try:
+                        pending_path = os.path.join(pending_dir, os.path.basename(raw_file))
+                        shutil.move(raw_file, pending_path)
+                        logger.info(f"Moved bad raw .ts to PendingDeletion: {os.path.basename(raw_file)}")
+                    except Exception:
+                        pass
+
+                    consecutive_small_remux_fails += 1
+                    if consecutive_small_remux_fails >= SMALL_REMUX_FAIL_LIMIT:
+                        # Stream is consistently serving garbage — treat as
+                        # degraded/offline and apply a growing backoff so we
+                        # don't keep hammering its CDN.
+                        backoff = min(_small_remux_backoff, SMALL_REMUX_BACKOFF_MAX)
+                        _small_remux_backoff = min(_small_remux_backoff * 2, SMALL_REMUX_BACKOFF_MAX)
+                        logger.warning(
+                            f"Stream has produced {consecutive_small_remux_fails} consecutive "
+                            f"undersized recordings — treating as degraded, backing off {backoff}s"
+                        )
+                        new_status = {
+                            "status": "Offline",
+                            "detail": f"bad stream data, retry in {backoff}s",
+                            "size": "", "time": "", "progress": 0,
+                        }
+                        if new_status != last_status:
+                            status_queue.put((channel_key, new_status))
+                            last_status = new_status.copy()
+                        # Disable reconnect mode so normal offline polling resumes
+                        reconnect_mode = False
+                        time.sleep(backoff)
+                        continue
+
             if new_status != last_status:
                 status_queue.put((channel_key, new_status))
                 last_status = new_status.copy()
@@ -3382,6 +3443,12 @@ def record_worker(args):
 # ────────────────────────────────────────────────
 #          Background Cleanup Thread
 # ────────────────────────────────────────────────
+
+# Guards _process_leftover_files() so that the per-channel cleanup thread
+# (spawned by stop_channel) and the global background cleanup thread
+# (spawned by stop()) never scan/remux the same .ts files concurrently.
+_cleanup_lock = threading.Lock()
+
 
 class BackgroundCleaner:
     """Handles remuxing and cleanup of leftover .ts files.
@@ -3415,11 +3482,20 @@ class BackgroundCleaner:
         logging.info("Background cleanup thread stopped")
 
     def _run(self):
-        logging.info("Cleanup: Waiting 8 seconds for file handles to be released...")
-        for _ in range(8):
+        # Wait for file handles to be released and for any in-progress per-channel
+        # remux threads (spawned by stop_channel) to finish before we start scanning.
+        # We use a longer initial wait (30 s) then try to acquire the cleanup lock;
+        # if another cleanup is still running we wait for it to finish (Bug #3 fix).
+        logging.info("Cleanup: Waiting 30 seconds for in-flight remuxes and file handles to be released...")
+        for _ in range(30):
             if self._stop_event.is_set():
                 return
             time.sleep(1)
+
+        # If a per-channel cleanup thread still holds the lock, wait for it.
+        logging.info("Cleanup: Waiting for any concurrent cleanup pass to finish...")
+        _cleanup_lock.acquire()
+        _cleanup_lock.release()
 
         for pass_num in range(3):
             if self._stop_event.is_set():
@@ -3436,6 +3512,19 @@ class BackgroundCleaner:
         logging.info("Background cleanup finished")
 
     def _process_leftover_files(self):
+        # Only one cleanup scan may run at a time across all threads (Bug #2 fix).
+        # This prevents the per-channel cleanup thread and the global background
+        # cleanup thread from racing on the same .ts files simultaneously.
+        if not _cleanup_lock.acquire(blocking=False):
+            logging.info("Cleanup: another cleanup pass is already running — skipping duplicate")
+            return False
+
+        try:
+            return self._process_leftover_files_locked()
+        finally:
+            _cleanup_lock.release()
+
+    def _process_leftover_files_locked(self):
         ffmpeg_path = self.config.get('Advanced', 'ffmpeg_path')
         ffmpeg_timeout = self.config.getint('Timeouts', 'ffmpeg_timeout')
         min_file_size_mb = self.config.getfloat('Recording', 'min_file_size_mb')
@@ -3550,6 +3639,11 @@ def purge_old_pending_files(root_path, max_age_days, logger=None):
     """Delete files in PendingDeletion that are older than max_age_days.
 
     Returns the number of files deleted.
+
+    Age is measured as time since the file was *moved* into PendingDeletion,
+    not since it was originally recorded.  On Windows, shutil.move() preserves
+    the source mtime, so we use max(mtime, ctime) — ctime reflects the last
+    metadata change (i.e. the move) on Windows, giving the correct age.
     """
     if max_age_days <= 0:
         return 0
@@ -3558,19 +3652,31 @@ def purge_old_pending_files(root_path, max_age_days, logger=None):
     if not os.path.exists(pending_base):
         return 0
 
+    if logger:
+        logger.info(f"PendingDeletion purge: scanning for files older than {max_age_days} day(s)...")
+
     cutoff = time.time() - (max_age_days * 86400)
     deleted = 0
+    skipped = 0
     empty_dirs = []
 
     for dirpath, dirnames, filenames in os.walk(pending_base, topdown=False):
         for filename in filenames:
             filepath = os.path.join(dirpath, filename)
             try:
-                if os.path.getmtime(filepath) < cutoff:
+                stat = os.stat(filepath)
+                # Use the most recent of mtime and ctime.  On Windows, ctime is the
+                # file-creation time (reset when the file is moved), so it correctly
+                # reflects when the file landed in PendingDeletion rather than when
+                # the original recording started.
+                file_age_ts = max(stat.st_mtime, stat.st_ctime)
+                if file_age_ts < cutoff:
                     os.remove(filepath)
                     deleted += 1
                     if logger:
                         logger.info(f"Purged: {filepath}")
+                else:
+                    skipped += 1
             except Exception as e:
                 if logger:
                     logger.warning(f"Failed to purge {filepath}: {e}")
@@ -3586,10 +3692,11 @@ def purge_old_pending_files(root_path, max_age_days, logger=None):
         except Exception:
             pass
 
-    if logger and deleted > 0:
-        logger.info(f"Purged {deleted} file(s) from PendingDeletion (older than {max_age_days} days)")
-    elif logger:
-        logger.info("PendingDeletion purge: nothing to delete")
+    if logger:
+        if deleted > 0:
+            logger.info(f"PendingDeletion purge: deleted {deleted} file(s) older than {max_age_days} days ({skipped} retained)")
+        else:
+            logger.info(f"PendingDeletion purge: nothing to delete ({skipped} file(s) retained, not yet old enough)")
 
     return deleted
 
@@ -3700,10 +3807,12 @@ class StreamRecorder:
             "status": "Stopped", "detail": "by user", "size": "", "time": "", "progress": 0
         }
 
-        # Run cleanup for this channel's files in background
-        # Use a short delay so file handles are released
+        # Run cleanup for this channel's files in background.
+        # We wait long enough for any in-flight remux in the killed worker process
+        # to either finish or be abandoned before scanning for leftover .ts files
+        # (Bug #3 fix — the old 5 s wait was insufficient for multi-GB remuxes).
         def _channel_cleanup():
-            time.sleep(5)  # wait for file handles
+            time.sleep(30)  # generous wait for large-file remux / file handle release
             self.cleaner._process_leftover_files()
             logging.info(f"Cleanup finished for {channel_name}")
 
