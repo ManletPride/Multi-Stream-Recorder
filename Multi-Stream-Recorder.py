@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
-__version__ = "1.5.1"
+__version__ = "1.5.2"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -2103,7 +2103,7 @@ def resolve_best_fishtank_variant(master_url, jwt, logger, timeout=10):
             content = resp.read().decode("utf-8", errors="replace")
     except Exception as e:
         logger.warning(f"[fishtank] Could not fetch master playlist for variant selection: {e} — using master URL")
-        return master_url
+        return master_url, ""
 
     # Parse EXT-X-STREAM-INF lines.  Each entry looks like:
     #   #EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,FRAME-RATE=30,...
@@ -2194,10 +2194,20 @@ def resolve_best_fishtank_variant(master_url, jwt, logger, timeout=10):
             _parts.append(f"{_kbps}kbps")
     stream_info_str = " · ".join(_parts)
 
-    logger.info(
-        f"[fishtank] Selected best variant: {best_bandwidth // 1000}kbps "
-        f"— using variant playlist instead of master"
-    )
+    # Warn if the best available variant is suspiciously low — this can happen
+    # when Fishtank's CDN is degraded and only serving a stub/audio-only rendition.
+    # These sessions typically produce tiny files that fail the remux size check.
+    LOW_BITRATE_WARN_KBPS = 500
+    if best_bandwidth > 0 and (best_bandwidth // 1000) < LOW_BITRATE_WARN_KBPS:
+        logger.warning(
+            f"[fishtank] Selected best variant: {best_bandwidth // 1000}kbps "
+            f"— unusually low, stream may be degraded"
+        )
+    else:
+        logger.info(
+            f"[fishtank] Selected best variant: {best_bandwidth // 1000}kbps "
+            f"— using variant playlist instead of master"
+        )
     return variant_url, stream_info_str
 
 
@@ -3008,6 +3018,15 @@ def record_worker(args):
     SMALL_REMUX_BACKOFF_MAX = 900     # cap at 15 min
     _small_remux_backoff = SMALL_REMUX_BACKOFF_BASE
 
+    # Worker crash backoff: after an unexpected exception the worker restarts
+    # after a short delay.  Without backoff this creates a tight crash loop
+    # (e.g. the resolve_best_fishtank_variant unpack bug caused 55 crashes in
+    # ~100 minutes).  We grow the delay exponentially up to a cap so repeated
+    # crashes back off gracefully.  Resets to base on any successful recording.
+    _crash_backoff = 60               # current sleep after a crash (seconds)
+    CRASH_BACKOFF_BASE = 60           # initial delay
+    CRASH_BACKOFF_MAX = 900           # cap at 15 min
+
     # Stream metadata shown in the status table (set when variant is resolved)
     stream_info = ""
 
@@ -3336,9 +3355,10 @@ def record_worker(args):
             success, mp4_size, error = remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, scaled_timeout)
 
             if success:
-                # Successful remux — reset bad-stream counters
+                # Successful remux — reset bad-stream counters and crash backoff
                 consecutive_small_remux_fails = 0
                 _small_remux_backoff = SMALL_REMUX_BACKOFF_BASE
+                _crash_backoff = CRASH_BACKOFF_BASE
 
                 # Save metadata sidecar
                 save_metadata(
@@ -3435,7 +3455,9 @@ def record_worker(args):
         except Exception as e:
             logger.error(f"Worker crashed: {e}", exc_info=True)
             status_queue.put((channel_key, {"status": "Error", "detail": str(e)[:50], "size": "", "time": "", "progress": 0}))
-            time.sleep(60)
+            logger.warning(f"Worker restarting in {_crash_backoff}s (backoff)")
+            time.sleep(_crash_backoff)
+            _crash_backoff = min(_crash_backoff * 2, CRASH_BACKOFF_MAX)
 
     logger.info("Worker STOPPED")
 
