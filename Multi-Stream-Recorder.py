@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
-__version__ = "1.5.2"
+__version__ = "1.5.3"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -1541,6 +1541,11 @@ class FishtankAuth:
         "br3g5":      "br3g-5",
     }
 
+    # How many seconds before expiry to proactively refresh the JWT.
+    # Fishtank issues 30-minute tokens for some streams (cameraman), so
+    # refreshing 5 minutes early guarantees the token is always fresh.
+    _JWT_REFRESH_BUFFER = 300   # 5 minutes
+
     def __init__(self, cookies_file, logger, email="", password=""):
         self._cookies_file = cookies_file
         self._logger = logger
@@ -1551,8 +1556,48 @@ class FishtankAuth:
         self._stream_host = self._DEFAULT_STREAM_HOST  # fallback host (any online stream)
         self._stream_hosts = {}  # per-stream hosts from loadBalancer, e.g. {"dirc-5": "streams-f.fishtank.live"}
         self._all_stream_names = {}  # all stream id→name from API, populated by get_live_streams
+        self._refresh_thread = None
+        self._refresh_stop = threading.Event()
 
     # ── Public interface ──────────────────────────────────────────────────
+
+    def start_background_refresh(self):
+        """Start a background thread that proactively refreshes the JWT before it expires.
+
+        This prevents the ~36-minute coverage gap that occurs when a short-lived
+        30-minute token (as issued by Fishtank for the cameraman stream) expires
+        while the worker is in a reconnect loop and not actively calling get_jwt().
+        The thread wakes up every 60 seconds, checks whether the current token is
+        within _JWT_REFRESH_BUFFER seconds of expiry, and silently refreshes it.
+        """
+        if self._refresh_thread and self._refresh_thread.is_alive():
+            return
+        self._refresh_stop.clear()
+
+        def _refresh_loop():
+            while not self._refresh_stop.wait(timeout=60):
+                now = time.time()
+                if self._jwt is not None and now >= (self._jwt_exp - self._JWT_REFRESH_BUFFER):
+                    remaining = max(0, self._jwt_exp - now)
+                    self._logger.info(
+                        f"[fishtank] JWT expires in {remaining:.0f}s — proactively refreshing"
+                    )
+                    self._refresh()
+
+        self._refresh_thread = threading.Thread(
+            target=_refresh_loop,
+            daemon=True,
+            name="fishtank-jwt-refresh",
+        )
+        self._refresh_thread.start()
+        self._logger.info("[fishtank] Background JWT refresh thread started")
+
+    def stop_background_refresh(self):
+        """Stop the background JWT refresh thread."""
+        self._refresh_stop.set()
+        if self._refresh_thread:
+            self._refresh_thread.join(timeout=5)
+            self._refresh_thread = None
 
     def resolve_stream_id(self, name):
         """Resolve a camera name or raw stream-ID to a canonical stream ID.
@@ -3027,6 +3072,22 @@ def record_worker(args):
     CRASH_BACKOFF_BASE = 60           # initial delay
     CRASH_BACKOFF_MAX = 900           # cap at 15 min
 
+    # Micro-fragment throttle: when the server is repeatedly dropping the
+    # connection after only a few seconds (e.g. the cameraman 20:12–20:30 storm
+    # that produced ~30 × 20-second files), we apply a growing backoff rather
+    # than immediately reconnecting.  This avoids hammering the CDN and filling
+    # PendingDeletion with dozens of tiny but technically-valid files.
+    # Triggers after MICRO_FRAG_LIMIT consecutive recordings shorter than
+    # MICRO_FRAG_MIN_SECONDS, regardless of file size (so it catches fragments
+    # that pass the min_file_size_mb check).  Resets on any recording that runs
+    # longer than MICRO_FRAG_MIN_SECONDS.
+    MICRO_FRAG_MIN_SECONDS = 30       # recordings shorter than this count as micro-fragments
+    MICRO_FRAG_LIMIT = 5              # consecutive micro-fragments before throttling
+    MICRO_FRAG_BACKOFF_BASE = 30      # first throttle sleep (seconds)
+    MICRO_FRAG_BACKOFF_MAX = 300      # cap at 5 minutes
+    _consecutive_micro_frags = 0
+    _micro_frag_backoff = MICRO_FRAG_BACKOFF_BASE
+
     # Stream metadata shown in the status table (set when variant is resolved)
     stream_info = ""
 
@@ -3041,6 +3102,7 @@ def record_worker(args):
         logger.info(
             f"[fishtank] Auth manager initialised for stream '{username}' "
             f"(auth method: {auth_method})")
+        fishtank_auth.start_background_refresh()
 
     # Initial stagger: randomize the very first check so workers don't all fire at once
     initial_delay = random.uniform(0, min(poll_base_seconds, 10))
@@ -3263,6 +3325,32 @@ def record_worker(args):
                 reconnect_deadline = time.monotonic() + (reconnect_grace_minutes * 60)
                 logger.info(f"Recording ended after {format_elapsed(elapsed)} — entering {reconnect_grace_minutes}min reconnect grace period")
 
+            # ── Micro-fragment throttle ─────────────────────────────────────
+            # If the server keeps dropping us after only a few seconds (e.g.
+            # a CDN reset storm), count consecutive short recordings and apply
+            # a growing backoff.  This prevents dozens of tiny files accumulating
+            # and reduces unnecessary load on the server.
+            if not stop_event.is_set() and not split_requested:
+                if elapsed < MICRO_FRAG_MIN_SECONDS:
+                    _consecutive_micro_frags += 1
+                    if _consecutive_micro_frags >= MICRO_FRAG_LIMIT:
+                        throttle_sleep = min(_micro_frag_backoff, MICRO_FRAG_BACKOFF_MAX)
+                        _micro_frag_backoff = min(_micro_frag_backoff * 2, MICRO_FRAG_BACKOFF_MAX)
+                        logger.warning(
+                            f"Micro-fragment storm detected: {_consecutive_micro_frags} consecutive "
+                            f"recordings under {MICRO_FRAG_MIN_SECONDS}s — throttling for {throttle_sleep}s"
+                        )
+                        reconnect_mode = False
+                        time.sleep(throttle_sleep)
+                else:
+                    # Long enough recording — reset fragment counter and backoff
+                    if _consecutive_micro_frags >= MICRO_FRAG_LIMIT:
+                        logger.info(
+                            f"Recording ran {format_elapsed(elapsed)} — micro-fragment throttle reset"
+                        )
+                    _consecutive_micro_frags = 0
+                    _micro_frag_backoff = MICRO_FRAG_BACKOFF_BASE
+
             time.sleep(2)  # let file handles be released
 
             # ── Streamlink fallback for Kick ──
@@ -3359,6 +3447,8 @@ def record_worker(args):
                 consecutive_small_remux_fails = 0
                 _small_remux_backoff = SMALL_REMUX_BACKOFF_BASE
                 _crash_backoff = CRASH_BACKOFF_BASE
+                _consecutive_micro_frags = 0
+                _micro_frag_backoff = MICRO_FRAG_BACKOFF_BASE
 
                 # Save metadata sidecar
                 save_metadata(
@@ -3367,6 +3457,42 @@ def record_worker(args):
                     elapsed,
                     stream_title,
                 )
+
+                # ── Audio stream sanity check ───────────────────────────────
+                # Fishtank's cameraman stream sometimes delivers video-only HLS
+                # segments (no audio track at all), producing silent MP4s that
+                # are useless for fan clips.  Detect this early so it shows up
+                # clearly in the log rather than being discovered later.
+                try:
+                    probe_cmd = [
+                        ffmpeg_path.replace("ffmpeg", "ffprobe")
+                        if ffmpeg_path != "ffmpeg" else "ffprobe",
+                        "-v", "quiet",
+                        "-print_format", "json",
+                        "-show_streams",
+                        "-select_streams", "a",
+                        mp4_file,
+                    ]
+                    probe_result = subprocess.run(
+                        probe_cmd, capture_output=True, text=True, timeout=30
+                    )
+                    if probe_result.returncode == 0:
+                        probe_data = json.loads(probe_result.stdout or "{}")
+                        audio_streams = probe_data.get("streams", [])
+                        if not audio_streams:
+                            logger.warning(
+                                f"⚠ NO AUDIO TRACK in {os.path.basename(mp4_file)} — "
+                                f"stream delivered video-only segments (silent recording)"
+                            )
+                        else:
+                            codec = audio_streams[0].get("codec_name", "?")
+                            channels = audio_streams[0].get("channels", "?")
+                            if platform == "fishtank":
+                                logger.info(
+                                    f"Audio OK: {codec}, {channels}ch"
+                                )
+                except Exception as _probe_err:
+                    logger.debug(f"Audio check skipped: {_probe_err}")
 
                 # Move raw file to pending deletion
                 pending_path = os.path.join(pending_dir, os.path.basename(raw_file))
