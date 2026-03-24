@@ -21,6 +21,8 @@ A desktop application for simultaneously recording live streams from **Kick**, *
 * **Per-channel control** — Start or stop individual channels mid-session via right-click context menu
 * **Channel reorder** — Rearrange your channel list with ▲/▼ buttons or double-click a row to toggle it on/off
 * **Recording metadata** — JSON sidecar files with channel info, stream title, duration, and timestamps
+* **Audio stream verification** — Warns immediately after remux if a recording contains no audio track
+* **Micro-fragment throttle** — Detects CDN reset storms (repeated sub-30s recordings) and backs off rather than accumulating dozens of tiny files
 * **Auto-cleanup** — Configurable retention period for processed files
 * **Robust shutdown** — No orphaned processes, no zombie ffmpeg instances
 
@@ -235,6 +237,10 @@ The GUI includes a **Polling** dropdown to switch between Relaxed (5 min), Norma
 
 **Twitch recordings have no audio** — This is rare but can happen with certain streamlink versions. Update streamlink: `pip install -U streamlink`
 
+**Fishtank recordings have no audio** — Fishtank's CDN occasionally serves video-only HLS segments for certain cameras (notably Cameraman). This is a server-side issue and cannot be fixed by the recorder. MSR will log a `⚠ NO AUDIO TRACK` warning immediately after remux so affected files are easy to find.
+
+**Fishtank: many short recordings in a row** — If Fishtank's CDN is resetting connections every 20–30 seconds (common during busy periods), MSR will detect this as a micro-fragment storm after 5 consecutive short recordings and apply a backoff before retrying. This is normal behavior — it reduces log noise and avoids hammering their servers during instability.
+
 **Large recordings produce corrupt MP4** — The remux timeout scales automatically with file size (1 minute per GB + buffer). If you still have the `.ts` file in PendingDeletion, you can re-remux manually: `ffmpeg -i recording.ts -c copy -movflags +faststart output.mp4`
 
 **Large .ts files in Recorded folder** — These are raw recordings that haven't been remuxed yet. This happens if you force-quit the program instead of using Stop. Restart the program and it will clean them up.
@@ -306,9 +312,11 @@ Two rooms (`br3g-5`, `bare-5`) remain unrevealed and are accessible via their ra
 
 ### How It Works
 
-Detection and recording both use fishtank.live's HLS streams served by MistServer. On each poll the program queries the live-streams API to check which cameras are active, then records via ffmpeg's HLS downloader. The JWT token is obtained from the API at login and refreshed automatically before expiry.
+Detection and recording both use fishtank.live's HLS streams served by MistServer. On each poll the program queries the live-streams API to check which cameras are active, then records via ffmpeg's HLS downloader. The JWT token is obtained from the API at login and refreshed automatically — a background thread monitors the token's expiry and renews it proactively with a 5-minute buffer, preventing coverage gaps on streams like Cameraman that are issued short-lived 30-minute tokens.
 
 Before each recording starts, MSR fetches the HLS master playlist and selects the highest-bandwidth variant automatically — this ensures recordings are always captured at the best available quality rather than whichever rendition the server happens to list first.
+
+After each recording is remuxed, MSR verifies that the output MP4 contains an audio track. Fishtank's CDN occasionally delivers video-only HLS segments; a clear warning is logged immediately so affected files are easy to identify.
 
 ## Platform Notes
 
@@ -320,7 +328,7 @@ Before each recording starts, MSR fetches the HLS master playlist and selects th
 
 **Rumble**: Uses yt-dlp. Add channels as custom URLs using the channel page format (`https://rumble.com/c/ChannelName`). The program automatically resolves channel pages to the current live video URL. If Cloudflare blocks access, the program falls back to browser impersonation via `curl_cffi` (install with `pip install curl_cffi`). When a Rumble channel is offline, the program correctly detects this without downloading previous VODs.
 
-**Fishtank.live**: Uses ffmpeg's HLS downloader with a token obtained from the Fishtank API. Requires a `[Fishtank]` section in `config.ini` with your account email and password. All Season 5 cameras are supported. The token is valid for 24 hours and refreshes automatically. No cookies required.
+**Fishtank.live**: Uses ffmpeg's HLS downloader with a token obtained from the Fishtank API. Requires a `[Fishtank]` section in `config.ini` with your account email and password. All Season 5 cameras are supported. Tokens are refreshed proactively by a background thread (5-minute buffer before expiry) — important because some streams like Cameraman are issued 30-minute tokens rather than the usual 24-hour ones. After each remux, audio track presence is verified and a warning is logged if a recording is silent. No cookies required.
 
 **Custom URLs**: Uses yt-dlp, which supports [1,800+ sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md). Direct `.m3u8` HLS links also work. Select "custom" from the platform dropdown and paste the full URL.
 
