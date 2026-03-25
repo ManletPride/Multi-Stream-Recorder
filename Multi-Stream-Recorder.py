@@ -1539,6 +1539,16 @@ class FishtankAuth:
         "bare5":      "bare-5",
         "br3g":       "br3g-5",
         "br3g5":      "br3g-5",
+        # Season 5: additional cameras confirmed via HAR capture (2026-03-25)
+        "dormalt":    "dmrm2-5",
+        "dormsalt":   "dmrm2-5",
+        "dormalternate": "dmrm2-5",
+        "dorm2":      "dmrm2-5",
+        "dmrm2":      "dmrm2-5",
+        "jobboard":   "jobb-5",
+        "job":        "jobb-5",
+        "jobs":       "jobb-5",
+        "jobb":       "jobb-5",
     }
 
     # How many seconds before expiry to proactively refresh the JWT.
