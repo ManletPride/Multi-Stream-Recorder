@@ -301,12 +301,14 @@ All Season 5 cameras are supported:
 | `confessional` | Confessional | Season Pass |
 | `jungle` | Jungle Room | Season Pass |
 | `computerlab`, `bbcl` | Computer Lab | Season Pass |
+| `dormalt`, `dorm2`, `dmrm2` | Dorm Alternate | Normal |
+| `jobboard`, `job`, `jobb` | Job Board | Normal |
 | `br3g` | ??? (unlocking soon) | TBD |
 | `bare` | ??? (unlocking soon) | TBD |
 
 Short aliases also work — `cam` for Cameraman, `dirc` for Director, `dmrm` for Dorm, etc. Raw stream IDs like `dirc-5` and `dmrm-5` are accepted directly. Some rooms require a **season pass** subscription.
 
-Two rooms (`br3g-5`, `bare-5`) remain unrevealed and are accessible via their raw stream IDs or aliases. The Computer Lab (`bbcl-5`) was revealed and is now fully supported via the `computerlab` alias.
+Two rooms (`br3g-5`, `bare-5`) remain unrevealed and are accessible via their raw stream IDs or aliases. The Computer Lab (`bbcl-5`) was revealed and is fully supported via the `computerlab` alias. A second dorm camera (`dmrm2-5`) and a job board camera (`jobb-5`) were identified via stream traffic analysis and are supported as `dormalt`/`dorm2` and `jobboard`/`job` respectively.
 
 > **Season 5 renames**: `balcony` → `eastwing` (`bkny-5`), `hallwayup` → `westwing` (`hwup-5`), `hallwaydown` → `hallway` (`hwdn-5`). The old aliases still work for backwards compatibility.
 
