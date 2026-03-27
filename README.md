@@ -284,33 +284,36 @@ All Season 5 cameras are supported:
 |---|---|---|
 | `director` | Director Mode | Free |
 | `dorm` | Dorm | Normal |
+| `dormalt`, `dorm2`, `dmrm2` | Dorm Alternate | Normal |
 | `closet` | Closet | Normal |
-| `bar` | Bar | Normal |
 | `kitchen` | Kitchen | Normal |
+| `bar` | Bar | Normal |
+| `barptz` | Bar PTZ | Season Pass |
 | `hallway` | Hallway | Normal |
 | `dining` | Dining Room | Normal |
 | `market` | Market | Normal |
+| `marketalt`, `market2` | Market Alternate | Normal |
 | `foyer` | Foyer | Normal |
 | `glassroom` | Glassroom | Normal |
 | `corridor` | Corridor | Normal |
 | `eastwing` | East Wing | Normal |
 | `westwing` | West Wing | Normal |
-| `cameraman` | Cameraman | Season Pass XL |
 | `jacuzzi` | Jacuzzi | Season Pass |
-| `barptz` | Bar PTZ | Season Pass |
-| `confessional` | Confessional | Season Pass |
 | `jungle` | Jungle Room | Season Pass |
 | `computerlab`, `bbcl` | Computer Lab | Season Pass |
-| `dormalt`, `dorm2`, `dmrm2` | Dorm Alternate | Normal |
 | `jobboard`, `job`, `jobb` | Job Board | Normal |
+| `confessional` | Confessional | Season Pass |
+| `cameraman` | Cameraman | Season Pass XL |
+| `arena` | Arena | Normal |
 | `br3g` | ??? (unlocking soon) | TBD |
-| `bare` | ??? (unlocking soon) | TBD |
 
 Short aliases also work — `cam` for Cameraman, `dirc` for Director, `dmrm` for Dorm, etc. Raw stream IDs like `dirc-5` and `dmrm-5` are accepted directly. Some rooms require a **season pass** subscription.
 
-Two rooms (`br3g-5`, `bare-5`) remain unrevealed and are accessible via their raw stream IDs or aliases. The Computer Lab (`bbcl-5`) was revealed and is fully supported via the `computerlab` alias. A second dorm camera (`dmrm2-5`) and a job board camera (`jobb-5`) were identified via stream traffic analysis and are supported as `dormalt`/`dorm2` and `jobboard`/`job` respectively.
+One room (`br3g-5`) remains unrevealed and is accessible via its raw stream ID or the `br3g` alias. The Dorm Alternate (`dmrm2-5`) and Job Board (`jobb-5`) were identified via stream traffic analysis; the Closet (`dmcl-5`), Market Alternate (`mrke2-5`), and Arena (`bare-5`) were confirmed in v1.5.5.
 
 > **Season 5 renames**: `balcony` → `eastwing` (`bkny-5`), `hallwayup` → `westwing` (`hwup-5`), `hallwaydown` → `hallway` (`hwdn-5`). The old aliases still work for backwards compatibility.
+
+> **Fishtank-only preset**: A `channels_fishtank.json` file is available in the repository with all 24 Season 5 cameras pre-populated. Rename it to `channels.json` and enable whichever cameras you want to record.
 
 ### How It Works
 
