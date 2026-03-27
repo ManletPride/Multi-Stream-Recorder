@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
-__version__ = "1.5.3"
+__version__ = "1.5.5"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -1524,17 +1524,17 @@ class FishtankAuth:
         "brpz":       "brpz-5",
         "market":     "mrke-5",
         "mrke":       "mrke-5",
+        # Season 5: second Market camera confirmed via HAR capture (2026-03-26)
+        "marketalt":  "mrke2-5",
+        "marketalternate": "mrke2-5",
+        "market2":    "mrke2-5",
+        "mrke2":      "mrke2-5",
         "jungleroom": "br4j-5",
         "jungle":     "br4j-5",
         "br4j":       "br4j-5",
-        # Season 5: three additional rooms detected in API — names TBD pending unlock
-        # From the website unlock countdown (as of 2026-03-21):
-        #   bbcl-5  — unlocks today
-        #   br3g-5  — unlocks in ~8 days
-        #   bare-5  — unlocks in ~12 days
-        # Raw stream IDs work now; friendly name aliases will be added once confirmed.
-        "bbcl":       "bbcl-5",
-        "computerlab":"bbcl-5",
+        # Season 5: "Computer Lab" (bbcl-5) confirmed; br3g-5 still pending official name
+        # Season 5: "Arena" officially unveiled 2026-03-26; bare-5 stream ID confirmed via HAR
+        "arena":      "bare-5",
         "bare":       "bare-5",
         "bare5":      "bare-5",
         "br3g":       "br3g-5",
