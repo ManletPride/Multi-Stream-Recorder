@@ -1,0 +1,98 @@
+[
+  {
+    "name": "fishtank:director",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:dorm",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:dormalt",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:closet",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:kitchen",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:bar",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:barptz",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:hallway",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:dining",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:market",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:marketalt",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:foyer",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:glassroom",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:corridor",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:eastwing",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:westwing",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:jacuzzi",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:jungleroom",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:computerlab",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:jobboard",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:confessional",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:cameraman",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:arena",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:br3g",
+    "enabled": false
+  }
+]
