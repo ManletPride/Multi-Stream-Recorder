@@ -1498,7 +1498,10 @@ class FishtankAuth:
         "ktch":       "ktch-5",
         "bar":        "brrr-5",
         "brrr":       "brrr-5",
-        "jacuzzi":    "jckz-5",
+        # Season 5: "Jacuzzi" renamed to "Laundry Room" (jckz-5 stream ID unchanged)
+        "laundry":    "jckz-5",
+        "laundryroom":"jckz-5",
+        "jacuzzi":    "jckz-5",   # old alias kept for backwards compatibility
         "jckz":       "jckz-5",
         "dining":     "dnrm-5",
         "dnrm":       "dnrm-5",
@@ -1532,7 +1535,12 @@ class FishtankAuth:
         "jungleroom": "br4j-5",
         "jungle":     "br4j-5",
         "br4j":       "br4j-5",
-        # Season 5: "Computer Lab" (bbcl-5) confirmed; br3g-5 still pending official name
+        # Season 5: "Computer Lab" confirmed (bbcl-5)
+        "computerlab": "bbcl-5",
+        "complab":     "bbcl-5",
+        "bbcl":        "bbcl-5",
+        "bbcl5":       "bbcl-5",
+        # Season 5: br3g-5 still pending official name
         # Season 5: "Arena" officially unveiled 2026-03-26; bare-5 stream ID confirmed via HAR
         "arena":      "bare-5",
         "bare":       "bare-5",
@@ -5242,6 +5250,7 @@ def main_gui(config):
         if st.get("status", "").lower() in ("stopped",):
             return  # already stopped
         recorder.stop_channel(ch_name)
+        root.after(0, refresh_status)  # reflect stopped state immediately
 
     def _start_selected_channel():
         ch_name = _get_selected_status_channel()
@@ -5251,6 +5260,7 @@ def main_gui(config):
         if st.get("status", "").lower() not in ("stopped",):
             return  # only restart channels that were individually stopped
         recorder.start_channel(ch_name)
+        root.after(0, refresh_status)  # reflect restarting state immediately
 
     def _open_status_channel_url():
         ch_name = _get_selected_status_channel()
