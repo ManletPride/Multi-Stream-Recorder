@@ -1,7 +1,7 @@
 [
   {
     "name": "fishtank:director",
-    "enabled": false
+    "enabled": true
   },
   {
     "name": "fishtank:dorm",
@@ -16,10 +16,6 @@
     "enabled": false
   },
   {
-    "name": "fishtank:kitchen",
-    "enabled": false
-  },
-  {
     "name": "fishtank:bar",
     "enabled": false
   },
@@ -28,7 +24,19 @@
     "enabled": false
   },
   {
+    "name": "fishtank:kitchen",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:cameraman",
+    "enabled": false
+  },
+  {
     "name": "fishtank:hallway",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:laundryroom",
     "enabled": false
   },
   {
@@ -52,6 +60,18 @@
     "enabled": false
   },
   {
+    "name": "fishtank:computerlab",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:arena",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:confessional",
+    "enabled": false
+  },
+  {
     "name": "fishtank:corridor",
     "enabled": false
   },
@@ -64,31 +84,11 @@
     "enabled": false
   },
   {
-    "name": "fishtank:jacuzzi",
-    "enabled": false
-  },
-  {
     "name": "fishtank:jungleroom",
     "enabled": false
   },
   {
-    "name": "fishtank:computerlab",
-    "enabled": false
-  },
-  {
     "name": "fishtank:jobboard",
-    "enabled": false
-  },
-  {
-    "name": "fishtank:confessional",
-    "enabled": false
-  },
-  {
-    "name": "fishtank:cameraman",
-    "enabled": false
-  },
-  {
-    "name": "fishtank:arena",
     "enabled": false
   },
   {
