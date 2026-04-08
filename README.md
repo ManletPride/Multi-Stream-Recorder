@@ -305,11 +305,11 @@ All Season 5 cameras are supported:
 | `confessional` | Confessional | Season Pass |
 | `cameraman` | Cameraman | Season Pass XL |
 | `arena` | Arena | Normal |
-| `br3g` | ??? (unlocking soon) | TBD |
+| `goofactory`, `goofact`, `goo`, `br3g` | Goo Factory | Normal |
 
 Short aliases also work — `cam` for Cameraman, `dirc` for Director, `dmrm` for Dorm, etc. Raw stream IDs like `dirc-5` and `dmrm-5` are accepted directly. Some rooms require a **season pass** subscription.
 
-One room (`br3g-5`) remains unrevealed and is accessible via its raw stream ID or the `br3g` alias. The Dorm Alternate (`dmrm2-5`) and Job Board (`jobb-5`) were identified via stream traffic analysis; the Closet (`dmcl-5`), Market Alternate (`mrke2-5`), and Arena (`bare-5`) were confirmed in v1.5.5.
+The Goo Factory (`br3g-5`) is the final revealed Season 5 room, confirmed via stream traffic analysis. The Dorm Alternate (`dmrm2-5`) and Job Board (`jobb-5`) were identified the same way; the Closet (`dmcl-5`), Market Alternate (`mrke2-5`), and Arena (`bare-5`) were confirmed in v1.5.5.
 
 > **Season 5 renames**: `balcony` → `eastwing` (`bkny-5`), `hallwayup` → `westwing` (`hwup-5`), `hallwaydown` → `hallway` (`hwdn-5`), `jacuzzi` → `laundry` (`jckz-5`). The old aliases still work for backwards compatibility.
 
