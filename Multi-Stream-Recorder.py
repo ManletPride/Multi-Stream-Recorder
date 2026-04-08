@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
-__version__ = "1.5.6"
+__version__ = "1.5.7"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -1525,6 +1525,11 @@ class FishtankAuth:
         "cam":        "cameraman2-5",
         "barptz":     "brpz-5",
         "brpz":       "brpz-5",
+        # Season 5: "Bar Alternate" confirmed via HAR capture (2026-04-02)
+        "baralt":          "brrr2-5",
+        "baralternate":    "brrr2-5",
+        "bar2":            "brrr2-5",
+        "brrr2":           "brrr2-5",
         "market":     "mrke-5",
         "mrke":       "mrke-5",
         # Season 5: second Market camera confirmed via HAR capture (2026-03-26)
@@ -1547,6 +1552,10 @@ class FishtankAuth:
         "bare5":      "bare-5",
         "br3g":       "br3g-5",
         "br3g5":      "br3g-5",
+        #Season 5: Goo Factory revealed
+        "goofactory":     "br3g-5",
+        "goofact":        "br3g-5",
+        "goo":            "br3g-5",
         # Season 5: additional cameras confirmed via HAR capture (2026-03-25)
         "dormalt":    "dmrm2-5",
         "dormsalt":   "dmrm2-5",
@@ -3512,9 +3521,13 @@ def record_worker(args):
                 except Exception as _probe_err:
                     logger.debug(f"Audio check skipped: {_probe_err}")
 
-                # Move raw file to pending deletion
+                # Move raw file to pending deletion.
+                # Kick/streamlink sometimes holds a file handle open for several
+                # seconds after the process exits.  Retry generously (up to ~60 s)
+                # so the file doesn't get stranded in Recorded until next startup.
                 pending_path = os.path.join(pending_dir, os.path.basename(raw_file))
-                max_retries = 3
+                max_retries = 6
+                _move_wait = [5, 10, 10, 15, 15, 15]  # seconds between attempts
                 for attempt in range(max_retries):
                     try:
                         shutil.move(raw_file, pending_path)
@@ -3522,8 +3535,9 @@ def record_worker(args):
                         break
                     except PermissionError as e:
                         if attempt < max_retries - 1:
-                            logger.warning(f"File locked, retrying in 2s… (attempt {attempt + 1}/{max_retries})")
-                            time.sleep(2)
+                            wait = _move_wait[attempt]
+                            logger.warning(f"File locked, retrying in {wait}s… (attempt {attempt + 1}/{max_retries})")
+                            time.sleep(wait)
                         else:
                             logger.error(f"Move failed after {max_retries} attempts: {e}")
                             logger.info(f"File will be cleaned up on next run: {raw_file}")
@@ -3624,12 +3638,15 @@ class BackgroundCleaner:
     PendingDeletion folder.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, status_dict=None):
         self.config = config
         self.root_path = config.get('Paths', 'streams_dir')
         self.recorded_base = os.path.join(self.root_path, "Recorded")
         self.processed_base = os.path.join(self.root_path, "Processed")
         self.pending_base = os.path.join(self.root_path, PENDING_DELETION_FOLDER)
+        # Optional reference to the recorder's status_dict so the cleaner can
+        # skip .ts files whose worker is actively remuxing them (Bug #4 fix).
+        self.status_dict = status_dict if status_dict is not None else {}
         self._thread = None
         self._stop_event = threading.Event()
 
@@ -3669,7 +3686,7 @@ class BackgroundCleaner:
             found_locked = self._process_leftover_files()
             if not found_locked:
                 break
-            logging.info(f"Cleanup: Some files were locked, waiting 10s before retry (pass {pass_num + 2}/3)")
+            logging.info(f"Cleanup: Some files were locked, waiting 10s before retry (pass {pass_num + 1}/3)")
             for _ in range(10):
                 if self._stop_event.is_set():
                     return
@@ -3677,12 +3694,18 @@ class BackgroundCleaner:
 
         logging.info("Background cleanup finished")
 
-    def _process_leftover_files(self):
-        # Only one cleanup scan may run at a time across all threads (Bug #2 fix).
-        # This prevents the per-channel cleanup thread and the global background
-        # cleanup thread from racing on the same .ts files simultaneously.
-        if not _cleanup_lock.acquire(blocking=False):
-            logging.info("Cleanup: another cleanup pass is already running — skipping duplicate")
+    def _process_leftover_files(self, lock_timeout=120):
+        # Only one cleanup scan may run at a time across all threads.
+        # Block-wait up to lock_timeout seconds so that when a per-channel
+        # cleanup thread holds the lock, the _run retry loop actually gets to
+        # run a second pass once the first finishes (rather than bailing out
+        # immediately and marking the session as done with locked files).
+        acquired = _cleanup_lock.acquire(blocking=True, timeout=lock_timeout)
+        if not acquired:
+            logging.warning(
+                f"Cleanup: could not acquire lock after {lock_timeout}s — "
+                "another cleanup pass is still running; skipping this pass"
+            )
             return False
 
         try:
@@ -3712,6 +3735,21 @@ class BackgroundCleaner:
                 pending_dir = os.path.join(self.pending_base, platform, username_dir)
                 os.makedirs(processed_path, exist_ok=True)
                 os.makedirs(pending_dir, exist_ok=True)
+
+                # Bug #4 fix: if the worker for this channel is actively
+                # remuxing a file in-process, the .ts is still open/locked
+                # even though its size looks static (remux reads, not writes).
+                # Skip the entire channel directory in that case — the worker
+                # will move the file to PendingDeletion itself once done.
+                channel_key = f"{platform}:{username_dir}"
+                channel_status = self.status_dict.get(channel_key, {}).get("status", "")
+                if channel_status == "Remuxing...":
+                    logging.info(
+                        f"Cleanup: {channel_key} is actively remuxing — "
+                        "skipping its directory to avoid contention"
+                    )
+                    found_locked = True
+                    continue
 
                 for filename in os.listdir(username_path):
                     if not filename.endswith('.ts'):
@@ -3905,7 +3943,7 @@ class StreamRecorder:
         # is already in progress for that same channel (e.g. rapid double-click).
         self._spawning: set = set()
         self._spawn_lock = threading.Lock()
-        self.cleaner = BackgroundCleaner(config)
+        self.cleaner = BackgroundCleaner(config, status_dict=self.status_dict)
 
     def update_status_from_queue(self):
         while not self.status_queue.empty():
