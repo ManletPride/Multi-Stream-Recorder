@@ -24,6 +24,10 @@
     "enabled": false
   },
   {
+    "name": "fishtank:baralt",
+    "enabled": false
+  },
+  {
     "name": "fishtank:kitchen",
     "enabled": false
   },
@@ -93,6 +97,10 @@
   },
   {
     "name": "fishtank:br3g",
+    "enabled": false
+  },
+  {
+    "name": "fishtank:goofactory",
     "enabled": false
   }
 ]
