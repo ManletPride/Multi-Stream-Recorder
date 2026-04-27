@@ -48,7 +48,7 @@ brew install ffmpeg
 **yt-dlp** (required for YouTube, Rumble, custom URLs):
 
 ```
-pip install yt-dlp
+pip install "yt-dlp[default]"
 ```
 
 **streamlink** (required for Twitch and Kick):
@@ -66,7 +66,7 @@ pip install -r requirements.txt
 Or install individually:
 
 ```
-pip install yt-dlp                # Required for YouTube, Rumble, custom URLs
+pip install "yt-dlp[default]"     # Required for YouTube, Rumble, custom URLs
 pip install streamlink            # Required for Twitch and Kick
 pip install psutil                # Recommended — cleaner process management
 pip install pystray Pillow plyer  # Optional — tray icon & notifications
@@ -228,6 +228,12 @@ The GUI includes a **Polling** dropdown to switch between Relaxed (5 min), Norma
 **"ffmpeg not found"** — Install ffmpeg and ensure it's in your system PATH. Test with `ffmpeg -version` in a terminal.
 
 **YouTube 403/503 errors** — Your cookies have likely expired. Re-export them from your browser. The cookie indicator in the GUI will warn you when this happens.
+
+**YouTube channels fail to record / "Challenge solver not supported"** — yt-dlp uses a JavaScript challenge solver (`yt-dlp-ejs`) to handle YouTube's bot detection. If the installed version is outdated, checks will fail silently. Fix by reinstalling yt-dlp with its optional dependencies:
+```
+pip install -U "yt-dlp[default]"
+```
+This is also why the install instructions above use `yt-dlp[default]` rather than plain `yt-dlp`. If YouTube recording breaks after a yt-dlp update, run this command first.
 
 **Kick 403 errors** — Make sure you don't have an old third-party Kick plugin overriding streamlink's built-in one. Check `%APPDATA%\streamlink\plugins\` for a `kick.py` file and delete it if present. Streamlink 8.x includes a built-in Kick plugin with Cloudflare bypass.
 
