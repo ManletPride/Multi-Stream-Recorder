@@ -1351,6 +1351,15 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
         check = subprocess.run(check_cmd, capture_output=True, text=True, timeout=timeout)
         logger.info(f"Check returncode={check.returncode}")
 
+        # Check for outdated yt-dlp-ejs challenge solver regardless of returncode —
+        # the warning appears in stderr even on successful checks and will silently
+        # cause failures once YouTube tightens enforcement.
+        if check.stderr and "challenge solver lib script version" in check.stderr.lower() and "is not supported" in check.stderr.lower():
+            logger.warning(
+                "yt-dlp challenge solver (yt-dlp-ejs) is outdated — YouTube checks may fail. "
+                "Fix: pip install -U \"yt-dlp[default]\""
+            )
+
         if check.stderr and check.returncode != 0:
             stderr_snippet = check.stderr[:200]
             logger.info(f"Check stderr: {stderr_snippet}")
