@@ -2751,7 +2751,7 @@ def _probe_stream_info_thread(raw_file, stream_info_ref, ffmpeg_path, logger, mi
     try:
         result = _sp.run(
             [ffprobe, "-v", "quiet", "-print_format", "json",
-             "-show_streams", "-select_streams", "v:0", raw_file],
+             "-show_streams", "-show_format", "-select_streams", "v:0", raw_file],
             capture_output=True, text=True, timeout=10,
         )
         data = _json.loads(result.stdout)
@@ -2772,7 +2772,7 @@ def _probe_stream_info_thread(raw_file, stream_info_ref, ffmpeg_path, logger, mi
                     parts.append(f"{fps}fps")
             except (ValueError, ZeroDivisionError):
                 pass
-        br = vs.get("bit_rate")
+        br = vs.get("bit_rate") or data.get("format", {}).get("bit_rate")
         if br:
             try:
                 parts.append(f"{int(br) / 1_000_000:.1f}Mbps")
