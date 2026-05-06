@@ -7,6 +7,7 @@ A desktop application for simultaneously recording live streams from **Kick**, *
 ## Features
 
 * **Multi-platform** — Record from Kick, Twitch, YouTube Live, Rumble, Fishtank.live, and 1,800+ sites via custom URLs
+* **Split-track HLS** — Automatically detects and records CMAF streams with separate video/audio playlists (used by Chaturbate and other CDN-backed platforms)
 * **Concurrent recording** — Monitor and record multiple streams simultaneously
 * **Automatic detection** — Polls channels and starts recording the moment a stream goes live
 * **Smart polling** — Configurable check intervals with jitter to avoid rate limiting; exponential backoff on errors only
@@ -15,7 +16,8 @@ A desktop application for simultaneously recording live streams from **Kick**, *
 * **Clean MP4 output** — Automatically remuxes raw .ts recordings to .mp4 with ffmpeg
 * **Cloudflare bypass** — Kick streams use streamlink's built-in JS challenge solver; Rumble uses browser impersonation fallback
 * **Dark mode GUI** — Full dark/light theme with system tray support and desktop notifications
-* **Live stream info** — Status table shows resolution, frame rate, and bitrate for active recordings
+* **Live stream info** — Status table shows resolution, frame rate, and bitrate for all active recordings
+* **Persistent column widths** — Status table column widths are saved between sessions
 * **Cookie support** — Use browser cookies for authenticated access (subscriber-only streams, age-gated content)
 * **Cookie health indicator** — Visual status showing if your cookies are valid, expiring, or need renewal
 * **Per-channel control** — Start or stop individual channels mid-session via right-click context menu
@@ -175,7 +177,7 @@ E:\Streams\
 │   ├── youtube\
 │   │   └── OhDough\
 │   ├── custom\
-│   │   └── rumble\
+│   │   └── chaturbate\
 │   └── fishtank\
 │       └── director\
 ├── Processed\             # Remuxed MP4 files
@@ -206,9 +208,10 @@ E:\Streams\
 
 1. **Monitoring**: Each channel gets its own worker process. Workers check if the stream is live at the configured polling interval with random jitter.
 2. **Detection**: Kick streams are checked via streamlink (with Cloudflare JS challenge solver). Twitch streams are checked via streamlink. YouTube and custom URLs use yt-dlp's `--dump-json`. Rumble channel pages are resolved to their current live video URL.
-3. **Recording**: Live streams are recorded as MPEG-TS files. Kick and Twitch use streamlink. YouTube, Rumble, and custom URLs use yt-dlp with ffmpeg as the HLS downloader.
-4. **Reconnection**: If a recording drops unexpectedly (process exits after >10 seconds of recording), the worker enters a 3-minute fast-poll mode (every 15 seconds) to catch stream reconnects.
-5. **Processing**: When you click Stop (or the stream ends), raw .ts files are remuxed to .mp4 with ffmpeg (including `+faststart` for seekability), metadata sidecars are saved, and the originals are moved to PendingDeletion.
+3. **Recording**: Live streams are recorded as MPEG-TS files. Kick and Twitch use streamlink. YouTube, Rumble, and standard custom URLs use yt-dlp with ffmpeg as the HLS downloader. Custom URLs whose streams have separate video and audio playlists (CMAF/split-track HLS) are recorded using a direct ffmpeg command that follows both playlists concurrently and muxes them in real time.
+4. **Stream info**: Once the output file reaches ~1.5 MB, a background ffprobe thread reads it and updates the status display with measured resolution, frame rate, and bitrate.
+5. **Reconnection**: If a recording drops unexpectedly (process exits after >10 seconds of recording), the worker enters a 3-minute fast-poll mode (every 15 seconds) to catch stream reconnects.
+6. **Processing**: When you click Stop (or the stream ends), raw .ts files are remuxed to .mp4 with ffmpeg (including `+faststart` for seekability), metadata sidecars are saved, and the originals are moved to PendingDeletion.
 
 ## Polling Behavior
 
@@ -241,6 +244,10 @@ This is also why the install instructions above use `yt-dlp[default]` rather tha
 
 **Rumble streams not detected** — Add Rumble channels as custom URLs using the channel page format: `https://rumble.com/c/ChannelName`. If you get 403 errors, install `curl_cffi` for browser impersonation: `pip install curl_cffi`.
 
+**Custom URL: "Requested format is not available"** — The stream uses separate video and audio playlists (CMAF/split-track HLS). This is handled automatically in v1.6.0+. If you see this error on an older version, update to the latest release.
+
+**Custom URL: 403 on ffmpeg** — The CDN rejected ffmpeg's default User-Agent. This is also handled automatically in v1.6.0+ — MSR forwards yt-dlp's exact browser headers to ffmpeg. If you still see this, check that your `cookies.txt` is current for the relevant site.
+
 **Twitch recordings have no audio** — This is rare but can happen with certain streamlink versions. Update streamlink: `pip install -U streamlink`
 
 **Fishtank recordings have no audio** — Fishtank's CDN occasionally serves video-only HLS segments for certain cameras (notably Cameraman). This is a server-side issue and cannot be fixed by the recorder. MSR will log a `⚠ NO AUDIO TRACK` warning immediately after remux so affected files are easy to find.
@@ -249,7 +256,7 @@ This is also why the install instructions above use `yt-dlp[default]` rather tha
 
 **Large recordings produce corrupt MP4** — The remux timeout scales automatically with file size (1 minute per GB + buffer). If you still have the `.ts` file in PendingDeletion, you can re-remux manually: `ffmpeg -i recording.ts -c copy -movflags +faststart output.mp4`
 
-**Large .ts files in Recorded folder** — These are raw recordings that haven't been remuxed yet. This happens if you force-quit the program instead of using Stop. Restart the program and it will clean them up.
+**Large .ts files in Recorded folder** — These are raw recordings that haven't been remuxed yet. This happens if you force-quit the program instead of using Stop. Restart the program and it will clean them up automatically on startup.
 
 **Program won't close** — If the window is unresponsive, use Ctrl+Q. The program uses a multi-layered shutdown: graceful stop → process tree kill → orphan cleanup → os.\_exit as a final backstop.
 
@@ -343,12 +350,14 @@ After each recording is remuxed, MSR verifies that the output MP4 contains an au
 
 **Custom URLs**: Uses yt-dlp, which supports [1,800+ sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md). Direct `.m3u8` HLS links also work. Select "custom" from the platform dropdown and paste the full URL.
 
+For platforms that serve CMAF HLS with separate video and audio playlists, MSR automatically detects the split-track format during the stream check and routes recording through a direct ffmpeg command rather than yt-dlp's download pipeline. This handles sites like Chaturbate where yt-dlp would otherwise fail to merge the tracks for a live stream. No configuration is required — detection and routing happen transparently.
+
 ## Requirements
 
 | Dependency | Required | Purpose |
 | --- | --- | --- |
 | Python 3.10+ | Yes | Runtime |
-| ffmpeg | Yes | Remux .ts → .mp4 |
+| ffmpeg + ffprobe | Yes | Remux .ts → .mp4; stream info detection |
 | yt-dlp | Yes | YouTube, Rumble, custom URL recording |
 | streamlink | Yes | Kick and Twitch stream recording |
 | psutil | Recommended | Clean process management |

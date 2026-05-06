@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
-__version__ = "1.5.7"
+__version__ = "1.6.0"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
