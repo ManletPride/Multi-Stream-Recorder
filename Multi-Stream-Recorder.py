@@ -1313,11 +1313,16 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
     """Check if a stream is live using yt-dlp (Kick, YouTube, custom URLs).
 
     Returns (is_live: bool, stream_title: str | None, error: str | None,
-             used_impersonation: bool, resolved_url: str | None).
+             used_impersonation: bool, resolved_url: str | None,
+             format_urls: dict | None).
     The fourth value indicates whether browser impersonation was needed,
     so the recording command can use the same flag.
     The fifth value is the resolved video URL if yt-dlp found a different
     URL than the one provided (e.g. Rumble channel page -> video URL).
+    The sixth value is a {'video': url, 'audio': url} dict when the stream
+    has separate video-only and audio-only HLS tracks (e.g. Chaturbate CMAF).
+    When present, the caller should use build_recording_command_ffmpeg_merge
+    instead of yt-dlp to avoid the live-stream buffering deadlock.
     """
     # ── Rumble channel/user pages: scan playlist for live entry ──────────
     # Unlike YouTube's @handle/live, Rumble has no "give me the live stream"
@@ -1332,14 +1337,14 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
             live_url = _find_rumble_live_url(url, logger, timeout, cookies_file, impersonate=True)
         if live_url is None:
             # No live stream found in playlist right now — report as offline
-            return False, None, None, False, None
+            return False, None, None, False, None, None
         # Found a live entry — check it directly to get full metadata & confirm live status
         logger.info(f"Rumble channel scan resolved live URL: {live_url}")
         url = live_url  # proceed with the specific live video URL from here on
 
     if not HAS_YTDLP:
         logger.error("yt-dlp not installed — cannot check Kick/YouTube streams")
-        return False, None, "yt-dlp not installed", False, None
+        return False, None, "yt-dlp not installed", False, None, None
 
     check_cmd = ["yt-dlp", "--dump-json", "--playlist-items", "1"]
     if cookies_file:
@@ -1372,7 +1377,7 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
 
                 if not is_live and data.get("live_status") == "is_upcoming":
                     logger.info("Stream is scheduled but not live yet")
-                    return False, title, "scheduled (not started)", False, None
+                    return False, title, "scheduled (not started)", False, None, None
 
                 # Check if yt-dlp resolved to a different URL (e.g. channel page -> video)
                 resolved = data.get("webpage_url") or data.get("url")
@@ -1394,24 +1399,68 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
                     logger.info(f"Resolved video is not live (live_status={live_status!r}) — treating as offline")
 
                 logger.info(f"yt-dlp found stream: is_live={is_live}, title={title!r}")
-                return is_live, title, None, False, resolved_url
+
+                # Detect split video+audio HLS tracks (e.g. Chaturbate CMAF).
+                # When present, yt-dlp's bestvideo+bestaudio merge requires
+                # buffering both streams until completion — which deadlocks on
+                # live streams.  Return the URLs so the caller can use ffmpeg
+                # directly instead.
+                format_urls = None
+                formats = data.get("formats", [])
+                if formats:
+                    video_fmts = [f for f in formats
+                                  if f.get("vcodec") not in (None, "none")
+                                  and f.get("url")]
+                    audio_fmts = [f for f in formats
+                                  if f.get("vcodec") in (None, "none")
+                                  and f.get("url")]
+                    if video_fmts and audio_fmts:
+                        best_v = max(video_fmts, key=lambda f: f.get("tbr") or f.get("vbr") or 0)
+                        best_a = max(audio_fmts, key=lambda f: f.get("tbr") or f.get("abr") or 0)
+                        # manifest_url is the master HLS playlist (long-lived JWT).
+                        # Individual chunklist URLs carry short-lived session tokens
+                        # that may expire between the check and record phases — so we
+                        # prefer the master URL and let ffmpeg negotiate its own session.
+                        manifest_url = best_v.get("manifest_url") or best_a.get("manifest_url")
+                        # Carry yt-dlp's exact per-format http_headers through to ffmpeg.
+                        # These are what yt-dlp uses internally when hitting the CDN —
+                        # guessing a different header set risks Cloudflare rejections.
+                        http_headers = best_v.get("http_headers") or best_a.get("http_headers") or {}
+                        format_urls = {
+                            "video": best_v["url"],
+                            "audio": best_a["url"],
+                            "manifest": manifest_url,
+                            "http_headers": http_headers,
+                            # Stream info fields for the status display
+                            "width":  best_v.get("width"),
+                            "height": best_v.get("height"),
+                            "fps":    best_v.get("fps"),
+                            "tbr":    best_v.get("tbr") or best_v.get("vbr"),
+                        }
+                        logger.info(
+                            f"Split tracks detected — video: {best_v.get('format_id')} "
+                            f"({best_v.get('tbr', '?')}k), audio: {best_a.get('format_id')}"
+                            + (f", manifest: {manifest_url[:60]}…" if manifest_url else "")
+                        )
+
+                return is_live, title, None, False, resolved_url, format_urls
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse yt-dlp JSON: {e}")
-                return False, None, "JSON parse error", False, None
+                return False, None, "JSON parse error", False, None, None
 
         # Parse common error conditions from stderr
         if check.stderr:
             stderr_lower = check.stderr.lower()
             if "private video" in stderr_lower or "members-only" in stderr_lower:
-                return False, None, "members-only or private", False, None
+                return False, None, "members-only or private", False, None, None
             elif "this live event will begin" in stderr_lower:
-                return False, None, "scheduled but not started", False, None
+                return False, None, "scheduled but not started", False, None, None
             elif "video unavailable" in stderr_lower or "no video formats" in stderr_lower:
                 logger.warning("Video unavailable — might be offline or /live redirect failed")
-                return False, None, "video unavailable", False, None
+                return False, None, "video unavailable", False, None, None
             elif "unable to extract" in stderr_lower:
                 logger.warning("Could not extract stream info — channel might not be live")
-                return False, None, "extraction failed", False, None
+                return False, None, "extraction failed", False, None, None
             elif "http error 403" in stderr_lower or "http error 503" in stderr_lower:
                 # Try again with browser impersonation if curl_cffi is available
                 if HAS_CURL_CFFI:
@@ -1442,28 +1491,28 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
                                 logger.info(f"Resolved video is not live (live_status={live_status!r}) — treating as offline")
                                 is_live = False
                             logger.info(f"Impersonation succeeded: is_live={is_live}, title={title!r}")
-                            return is_live, title, None, True, resolved_url
+                            return is_live, title, None, True, resolved_url, None
                         else:
                             logger.warning("Impersonation retry also failed")
                     except Exception as e:
                         logger.warning(f"Impersonation retry error: {e}")
                 logger.error("HTTP 403/503 — cookies may be expired or invalid")
-                return False, None, "403/503 (cookies expired?)", False, None
+                return False, None, "403/503 (cookies expired?)", False, None, None
             elif "sign in" in stderr_lower or "login required" in stderr_lower:
                 logger.error("Login required — cookies may be missing or expired")
-                return False, None, "login required (check cookies)", False, None
+                return False, None, "login required (check cookies)", False, None, None
 
-        return False, None, None, False, None
+        return False, None, None, False, None, None
 
     except subprocess.TimeoutExpired:
         logger.warning("Stream check timed out")
-        return False, None, "timeout", False, None
+        return False, None, "timeout", False, None, None
     except FileNotFoundError:
         logger.error("yt-dlp not found in PATH")
-        return False, None, "yt-dlp not found", False, None
+        return False, None, "yt-dlp not found", False, None, None
     except Exception as e:
         logger.error(f"Unexpected error checking stream: {e}")
-        return False, None, str(e), False, None
+        return False, None, str(e), False, None, None
 
 
 class FishtankAuth:
@@ -2328,6 +2377,79 @@ def build_recording_command_fishtank(stream_url, raw_file, config, verbose):
     return cmd
 
 
+def build_recording_command_ffmpeg_merge(video_url, audio_url, raw_file, config, verbose, manifest_url=None, http_headers=None):
+    """Build an ffmpeg command to mux split video+audio HLS streams in real-time.
+
+    Used for CMAF/fMP4 HLS streams (e.g. Chaturbate) where yt-dlp exposes
+    separate video-only and audio-only tracks with no pre-muxed combined stream.
+
+    yt-dlp's bestvideo+bestaudio requires downloading both tracks and running a
+    separate merge pass at the end — which never happens for a live stream that
+    never ends.  Driving ffmpeg directly with both HLS URLs sidesteps this:
+    ffmpeg follows both playlists concurrently and writes a muxed MPEG-TS stream
+    to disk continuously, identical to the fishtank approach.
+
+    Preferred: pass manifest_url (the HLS master playlist).  The master URL
+    carries a long-lived JWT token.  Individual chunklist URLs (video_url /
+    audio_url) carry short-lived session tokens that may expire between the
+    yt-dlp check phase and ffmpeg startup.  When ffmpeg reads the master
+    playlist directly, the server issues it a fresh session for the chunklists.
+
+    http_headers: the http_headers dict from yt-dlp's format JSON, passed
+    verbatim to ffmpeg via -headers.  Using yt-dlp's exact headers avoids
+    Cloudflare rejections caused by mismatched header fingerprints.  Falls
+    back to a plain browser UA if not provided.
+    """
+    ffmpeg_path = config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg')
+    loglevel = "verbose" if verbose else "warning"
+
+    # Build the -headers string from yt-dlp's own http_headers dict so ffmpeg
+    # presents the exact same fingerprint to the CDN that yt-dlp used.
+    if http_headers:
+        headers = "".join(f"{k}: {v}\r\n" for k, v in http_headers.items())
+    else:
+        headers = (
+            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36\r\n"
+        )
+
+    if video_url and audio_url:
+        # Preferred: two-input merge using the individual video+audio chunklist
+        # URLs (with session tokens).  The master JWT URL is likely single-use —
+        # yt-dlp consumes it during --dump-json format enumeration, invalidating
+        # it before ffmpeg can reuse it.  Session tokens on chunklist URLs survive
+        # independently and work for the duration of the stream (VLC confirms this).
+        cmd = [
+            ffmpeg_path,
+            "-loglevel", loglevel,
+            "-protocol_whitelist", "file,http,https,tcp,tls,crypto,hls",
+            "-headers", headers,
+            "-i", video_url,
+            "-i", audio_url,
+            "-c", "copy",
+            "-map", "0:v",
+            "-map", "1:a",
+            "-f", "mpegts",
+            raw_file,
+        ]
+    elif manifest_url:
+        # Fallback: master HLS playlist when individual track URLs aren't available.
+        cmd = [
+            ffmpeg_path,
+            "-loglevel", loglevel,
+            "-protocol_whitelist", "file,http,https,tcp,tls,crypto,hls",
+            "-headers", headers,
+            "-i", manifest_url,
+            "-c", "copy",
+            "-f", "mpegts",
+            raw_file,
+        ]
+    else:
+        # Should not reach here — caller guarantees at least one URL is set.
+        raise ValueError("build_recording_command_ffmpeg_merge: no usable URL provided")
+    return cmd
+
+
 def check_stream_streamlink(url, logger, timeout=30):
     """Check if Twitch stream is live using streamlink.
 
@@ -2393,7 +2515,7 @@ def build_recording_command_ytdlp(url, raw_file, config, verbose, streamlink_deb
 
     cmd.extend([
         url,
-        "-f", "b",                     # "b" = best single format (suppresses yt-dlp warning vs "best")
+        "-f", "bestvideo+bestaudio/b/best",  # merged tracks first (e.g. Chaturbate), fallback to single-file "b" or "best"
         "-o", raw_file,
         "--no-part",
         "--no-mtime",
@@ -2542,6 +2664,15 @@ def _stderr_reader_thread(proc, logger, tool_name, verbose=False):
                                         # our values are already set generously.
     )
 
+    # Per-pattern occurrence counters for throttling repetitive warnings.
+    # Patterns listed here will be logged freely up to their limit, then
+    # a single "muted" notice is emitted and further hits are suppressed.
+    THROTTLE_PATTERNS = {
+        'found duplicated moov atom': (3, "MOOV atom duplicate warnings muted after 3 hits "
+                                          "(benign: each CMAF segment carries its own header box)"),
+    }
+    _throttle_counts = {pat: 0 for pat in THROTTLE_PATTERNS}
+
     try:
         for line in proc.stderr:
             line = line.rstrip()
@@ -2551,6 +2682,19 @@ def _stderr_reader_thread(proc, logger, tool_name, verbose=False):
 
             # Always suppress these regardless of verbose setting
             if any(pat in lower for pat in ALWAYS_SUPPRESS):
+                continue
+
+            # Throttle repetitive-but-benign warnings after N occurrences
+            _throttled = False
+            for pat, (limit, mute_msg) in THROTTLE_PATTERNS.items():
+                if pat in lower:
+                    _throttle_counts[pat] += 1
+                    if _throttle_counts[pat] == limit:
+                        logger.info(f"[{tool_name}] (Muting: {mute_msg})")
+                    if _throttle_counts[pat] >= limit:
+                        _throttled = True
+                    break
+            if _throttled:
                 continue
 
             # Check if line looks like an error but is actually benign noise
@@ -2568,16 +2712,94 @@ def _stderr_reader_thread(proc, logger, tool_name, verbose=False):
         pass
 
 
+def _probe_stream_info_thread(raw_file, stream_info_ref, ffmpeg_path, logger, min_size_bytes=1_500_000):
+    """Background thread: once raw_file reaches min_size_bytes, run ffprobe and
+    write a "WxH · Xfps · Y.YMbps" string into stream_info_ref[0].
+
+    Works for all recorder backends (yt-dlp, streamlink, direct ffmpeg) since it
+    reads the actual output file rather than parsing tool-specific stderr output.
+    ffprobe is typically bundled alongside ffmpeg in the same directory.
+
+    Only fires when stream_info_ref[0] is still None (i.e. not pre-populated by
+    the Chaturbate/Fishtank format-data path).  min_size_bytes gives ffprobe
+    enough data for a reliable bitrate measurement (~1.5 MB ≈ a few seconds of
+    video at typical live-stream bitrates).
+    """
+    import json as _json
+    import subprocess as _sp
+
+    # Derive ffprobe path — same directory as ffmpeg, just swap the binary name.
+    # Handles bare "ffmpeg", full paths, and Windows "ffmpeg.exe".
+    if os.path.dirname(ffmpeg_path):
+        ffprobe = os.path.join(os.path.dirname(ffmpeg_path),
+                               "ffprobe" + ("" if not ffmpeg_path.endswith(".exe") else ".exe"))
+    else:
+        ffprobe = "ffprobe"
+
+    # Wait for the file to grow enough for a reliable probe (up to 60s).
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        try:
+            if os.path.exists(raw_file) and os.path.getsize(raw_file) >= min_size_bytes:
+                break
+        except OSError:
+            pass
+        time.sleep(1)
+    else:
+        return  # file never appeared or grew — give up
+
+    try:
+        result = _sp.run(
+            [ffprobe, "-v", "quiet", "-print_format", "json",
+             "-show_streams", "-select_streams", "v:0", raw_file],
+            capture_output=True, text=True, timeout=10,
+        )
+        data = _json.loads(result.stdout)
+        streams = data.get("streams", [])
+        if not streams:
+            return
+        vs = streams[0]
+        parts = []
+        w, h = vs.get("width"), vs.get("height")
+        if w and h:
+            parts.append(f"{w}x{h}")
+        rfr = vs.get("r_frame_rate", "")
+        if rfr and "/" in rfr:
+            try:
+                num, den = rfr.split("/")
+                fps = round(int(num) / int(den))
+                if fps > 0:
+                    parts.append(f"{fps}fps")
+            except (ValueError, ZeroDivisionError):
+                pass
+        br = vs.get("bit_rate")
+        if br:
+            try:
+                parts.append(f"{int(br) / 1_000_000:.1f}Mbps")
+            except ValueError:
+                pass
+        if parts:
+            stream_info_ref[0] = " · ".join(parts)
+    except Exception as e:
+        logger.debug(f"ffprobe stream info probe failed: {e}")
+
+
 def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                               platform, logger, status_queue, channel_key,
                               stop_event, last_status, file_creation_timeout=60,
                               tool_name_override=None, verbose=False,
-                              max_file_size_gb=0.0, stream_info=""):
+                              max_file_size_gb=0.0, stream_info="",
+                              ffmpeg_path="ffmpeg"):
     """Monitor a recording subprocess and update status via queue.
 
     Spawns a background thread to read stderr for real-time logging.
     Detects zero-byte stalls, file growth stalls, max duration limits,
     file creation timeouts, and optional max-file-size splits.
+
+    When stream_info is empty the monitor will attempt to auto-detect it by
+    parsing ffmpeg's Video stream descriptor from stderr.  The detected string
+    (e.g. "1920x1080 · 30fps · 4.9Mbps") replaces "starting" in the status
+    detail once the stream descriptor appears in the log.
 
     Returns (last_status, split_requested) where split_requested=True means
     the caller should immediately start a new segment rather than entering
@@ -2598,12 +2820,29 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
     # Max-file-size limit (0 = disabled)
     max_file_size_bytes = int(max_file_size_gb * 1024 ** 3) if max_file_size_gb > 0 else 0
 
-    # Start stderr reader thread
+    # stream_info_ref: one-element mutable list shared between the probe thread
+    # and the monitor loop.  Pre-populate with whatever was passed in (Fishtank/
+    # Chaturbate set it from format data); leave None for probe-thread platforms.
+    stream_info_ref = [stream_info if stream_info else None]
+
+    # Start stderr reader thread.
     stderr_thread = threading.Thread(
         target=_stderr_reader_thread, args=(proc, logger, tool_name, verbose),
         daemon=True, name=f"stderr-{channel_key}",
     )
     stderr_thread.start()
+
+    # Stream-info probe thread: runs ffprobe on the output file once it has
+    # enough data (~1.5 MB).  Populates stream_info_ref[0] with a
+    # "WxH · Xfps · Y.YMbps" string for all platforms.  Skipped when
+    # stream_info was pre-populated (Chaturbate/Fishtank format-data path).
+    if stream_info_ref[0] is None:
+        probe_thread = threading.Thread(
+            target=_probe_stream_info_thread,
+            args=(raw_file, stream_info_ref, ffmpeg_path, logger),
+            daemon=True, name=f"probe-{channel_key}",
+        )
+        probe_thread.start()
 
     while proc.poll() is None and not stop_event.is_set():
         elapsed = time.monotonic() - start_time
@@ -2651,8 +2890,9 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
 
                 progress_pct = min(100, (elapsed / (max_record_hours * 3600)) * 100) if max_record_hours > 0 else 50
 
-                # Build detail string: stream info when available, otherwise empty
-                detail = stream_info if stream_info else ""
+                # Build detail string: use pre-populated stream_info, auto-detected
+                # info from the stderr parser, or empty while waiting for detection.
+                detail = stream_info_ref[0] if stream_info_ref[0] else "starting"
 
                 new_status = {
                     "status": "Recording",
@@ -3170,6 +3410,7 @@ def record_worker(args):
 
             # Check if stream is live
             need_impersonate = False
+            format_urls = None
             recording_url = url  # may be overridden by resolved URL
             if platform == "kick":
                 # Try streamlink for Kick first — it has a JS challenge solver
@@ -3181,7 +3422,7 @@ def record_worker(args):
                 if is_live is None:
                     # streamlink check failed — fall back to yt-dlp
                     logger.info("Kick streamlink check inconclusive — falling back to yt-dlp")
-                    is_live, stream_title, error, need_impersonate, resolved_url = check_stream_ytdlp(url, logger, stream_check_timeout, cookies_file)
+                    is_live, stream_title, error, need_impersonate, resolved_url, format_urls = check_stream_ytdlp(url, logger, stream_check_timeout, cookies_file)
                     if resolved_url:
                         recording_url = resolved_url
                         logger.info(f"Using resolved URL for recording: {recording_url}")
@@ -3193,13 +3434,13 @@ def record_worker(args):
                     recording_url = rumble_live_url
                     logger.info(f"Rumble live video URL: {recording_url}")
                     # Use yt-dlp to confirm live status and get the stream title
-                    is_live, stream_title, error, need_impersonate, resolved_url = check_stream_ytdlp(
+                    is_live, stream_title, error, need_impersonate, resolved_url, format_urls = check_stream_ytdlp(
                         rumble_live_url, logger, stream_check_timeout, cookies_file
                     )
                     if resolved_url:
                         recording_url = resolved_url
             elif platform in ["youtube", "custom"]:
-                is_live, stream_title, error, need_impersonate, resolved_url = check_stream_ytdlp(url, logger, stream_check_timeout, cookies_file)
+                is_live, stream_title, error, need_impersonate, resolved_url, format_urls = check_stream_ytdlp(url, logger, stream_check_timeout, cookies_file)
                 # If yt-dlp resolved to a different URL (e.g. Rumble channel -> video),
                 # use the resolved URL for recording so yt-dlp can actually download it
                 if resolved_url:
@@ -3304,9 +3545,38 @@ def record_worker(args):
                 # recording_url was set to the JWT-bearing HLS URL in the check block
                 record_cmd = build_recording_command_fishtank(recording_url, raw_file, config, verbose)
             elif platform in ["youtube", "rumble", "custom"]:
-                record_cmd = build_recording_command_ytdlp(recording_url, raw_file, config, verbose,
-                                                           streamlink_debug, cookies_file,
-                                                           impersonate=need_impersonate)
+                if format_urls:
+                    # Split video+audio tracks (e.g. Chaturbate CMAF) — drive ffmpeg
+                    # directly to avoid yt-dlp's live-stream merge deadlock.
+                    record_cmd = build_recording_command_ffmpeg_merge(
+                        format_urls.get("video"), format_urls.get("audio"), raw_file, config, verbose,
+                        manifest_url=format_urls.get("manifest"),
+                        http_headers=format_urls.get("http_headers"),
+                    )
+                    # Build stream_info from the format data we already have.
+                    # best_v holds the winning video format dict stored in format_urls.
+                    _tbr  = format_urls.get("tbr")
+                    _w, _h = format_urls.get("width"), format_urls.get("height")
+                    _fps  = format_urls.get("fps")
+                    _parts = []
+                    if _w and _h:
+                        _parts.append(f"{_w}x{_h}")
+                    if _fps:
+                        try:
+                            _parts.append(f"{round(float(_fps))}fps")
+                        except (ValueError, TypeError):
+                            pass
+                    if _tbr:
+                        try:
+                            _parts.append(f"{_tbr/1000:.1f}Mbps")
+                        except (ValueError, TypeError):
+                            pass
+                    if _parts:
+                        stream_info = " · ".join(_parts)
+                else:
+                    record_cmd = build_recording_command_ytdlp(recording_url, raw_file, config, verbose,
+                                                               streamlink_debug, cookies_file,
+                                                               impersonate=need_impersonate)
             else:
                 record_cmd = build_recording_command_streamlink(url, raw_file, quality, platform, config, verbose, streamlink_debug)
 
@@ -3328,6 +3598,7 @@ def record_worker(args):
                 verbose=verbose,
                 max_file_size_gb=max_file_size_gb,
                 stream_info=stream_info,
+                ffmpeg_path=config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg'),
             )
 
             # Clean up process tree
@@ -3420,6 +3691,7 @@ def record_worker(args):
                         stop_event, last_status, file_creation_timeout,
                         tool_name_override="streamlink", verbose=verbose,
                         max_file_size_gb=max_file_size_gb,
+                        ffmpeg_path=config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg'),
                     )
 
                     if proc.poll() is None:
@@ -3444,11 +3716,18 @@ def record_worker(args):
 
             # Check if we actually recorded something
             if not os.path.exists(raw_file):
-                logger.error("Recording file was never created!")
-                new_status = {"status": "Error", "detail": "file not created", "size": "", "time": "", "progress": 0}
-                status_queue.put((channel_key, new_status))
-                time.sleep(60)
-                continue
+                # yt-dlp silently changes the extension when merging bestvideo+bestaudio
+                # (e.g. -o foo.ts → actually writes foo.mp4).  Check for that before giving up.
+                mp4_candidate = os.path.splitext(raw_file)[0] + ".mp4"
+                if os.path.exists(mp4_candidate):
+                    logger.info(f"yt-dlp merged formats — output is .mp4: {os.path.basename(mp4_candidate)}")
+                    raw_file = mp4_candidate
+                else:
+                    logger.error("Recording file was never created!")
+                    new_status = {"status": "Error", "detail": "file not created", "size": "", "time": "", "progress": 0}
+                    status_queue.put((channel_key, new_status))
+                    time.sleep(60)
+                    continue
 
             file_size = os.path.getsize(raw_file)
             logger.info(f"Recording finished — file size: {human_size(file_size)}")
@@ -3464,19 +3743,37 @@ def record_worker(args):
                 time.sleep(random.uniform(5, 15))
                 continue
 
-            # Remux to MP4
-            new_status = {"status": "Remuxing...", "detail": human_size(file_size), "size": "", "time": "", "progress": 0}
-            if new_status != last_status:
-                status_queue.put((channel_key, new_status))
-                last_status = new_status.copy()
-
+            # Remux to MP4 (or skip if yt-dlp already produced an MP4)
             mp4_file = os.path.join(processed_path, f"{base_name}.mp4")
-            # Scale timeout based on file size: base timeout or 1 minute per GB, whichever is larger
-            file_size_gb = file_size / (1024**3)
-            scaled_timeout = max(ffmpeg_timeout, int(file_size_gb * 60) + 120)
-            if scaled_timeout > ffmpeg_timeout:
-                logger.info(f"Large file ({human_size(file_size)}) — remux timeout scaled to {scaled_timeout}s")
-            success, mp4_size, error = remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, scaled_timeout)
+            already_mp4 = raw_file.endswith(".mp4")
+
+            if already_mp4:
+                # yt-dlp merged bestvideo+bestaudio directly into an MP4 — no remux needed.
+                # Move it straight to processed and synthesize the success values.
+                logger.info("Raw file is already MP4 — skipping remux, moving directly to processed")
+                new_status = {"status": "Processing...", "detail": human_size(file_size), "size": "", "time": "", "progress": 0}
+                if new_status != last_status:
+                    status_queue.put((channel_key, new_status))
+                    last_status = new_status.copy()
+                try:
+                    shutil.move(raw_file, mp4_file)
+                    mp4_size = os.path.getsize(mp4_file)
+                    success, error = True, None
+                    logger.info(f"Moved to processed: {os.path.basename(mp4_file)} ({human_size(mp4_size)})")
+                except Exception as _mv_err:
+                    logger.error(f"Failed to move MP4 to processed: {_mv_err}")
+                    success, mp4_size, error = False, 0, str(_mv_err)
+            else:
+                new_status = {"status": "Remuxing...", "detail": human_size(file_size), "size": "", "time": "", "progress": 0}
+                if new_status != last_status:
+                    status_queue.put((channel_key, new_status))
+                    last_status = new_status.copy()
+                # Scale timeout based on file size: base timeout or 1 minute per GB, whichever is larger
+                file_size_gb = file_size / (1024**3)
+                scaled_timeout = max(ffmpeg_timeout, int(file_size_gb * 60) + 120)
+                if scaled_timeout > ffmpeg_timeout:
+                    logger.info(f"Large file ({human_size(file_size)}) — remux timeout scaled to {scaled_timeout}s")
+                success, mp4_size, error = remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, scaled_timeout)
 
             if success:
                 # Successful remux — reset bad-stream counters and crash backoff
@@ -3534,25 +3831,27 @@ def record_worker(args):
                 # Kick/streamlink sometimes holds a file handle open for several
                 # seconds after the process exits.  Retry generously (up to ~60 s)
                 # so the file doesn't get stranded in Recorded until next startup.
-                pending_path = os.path.join(pending_dir, os.path.basename(raw_file))
-                max_retries = 6
-                _move_wait = [5, 10, 10, 15, 15, 15]  # seconds between attempts
-                for attempt in range(max_retries):
-                    try:
-                        shutil.move(raw_file, pending_path)
-                        logger.info(f"Moved raw to: {pending_path}")
-                        break
-                    except PermissionError as e:
-                        if attempt < max_retries - 1:
-                            wait = _move_wait[attempt]
-                            logger.warning(f"File locked, retrying in {wait}s… (attempt {attempt + 1}/{max_retries})")
-                            time.sleep(wait)
-                        else:
-                            logger.error(f"Move failed after {max_retries} attempts: {e}")
-                            logger.info(f"File will be cleaned up on next run: {raw_file}")
-                    except Exception as e:
-                        logger.error(f"Move failed: {e}")
-                        break
+                # Skip if already_mp4 — the file was already moved to processed above.
+                if not already_mp4:
+                    pending_path = os.path.join(pending_dir, os.path.basename(raw_file))
+                    max_retries = 6
+                    _move_wait = [5, 10, 10, 15, 15, 15]  # seconds between attempts
+                    for attempt in range(max_retries):
+                        try:
+                            shutil.move(raw_file, pending_path)
+                            logger.info(f"Moved raw to: {pending_path}")
+                            break
+                        except PermissionError as e:
+                            if attempt < max_retries - 1:
+                                wait = _move_wait[attempt]
+                                logger.warning(f"File locked, retrying in {wait}s… (attempt {attempt + 1}/{max_retries})")
+                                time.sleep(wait)
+                            else:
+                                logger.error(f"Move failed after {max_retries} attempts: {e}")
+                                logger.info(f"File will be cleaned up on next run: {raw_file}")
+                        except Exception as e:
+                            logger.error(f"Move failed: {e}")
+                            break
 
                 new_status = {
                     "status": "Completed",
@@ -5268,6 +5567,15 @@ def main_gui(config):
     tree.column("Size", width=90, anchor="center")
     tree.column("Elapsed", width=80, anchor="center")
     tree.column("Platform", width=75, anchor="center")
+
+    # Restore column widths saved from last session
+    saved_widths = win_state.get('column_widths', {})
+    for col in columns:
+        if col in saved_widths:
+            try:
+                tree.column(col, width=int(saved_widths[col]))
+            except (ValueError, tk.TclError):
+                pass
     tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
     # ── Status tree right-click context menu ──
@@ -5770,9 +6078,11 @@ def main_gui(config):
         """Always fully quit when the window X is clicked."""
         # Save window state
         try:
+            col_widths = {col: tree.column(col, "width") for col in columns}
             state = {
                 'geometry': root.geometry(),
                 'dark_mode': dark_mode.get(),
+                'column_widths': col_widths,
             }
             save_window_state(state_file, state)
         except Exception:
