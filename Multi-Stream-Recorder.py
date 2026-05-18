@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
-__version__ = "1.6.1"
+__version__ = "1.6.2"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -448,7 +448,7 @@ def validate_channel_name(name, platform, existing_channels):
     if platform == "twitch" and not HAS_STREAMLINK:
         return False, "Cannot add Twitch channels — streamlink is not installed.\n  Install: pip install streamlink"
 
-    if platform in ["kick", "youtube", "rumble"] and not HAS_YTDLP:
+    if platform in ["kick", "youtube", "rumble", "tiktok"] and not HAS_YTDLP:
         return False, f"Cannot add {platform.title()} channels — yt-dlp is not installed.\n  Install: pip install yt-dlp"
 
     if platform == "fishtank":
@@ -889,10 +889,30 @@ def _sanitize_filename(name):
     # Replace common bad chars
     for ch in r'<>:"/\|?*':
         name = name.replace(ch, '_')
-    # Collapse multiple underscores / strip
+    # Collapse multiple underscores
     while '__' in name:
         name = name.replace('__', '_')
-    return name.strip('. _')[:200]  # cap length
+    # Strip leading/trailing dots and spaces only — NOT underscores.
+    # Usernames like _avamartinez are valid and should be preserved in filenames.
+    return name.strip('. ')[:200]  # cap length
+
+
+def sanitize_path_component(name):
+    """Sanitize a username/channel name for safe use as a folder name on Windows.
+
+    Unlike _sanitize_filename this preserves leading underscores (valid in
+    TikTok/Twitter handles like _avamartinez) and mid-string periods (boo.tleg),
+    while stripping characters Windows won't accept in folder names.
+    """
+    if not name:
+        return 'unknown'
+    # Replace Windows-forbidden folder name characters
+    for ch in r'<>:"/\|?*':
+        name = name.replace(ch, '_')
+    # Windows silently rejects or misbehaves with folder names ending in '.' or ' '
+    name = name.rstrip('. ')
+    # A name that became empty or just underscores after sanitization
+    return name[:100] if name.strip('_') else 'unknown'
 
 
 # ────────────────────────────────────────────────
@@ -1307,6 +1327,89 @@ def _is_rumble_channel_url(url):
     if _re.match(r"^/v[a-z0-9]+-", path, _re.IGNORECASE):
         return False
     return True
+
+
+def check_tiktok_live_webcast(username, cookies_file, logger, timeout=30):
+    """Check TikTok live status via direct Webcast API call.
+
+    yt-dlp hardcodes webcast.tiktok.com, but US-TTP accounts (the majority
+    of US-based TikTok streamers) use webcast.us.tiktok.com.  Calling the
+    global endpoint for a US-TTP room returns status 4 (offline) even when
+    the stream is live, which is the root cause of TikTok US live streams
+    not being detected.
+
+    This function:
+      1. Fetches the profile page and extracts the roomId from the embedded
+         JSON (same field yt-dlp reads successfully).
+      2. Queries BOTH webcast.us.tiktok.com and webcast.tiktok.com until one
+         returns status 2 (live).
+
+    Returns (is_live: bool, room_id: str | None, title: str | None, error: str | None).
+    """
+    import urllib.request
+    import http.cookiejar
+    import re as _re
+
+    profile_url = f"https://www.tiktok.com/@{username}"
+
+    # Build a cookie jar from the Netscape cookies.txt so TikTok doesn't
+    # serve a stripped-down page or a bot-detection redirect.
+    cj = http.cookiejar.MozillaCookieJar()
+    if cookies_file:
+        try:
+            cj.load(cookies_file, ignore_discard=True, ignore_expires=True)
+        except Exception as e:
+            logger.warning(f"TikTok webcast check: could not load cookies: {e}")
+
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+    opener.addheaders = [
+        ('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                       'AppleWebKit/537.36 (KHTML, like Gecko) '
+                       'Chrome/124.0.0.0 Safari/537.36'),
+        ('Accept-Language', 'en-US,en;q=0.9'),
+        ('Referer', 'https://www.tiktok.com/'),
+    ]
+
+    # ── Step 1: get roomId from profile page ─────────────────────────────
+    try:
+        with opener.open(profile_url, timeout=timeout) as resp:
+            html = resp.read().decode('utf-8', errors='replace')
+    except Exception as e:
+        return False, None, None, f"profile fetch failed: {e}"
+
+    m = _re.search(r'"roomId"\s*:\s*"(\d+)"', html)
+    if not m:
+        return False, None, None, "no roomId in profile page (user not live or page changed)"
+
+    room_id = m.group(1)
+    logger.info(f"TikTok webcast check: roomId={room_id} for @{username}")
+
+    # ── Step 2: query Webcast API — US endpoint first, global as fallback ─
+    webcast_hosts = [
+        'webcast.us.tiktok.com',   # US-TTP accounts (most US streamers)
+        'webcast.tiktok.com',       # Global TikTok accounts
+    ]
+
+    for host in webcast_hosts:
+        api_url = (f"https://{host}/webcast/room/info/"
+                   f"?aid=1988&room_id={room_id}")
+        try:
+            with opener.open(api_url, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode('utf-8', errors='replace'))
+        except Exception as e:
+            logger.debug(f"TikTok webcast check ({host}): request failed: {e}")
+            continue
+
+        room_data = data.get('data') or {}
+        status = room_data.get('status')
+        logger.debug(f"TikTok webcast check ({host}): status={status}")
+
+        if status == 2:  # 2 = live, 4 = offline/ended
+            title_data = room_data.get('title') or ''
+            logger.info(f"TikTok webcast check: LIVE via {host} (status=2)")
+            return True, room_id, title_data or None, None
+
+    return False, room_id, None, None
 
 
 def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
@@ -3291,6 +3394,10 @@ def record_worker(args):
             url = f"https://youtube.com/@{username}/live"
     elif platform == "rumble":
         url = f"https://rumble.com/c/{username}"
+    elif platform == "tiktok":
+        handle = username.lstrip('@')
+        url = f"https://www.tiktok.com/@{handle}/live"
+        username = handle  # use actual handle for folders/filenames
     elif platform == "fishtank":
         # username is the camera name / stream ID (e.g. "director", "dirc-5")
         # The real URL is built per-poll using the JWT; store a placeholder
@@ -3298,8 +3405,20 @@ def record_worker(args):
     elif platform == "custom":
         # Custom: the username IS the full URL
         url = username
-        # Override username with domain for display/filename/directory purposes
-        username = extract_domain_from_url(url)
+        # TikTok live streams are served from /@user/live, not the bare profile page.
+        # Silently rewrite so yt-dlp hits the right endpoint even if the user pasted
+        # the profile URL rather than the /live URL.
+        if 'tiktok.com' in url.lower():
+            base = url.split('?')[0].rstrip('/')
+            if not base.endswith('/live'):
+                url = base + '/live'
+                logger.info(f"TikTok: profile URL rewritten to live endpoint: {url}")
+            # Use the actual TikTok handle for file/folder naming (not just 'tiktok')
+            _, tiktok_user = parse_custom_url(url)
+            username = tiktok_user if tiktok_user != 'unknown' else extract_domain_from_url(url)
+        else:
+            # Override username with domain for display/filename/directory purposes
+            username = extract_domain_from_url(url)
     else:
         url = f"https://{platform}.com/{username}"
 
@@ -3308,9 +3427,13 @@ def record_worker(args):
     processed_base = os.path.join(root_path, "Processed")
     pending_base = os.path.join(root_path, PENDING_DELETION_FOLDER)
 
-    recorded_path = os.path.join(recorded_base, platform, username)
-    processed_path = os.path.join(processed_base, platform, username)
-    pending_dir = os.path.join(pending_base, platform, username)
+    # Sanitize the username for use as a folder name: preserves leading underscores
+    # and mid-string periods (e.g. _avamartinez, boo.tleg) but strips characters
+    # that Windows forbids in folder names and trailing dots/spaces.
+    username_dir = sanitize_path_component(username)
+    recorded_path = os.path.join(recorded_base, platform, username_dir)
+    processed_path = os.path.join(processed_base, platform, username_dir)
+    pending_dir = os.path.join(pending_base, platform, username_dir)
 
     last_status = None
     stream_title = None  # populated on check
@@ -3439,6 +3562,25 @@ def record_worker(args):
                     )
                     if resolved_url:
                         recording_url = resolved_url
+            elif platform == "tiktok":
+                is_live, stream_title, error, need_impersonate, resolved_url, format_urls = check_stream_ytdlp(url, logger, stream_check_timeout, cookies_file)
+                if resolved_url:
+                    recording_url = resolved_url
+                    logger.info(f"Using resolved URL for recording: {recording_url}")
+                # yt-dlp hardcodes webcast.tiktok.com but US-TTP streamers need
+                # webcast.us.tiktok.com — if yt-dlp says offline, verify with a
+                # direct Webcast API call that tries both regional endpoints.
+                if not is_live and error in ("video unavailable", "extraction failed", None):
+                    logger.info("TikTok: yt-dlp reported offline — cross-checking via Webcast API")
+                    wc_live, _, wc_title, wc_err = check_tiktok_live_webcast(
+                        username, cookies_file, logger, stream_check_timeout)
+                    if wc_live:
+                        logger.info("TikTok: Webcast API confirms LIVE (yt-dlp used wrong regional endpoint)")
+                        is_live = True
+                        stream_title = wc_title or stream_title
+                        error = None
+                    elif wc_err:
+                        logger.debug(f"TikTok Webcast fallback: {wc_err}")
             elif platform in ["youtube", "custom"]:
                 is_live, stream_title, error, need_impersonate, resolved_url, format_urls = check_stream_ytdlp(url, logger, stream_check_timeout, cookies_file)
                 # If yt-dlp resolved to a different URL (e.g. Rumble channel -> video),
@@ -4029,9 +4171,14 @@ class BackgroundCleaner:
         found_any = False
         found_locked = False
 
-        for platform in ["twitch", "youtube", "kick", "rumble", "fishtank", "custom"]:
+        if not os.path.exists(self.recorded_base):
+            return False
+
+        # Scan recorded_base dynamically so new platforms (tiktok, etc.)
+        # are picked up automatically without needing a hardcoded list.
+        for platform in os.listdir(self.recorded_base):
             platform_dir = os.path.join(self.recorded_base, platform)
-            if not os.path.exists(platform_dir):
+            if not os.path.isdir(platform_dir):
                 continue
 
             for username_dir in os.listdir(platform_dir):
@@ -4552,9 +4699,15 @@ class StreamRecorder:
         min_file_size_mb = self.config.getfloat('Recording', 'min_file_size_mb')
         processed_count = 0
 
-        for platform in ["twitch", "youtube", "kick", "rumble", "fishtank", "custom"]:
+        if not os.path.exists(self.recorded_base):
+            logging.info("Startup cleanup: No leftover files found")
+            return
+
+        # Scan recorded_base dynamically so new platforms are picked up
+        # automatically without needing a hardcoded list.
+        for platform in os.listdir(self.recorded_base):
             platform_dir = os.path.join(self.recorded_base, platform)
-            if not os.path.exists(platform_dir):
+            if not os.path.isdir(platform_dir):
                 continue
 
             for username_dir in os.listdir(platform_dir):
@@ -5231,7 +5384,7 @@ def main_gui(config):
     platform_label.pack(side=tk.LEFT)
     platform_var = tk.StringVar(value="kick")
     ttk.Combobox(platform_frame, textvariable=platform_var,
-                 values=["kick", "twitch", "youtube", "rumble", "fishtank", "custom"], state="readonly", width=10).pack(side=tk.LEFT, padx=6)
+                 values=["kick", "twitch", "youtube", "rumble", "tiktok", "fishtank", "custom"], state="readonly", width=10).pack(side=tk.LEFT, padx=6)
 
     entry = tk.Entry(frame_left, width=34, font=("Segoe UI", 10), borderwidth=0, relief="flat")
     entry.pack(pady=6)
@@ -5808,6 +5961,8 @@ def main_gui(config):
             return "Fishtank"
         elif ch_name.startswith("rumble:"):
             return "Rumble"
+        elif ch_name.startswith("tiktok:"):
+            return "TikTok"
         elif ch_name.startswith("custom:"):
             platform, _ = parse_custom_url(ch_name.split(":", 1)[1])
             return platform.capitalize()
