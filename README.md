@@ -1,12 +1,12 @@
 # Multi-Stream Recorder
 
-A desktop application for simultaneously recording live streams from **Kick**, **Twitch**, **YouTube**, **Rumble**, **Fishtank.live**, and any site supported by yt-dlp. Set it up, press record, and walk away — it monitors channels, auto-records when they go live, and produces clean MP4 files.
+A desktop application for simultaneously recording live streams from **Kick**, **Twitch**, **YouTube**, **Rumble**, **TikTok**, **Fishtank.live**, and any site supported by yt-dlp. Set it up, press record, and walk away — it monitors channels, auto-records when they go live, and produces clean MP4 files.
 
 ![Dark Mode Screenshot](screenshots/dark-mode.png)
 
 ## Features
 
-* **Multi-platform** — Record from Kick, Twitch, YouTube Live, Rumble, Fishtank.live, and 1,800+ sites via custom URLs
+* **Multi-platform** — Record from Kick, Twitch, YouTube Live, Rumble, TikTok, Fishtank.live, and 1,800+ sites via custom URLs
 * **Split-track HLS** — Automatically detects and records CMAF streams with separate video/audio playlists (used by Chaturbate and other CDN-backed platforms)
 * **Concurrent recording** — Monitor and record multiple streams simultaneously
 * **Automatic detection** — Polls channels and starts recording the moment a stream goes live
@@ -47,7 +47,7 @@ sudo apt install ffmpeg
 brew install ffmpeg
 ```
 
-**yt-dlp** (required for YouTube, Rumble, custom URLs):
+**yt-dlp** (required for YouTube, Rumble, TikTok, custom URLs):
 
 ```
 pip install "yt-dlp[default]"
@@ -68,7 +68,7 @@ pip install -r requirements.txt
 Or install individually:
 
 ```
-pip install "yt-dlp[default]"     # Required for YouTube, Rumble, custom URLs
+pip install "yt-dlp[default]"     # Required for YouTube, Rumble, TikTok, custom URLs
 pip install streamlink            # Required for Twitch and Kick
 pip install psutil                # Recommended — cleaner process management
 pip install pystray Pillow plyer  # Optional — tray icon & notifications
@@ -87,7 +87,7 @@ On first launch, the program creates a `config.ini` with sensible defaults. Edit
 
 Use the GUI to add channels:
 
-1. Select a platform from the dropdown (kick, twitch, youtube, custom)
+1. Select a platform from the dropdown (kick, twitch, youtube, rumble, tiktok, fishtank, custom)
 2. Enter the channel name (e.g., `asmongold` for Kick, `saruei` for Twitch)
 3. For custom URLs, paste the full URL:
    - Rumble channels: `https://rumble.com/c/ChannelName`
@@ -238,6 +238,10 @@ pip install -U "yt-dlp[default]"
 ```
 This is also why the install instructions above use `yt-dlp[default]` rather than plain `yt-dlp`. If YouTube recording breaks after a yt-dlp update, run this command first.
 
+**TikTok stream not detected** — Make sure you have valid TikTok cookies in `cookies.txt`. The `msToken` and `ttwid` values expire periodically; re-export from a logged-in browser session when detection stops working. If detection fails for a US-based gaming streamer specifically, this is the yt-dlp regional endpoint bug — the Webcast API fallback (v1.6.5+) handles it automatically and logs `"Webcast API confirms LIVE"` when it fires.
+
+**TikTok: "No video formats found"** — This appears when yt-dlp checks the bare profile URL (`@username`) instead of the live endpoint. MSR automatically rewrites TikTok profile URLs to `/live` before checking — if you added the channel as a `custom:` URL using only the profile URL, re-add it using the `tiktok` platform dropdown instead.
+
 **Kick 403 errors** — Make sure you don't have an old third-party Kick plugin overriding streamlink's built-in one. Check `%APPDATA%\streamlink\plugins\` for a `kick.py` file and delete it if present. Streamlink 8.x includes a built-in Kick plugin with Cloudflare bypass.
 
 **Kick streams not recording** — Kick requires streamlink 8.0+. Update streamlink: `pip install -U streamlink`. The program uses streamlink (not yt-dlp) for Kick detection and recording.
@@ -341,6 +345,13 @@ After each recording is remuxed, MSR verifies that the output MP4 contains an au
 **Kick**: Uses streamlink for both detection and recording. Streamlink 8.x includes a built-in Cloudflare JS challenge solver that handles Kick's aggressive bot detection. Cookies are optional. Streams are recorded in 1080p by default. **Important**: Remove any old third-party `kick.py` plugins from `%APPDATA%\streamlink\plugins\` — they override the built-in plugin and break Cloudflare bypass.
 
 **Twitch**: Uses streamlink with `--twitch-disable-ads` and `--twitch-low-latency`. Cookies are optional but enable subscriber-only features.
+
+
+**TikTok**: Uses yt-dlp for detection and streamlink for recording. Add channels by selecting **tiktok** from the platform dropdown and entering the username (with or without `@`). Valid TikTok session cookies are required — export them from a logged-in browser session using the Get cookies.txt extension and place the file in your streams directory. The `msToken` and `ttwid` cookies are the critical ones; when they expire, re-export.
+
+TikTok's CDN delivers mobile-portrait video (typically 540×960 or 720×1280) at 25 fps. This is normal — it reflects what the streamer's phone is broadcasting.
+
+**US-TTP regional detection**: A majority of US-based TikTok streamers (especially gaming streamers) run on TikTok's US regional infrastructure (`webcast.us.tiktok.com`). yt-dlp's TikTok extractor currently hardcodes the global endpoint (`webcast.tiktok.com`), which returns "offline" for these accounts even when they are actively live. MSR includes a fallback that directly queries both regional Webcast API endpoints whenever yt-dlp reports a TikTok channel as offline. If the fallback confirms the stream is live, recording proceeds normally — no user action required. The log will note `"Webcast API confirms LIVE"` when this override fires.
 
 **YouTube**: Uses yt-dlp. Cookies are recommended to avoid throttling. YouTube Live DVR streams work but may produce "keepalive request failed" messages in verbose mode — these are harmless and don't affect the recording.
 
