@@ -11,6 +11,8 @@ A desktop application for simultaneously recording live streams from **Kick**, *
 * **Concurrent recording** — Monitor and record multiple streams simultaneously
 * **Automatic detection** — Polls channels and starts recording the moment a stream goes live
 * **Smart polling** — Configurable check intervals with jitter to avoid rate limiting; exponential backoff on errors only
+* **Custom poll rate** — Pick a preset (1/3/5 min) or set any custom interval from 30 seconds to 2 hours; changes apply instantly to running sessions
+* **Check Now** — Skip the poll timer entirely: one button checks every enabled channel immediately, or right-click a single channel to check just that one
 * **Fast reconnect** — If a stream drops briefly (streamer disconnect), re-detects within 15 seconds
 * **File splitting** — Automatically splits recordings at a configurable size limit (default 8 GB) for easier archiving and editing
 * **Clean MP4 output** — Automatically remuxes raw .ts recordings to .mp4 with ffmpeg
@@ -21,7 +23,7 @@ A desktop application for simultaneously recording live streams from **Kick**, *
 * **Cookie support** — Use browser cookies for authenticated access (subscriber-only streams, age-gated content)
 * **Cookie health indicator** — Visual status showing if your cookies are valid, expiring, or need renewal
 * **Per-channel control** — Start or stop individual channels mid-session via right-click context menu
-* **Channel reorder** — Rearrange your channel list with ▲/▼ buttons or double-click a row to toggle it on/off
+* **Channel reorder & sort** — Rearrange your channel list with ▲/▼ buttons, sort it by enabled status, platform, or name with one click, or double-click a row to toggle it on/off
 * **Recording metadata** — JSON sidecar files with channel info, stream title, duration, and timestamps
 * **Audio stream verification** — Warns immediately after remux if a recording contains no audio track
 * **Micro-fragment throttle** — Detects CDN reset storms (repeated sub-30s recordings) and backs off rather than accumulating dozens of tiny files
@@ -129,7 +131,7 @@ min_file_size_mb = 2.0            # Delete recordings smaller than this
 filename_pattern = {username}_{timestamp}  # Output filename pattern
 
 [Timeouts]
-poll_interval_minutes = 3         # How often to check offline channels
+poll_interval_minutes = 3         # How often to check offline channels (fractional values OK, e.g. 0.7)
 poll_jitter_percent = 20          # Random ±% added to each check
 error_backoff_max_minutes = 15    # Max delay on server errors
 reconnect_grace_minutes = 3       # Fast polling after a stream drops
@@ -201,8 +203,8 @@ E:\Streams\
 | `Ctrl+Q` | Quit application |
 | `F1` | About dialog |
 | Double-click on channel | Toggle channel on/off |
-| Right-click on channel | Context menu (Start/Stop Recording, Open in Browser, Copy, Remove) |
-| Right-click on status | Context menu (Restart/Stop Channel, Open in Browser) |
+| Right-click on channel | Context menu (Start/Stop Recording, Check Now, Open in Browser, Copy, Sort, Remove) |
+| Right-click on status | Context menu (Restart/Stop Channel, Check Now, Open in Browser) |
 
 ## How It Works
 
@@ -224,7 +226,9 @@ The polling system is designed to be responsive without being abusive to servers
 | **Reconnect** | Every 15 seconds for 3 min | Fast polling after a stream drops unexpectedly. |
 | **Recording** | Continuous | No polling needed — the recording process handles the stream. |
 
-The GUI includes a **Polling** dropdown to switch between Relaxed (5 min), Normal (3 min), and Fast (1 min) presets.
+The GUI includes a **Polling** dropdown to switch between Relaxed (5 min), Normal (3 min), and Fast (1 min) presets — or select **Custom…** to enter any interval from 0.5 to 120 minutes. A floor of 30 seconds is enforced; checking more often than that risks rate limiting or IP bans, which is exactly what the jitter system exists to prevent. Interval changes apply to running sessions immediately — workers don't need a restart, and they don't finish out their old sleep first.
+
+The **Check Now** button skips the poll timer entirely and immediately checks every enabled channel (with a small stagger between them, so a long channel list doesn't hit its platforms all at once). To check a single channel, right-click it in the channel list or status table and select **Check Now** — available whenever the channel is offline or in error backoff. Use this when a stream just went live and you don't want to wait out the current polling cycle.
 
 ## Troubleshooting
 
@@ -238,7 +242,7 @@ pip install -U "yt-dlp[default]"
 ```
 This is also why the install instructions above use `yt-dlp[default]` rather than plain `yt-dlp`. If YouTube recording breaks after a yt-dlp update, run this command first.
 
-**TikTok stream not detected** — Make sure you have valid TikTok cookies in `cookies.txt`. The `msToken` and `ttwid` values expire periodically; re-export from a logged-in browser session when detection stops working. If detection fails for a US-based gaming streamer specifically, this is the yt-dlp regional endpoint bug — the Webcast API fallback (v1.6.5+) handles it automatically and logs `"Webcast API confirms LIVE"` when it fires.
+**TikTok stream not detected** — Make sure you have valid TikTok cookies in `cookies.txt`. The `msToken` and `ttwid` values expire periodically; re-export from a logged-in browser session when detection stops working. If detection fails for a US-based gaming streamer specifically, this is the yt-dlp regional endpoint bug — the Webcast API fallback (v1.6.0+) handles it automatically and logs `"Webcast API confirms LIVE"` when it fires.
 
 **TikTok: "No video formats found"** — This appears when yt-dlp checks the bare profile URL (`@username`) instead of the live endpoint. MSR automatically rewrites TikTok profile URLs to `/live` before checking — if you added the channel as a `custom:` URL using only the profile URL, re-add it using the `tiktok` platform dropdown instead.
 
