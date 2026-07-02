@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
-__version__ = "1.6.2"
+__version__ = "1.6.3"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -509,6 +509,29 @@ def jittered_sleep(base_seconds, jitter_pct=20):
     low = base_seconds * (1 - jitter_fraction)
     high = base_seconds * (1 + jitter_fraction)
     return random.uniform(low, high)
+
+
+def interruptible_sleep(seconds, wake_event, stop_event=None):
+    """Sleep for up to `seconds`, but wake immediately if wake_event is set.
+
+    Used by the offline/error/reconnect wait paths so the GUI's "Check Now"
+    can short-circuit a long poll timer.  Waits in short slices so a global
+    stop is also noticed promptly instead of blocking out the full sleep.
+
+    Returns True if woken early by wake_event (manual check requested),
+    False on a normal timeout or stop.
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        if stop_event is not None and stop_event.is_set():
+            return False
+        # Wait in ≤2s slices so stop_event stays responsive
+        if wake_event.wait(timeout=min(remaining, 2.0)):
+            wake_event.clear()
+            return True
 
 
 def check_disk_space(path, min_gb=5.0):
@@ -3323,7 +3346,7 @@ def save_metadata(mp4_file, username, platform, start_time_str, duration_seconds
 
 def record_worker(args):
     """Worker process to record a single channel."""
-    (channel_entry, config_dict, stop_event, status_queue) = args
+    (channel_entry, config_dict, stop_event, status_queue, wake_event, runtime) = args
 
     # Reconstruct config in child process
     config = configparser.ConfigParser()
@@ -3511,6 +3534,19 @@ def record_worker(args):
 
     while not stop_event.is_set():
         try:
+            # Live-refresh the poll interval from the shared runtime dict so
+            # GUI changes (including custom rates) apply without a restart.
+            try:
+                _live_poll = float(runtime.get('poll_interval_minutes', poll_interval_minutes))
+                if abs(_live_poll - poll_interval_minutes) > 0.001:
+                    logger.info(f"Poll interval updated: {poll_interval_minutes}min → {_live_poll}min")
+                    poll_interval_minutes = _live_poll
+                    poll_base_seconds = poll_interval_minutes * 60
+                    # Keep the error backoff floor in sync with the new base
+                    error_sleep_seconds = min(error_sleep_seconds, error_backoff_max_seconds)
+            except Exception:
+                pass  # Manager may be unavailable during shutdown — keep last known value
+
             # Check disk space
             has_space, free_gb = check_disk_space(root_path, min_disk_space_gb)
             if not has_space:
@@ -3523,7 +3559,8 @@ def record_worker(args):
                     status_queue.put((channel_key, new_status))
                     last_status = new_status.copy()
                 logger.error(f"Insufficient disk space: {free_gb:.1f}GB available, {min_disk_space_gb}GB required")
-                time.sleep(300)
+                if interruptible_sleep(300, wake_event, stop_event):
+                    logger.info("Manual check requested — re-checking disk space now")
                 continue
 
             new_status = {"status": "Checking...", "detail": "", "size": "", "time": "", "progress": 0}
@@ -3618,7 +3655,8 @@ def record_worker(args):
                 error_sleep_seconds = min(error_sleep_seconds * 2, error_backoff_max_seconds)
                 sleep_time = jittered_sleep(error_sleep_seconds, poll_jitter_percent)
                 logger.warning(f"Error (#{consecutive_errors}): {error} — backing off {sleep_time:.0f}s")
-                time.sleep(sleep_time)
+                if interruptible_sleep(sleep_time, wake_event, stop_event):
+                    logger.info("Manual check requested — skipping error backoff")
                 continue
 
             if not is_live:
@@ -3635,7 +3673,7 @@ def record_worker(args):
                             status_queue.put((channel_key, new_status))
                             last_status = new_status.copy()
                         logger.info(f"Stream dropped — fast polling ({remaining}s remaining in grace period)")
-                        time.sleep(RECONNECT_POLL_INTERVAL)
+                        interruptible_sleep(RECONNECT_POLL_INTERVAL, wake_event, stop_event)
                         continue
                     else:
                         # Grace period expired — stream didn't come back
@@ -3649,7 +3687,11 @@ def record_worker(args):
                     status_queue.put((channel_key, new_status))
                     last_status = new_status.copy()
                 logger.info(f"Stream offline — sleeping {sleep_time:.0f}s (base {poll_interval_minutes}min ±{poll_jitter_percent}%)")
-                time.sleep(sleep_time)
+                if interruptible_sleep(sleep_time, wake_event, stop_event):
+                    logger.info("Manual check requested — checking now")
+                    new_status = {"status": "Checking...", "detail": "manual check", "size": "", "time": "", "progress": 0}
+                    status_queue.put((channel_key, new_status))
+                    last_status = new_status.copy()
                 continue
 
             # Stream is live — reset error state and reconnect mode
@@ -4196,11 +4238,20 @@ class BackgroundCleaner:
                 # even though its size looks static (remux reads, not writes).
                 # Skip the entire channel directory in that case — the worker
                 # will move the file to PendingDeletion itself once done.
+                #
+                # Same for actively RECORDING channels: a per-channel stop
+                # cleanup (stop_channel's delayed _channel_cleanup) scans all
+                # directories globally, and on Windows an in-progress .ts can
+                # pass the size-growth check below because NTFS doesn't update
+                # the visible file size until the writer flushes metadata.
+                # That produced a partial remux of a live recording whose
+                # stale MP4 later short-circuited the real remux at shutdown.
                 channel_key = f"{platform}:{username_dir}"
                 channel_status = self.status_dict.get(channel_key, {}).get("status", "")
-                if channel_status == "Remuxing...":
+                if channel_status in ("Remuxing...", "Recording"):
                     logging.info(
-                        f"Cleanup: {channel_key} is actively remuxing — "
+                        f"Cleanup: {channel_key} is actively "
+                        f"{'remuxing' if channel_status == 'Remuxing...' else 'recording'} — "
                         "skipping its directory to avoid contention"
                     )
                     found_locked = True
@@ -4211,6 +4262,21 @@ class BackgroundCleaner:
                         continue
 
                     raw_file = os.path.join(username_path, filename)
+
+                    # In-use probe: try to open the file for append.  On
+                    # Windows, streamlink/ffmpeg hold their output with a
+                    # share mode that denies this, so a PermissionError is a
+                    # reliable "still being written" signal — unlike the
+                    # size-growth check, which NTFS metadata lag can fool.
+                    try:
+                        with open(raw_file, 'ab'):
+                            pass
+                    except PermissionError:
+                        logging.warning(f"Cleanup: {filename} is open by another process, skipping")
+                        found_locked = True
+                        continue
+                    except Exception:
+                        pass  # transient error — fall through to the size check
 
                     try:
                         size1 = os.path.getsize(raw_file)
@@ -4240,7 +4306,27 @@ class BackgroundCleaner:
                     mp4_filename = filename.replace('.ts', '.mp4')
                     mp4_file = os.path.join(processed_path, mp4_filename)
 
-                    if os.path.exists(mp4_file) and os.path.getsize(mp4_file) > 5 * 1024**2:
+                    # Only take the "already remuxed" shortcut if the existing
+                    # MP4 is plausibly complete.  A remux is roughly size-
+                    # preserving, so an MP4 much smaller than its .ts is a
+                    # stale partial (e.g. remuxed while the recording was
+                    # still in progress) and must be redone — remux_to_mp4
+                    # overwrites it (-y).
+                    existing_mp4_ok = False
+                    if os.path.exists(mp4_file):
+                        try:
+                            mp4_size = os.path.getsize(mp4_file)
+                            existing_mp4_ok = (mp4_size > 5 * 1024**2
+                                               and mp4_size >= 0.8 * file_size)
+                            if mp4_size > 5 * 1024**2 and not existing_mp4_ok:
+                                logging.warning(
+                                    f"Cleanup: existing MP4 for {filename} is only "
+                                    f"{human_size(mp4_size)} vs {human_size(file_size)} raw "
+                                    "— treating as stale partial, re-remuxing")
+                        except Exception:
+                            existing_mp4_ok = False
+
+                    if existing_mp4_ok:
                         logging.info(f"Cleanup: MP4 already exists for {filename}, just moving raw file")
                     else:
                         file_size_gb = file_size / (1024**3)
@@ -4384,6 +4470,17 @@ class StreamRecorder:
         self.status_queue = self.manager.Queue()
         self.status_dict = {}
 
+        # Shared runtime settings that workers re-read every poll cycle.
+        # Lets the GUI change the poll interval live, without a restart.
+        self.runtime = self.manager.dict()
+        self.runtime['poll_interval_minutes'] = config.getfloat(
+            'Timeouts', 'poll_interval_minutes', fallback=3.0)
+
+        # Per-channel wake events.  Setting one snaps that worker out of its
+        # offline/error sleep so it checks the stream immediately ("Check Now").
+        # Events are reused across worker respawns for the same channel.
+        self.wake_events: dict = {}  # {channel_name: mp.Event}
+
         for ch in channels:
             self.status_dict[ch] = {"status": "Initializing", "detail": "", "size": "", "time": "", "progress": 0}
 
@@ -4399,6 +4496,66 @@ class StreamRecorder:
         self._spawning: set = set()
         self._spawn_lock = threading.Lock()
         self.cleaner = BackgroundCleaner(config, status_dict=self.status_dict)
+
+    def _get_wake_event(self, channel_name):
+        """Return the wake event for a channel, creating it on first use.
+
+        The same event object is reused if the worker is respawned, so a
+        pending 'Check Now' survives a crash-restart.
+        """
+        ev = self.wake_events.get(channel_name)
+        if ev is None:
+            ev = mp.Event()
+            self.wake_events[channel_name] = ev
+        return ev
+
+    def check_now(self, channel_name):
+        """Wake a single channel's worker so it checks the stream immediately."""
+        if not self.is_running or channel_name in self.stopped_channels:
+            return
+        ev = self.wake_events.get(channel_name)
+        if ev is not None:
+            ev.set()
+            logging.info(f"Check Now: waking worker for {channel_name}")
+
+    def check_all_now(self):
+        """Wake every active (non-stopped) worker for an immediate check.
+
+        Wakes are spread over a few seconds so all channels don't hit their
+        platforms in the same instant (same reasoning as the startup stagger).
+        """
+        if not self.is_running:
+            return
+        targets = [ch for ch in self.wake_events
+                   if ch not in self.stopped_channels]
+        if not targets:
+            return
+        logging.info(f"Check All Now: waking {len(targets)} worker(s)")
+
+        def _staggered_wake(channels):
+            random.shuffle(channels)
+            for i, ch in enumerate(channels):
+                ev = self.wake_events.get(ch)
+                if ev is not None:
+                    ev.set()
+                if i < len(channels) - 1:
+                    time.sleep(random.uniform(0.3, 1.2))
+
+        threading.Thread(target=_staggered_wake, args=(targets,),
+                         daemon=True, name="check-all-now").start()
+
+    def set_poll_interval(self, minutes):
+        """Update the poll interval live.  Sleeping workers pick up the new
+        value on their next cycle; we also wake them (staggered) so a change
+        like Relaxed→Fast takes effect immediately instead of after up to
+        five more minutes of the old interval.
+        """
+        try:
+            self.runtime['poll_interval_minutes'] = float(minutes)
+        except Exception:
+            return
+        logging.info(f"Runtime poll interval set to {minutes} min")
+        self.check_all_now()
 
     def update_status_from_queue(self):
         while not self.status_queue.empty():
@@ -4542,7 +4699,8 @@ class StreamRecorder:
             }
 
             # Spawn exactly one worker
-            worker_args = (channel_name, config_dict, self.should_stop, self.status_queue)
+            worker_args = (channel_name, config_dict, self.should_stop, self.status_queue,
+                           self._get_wake_event(channel_name), self.runtime)
             proc = mp.Process(target=record_worker, args=(worker_args,))
             proc.daemon = True
             proc.start()
@@ -4621,7 +4779,8 @@ class StreamRecorder:
             logging.info(f"Using cookies file: {cookies_file}")
 
         for ch in self.channels:
-            worker_args = (ch, config_dict, self.should_stop, self.status_queue)
+            worker_args = (ch, config_dict, self.should_stop, self.status_queue,
+                           self._get_wake_event(ch), self.runtime)
             proc = mp.Process(target=record_worker, args=(worker_args,))
             proc.daemon = True
             proc.start()
@@ -4679,7 +4838,8 @@ class StreamRecorder:
                     else:
                         logging.info(f"Process for {ch} exited normally — restarting...")
 
-                    worker_args = (ch, config_dict, self.should_stop, self.status_queue)
+                    worker_args = (ch, config_dict, self.should_stop, self.status_queue,
+                                   self._get_wake_event(ch), self.runtime)
                     new_proc = mp.Process(target=record_worker, args=(worker_args,))
                     new_proc.daemon = True
                     new_proc.start()
@@ -4944,7 +5104,7 @@ class QueueLogHandler(logging.Handler):
 def main_gui(config):
     """Main GUI window with dark mode, system tray, log viewer, and notifications."""
     import tkinter as tk
-    from tkinter import ttk, messagebox
+    from tkinter import ttk, messagebox, simpledialog
     import queue as stdlib_queue
 
     # ── Theme colors ──
@@ -5147,7 +5307,8 @@ def main_gui(config):
         cookie_indicator.configure(bg=t['bg'])
 
         for btn, bg_key in [(add_btn, 'btn_bg'), (remove_btn, 'btn_bg'),
-                            (up_btn, 'btn_bg'), (down_btn, 'btn_bg')]:
+                            (up_btn, 'btn_bg'), (down_btn, 'btn_bg'),
+                            (sort_btn, 'btn_bg')]:
             btn.configure(bg=t[bg_key], fg=t['btn_fg'], activebackground=t['accent'],
                           activeforeground='#ffffff',
                           highlightbackground=border_color, relief='flat', bd=1)
@@ -5173,6 +5334,9 @@ def main_gui(config):
         status_ctx_menu.configure(bg=t['entry_bg'], fg=t['fg'],
                                   activebackground=t['accent'], activeforeground='#ffffff',
                                   borderwidth=0, activeborderwidth=0, relief='flat')
+        sort_menu.configure(bg=t['entry_bg'], fg=t['fg'],
+                            activebackground=t['accent'], activeforeground='#ffffff',
+                            borderwidth=0, activeborderwidth=0, relief='flat')
 
         # Save dark_mode preference
         try:
@@ -5486,6 +5650,70 @@ def main_gui(config):
                          font=("Segoe UI", 8))
     down_btn.pack(side=tk.LEFT, padx=2)
 
+    # ── Channel list sorting ──
+    def _channel_sort_parts(ch):
+        """Return (platform, username) lowercased for sorting.
+        Bare names are Kick channels; custom entries sort by their URL."""
+        name = ch["name"]
+        if ":" in name:
+            platform, user = name.split(":", 1)
+        else:
+            platform, user = "kick", name
+        return platform.lower(), user.lower()
+
+    def _sort_channels(mode):
+        """One-shot re-order of the channel list, persisted like manual moves.
+
+        All sorts are stable (Python's list.sort), so 'Enabled First' keeps
+        the existing relative order within the enabled and disabled groups —
+        and sorts can be layered: By Platform then Enabled First gives
+        enabled-on-top, each group still ordered by platform.
+        """
+        if len(channels) < 2:
+            return
+        # Remember selection by name so it survives the reshuffle
+        selected_names = set()
+        for item in ch_tree.selection():
+            idx = ch_tree.index(item)
+            if 0 <= idx < len(channels):
+                selected_names.add(channels[idx]["name"])
+
+        if mode == "enabled":
+            channels.sort(key=lambda ch: not ch.get("enabled", True))
+        elif mode == "platform":
+            channels.sort(key=_channel_sort_parts)
+        elif mode == "name":
+            channels.sort(key=lambda ch: _channel_sort_parts(ch)[1])
+
+        _populate_channel_tree()
+        save_channels()
+
+        # Restore selection on the moved rows
+        if selected_names:
+            items = ch_tree.get_children()
+            to_select = [items[i] for i, ch in enumerate(channels)
+                         if ch["name"] in selected_names and i < len(items)]
+            if to_select:
+                ch_tree.selection_set(to_select)
+                ch_tree.see(to_select[0])
+        logging.info(f"Channel list sorted ({mode})")
+
+    sort_menu = tk.Menu(root, tearoff=0)
+    sort_menu.add_command(label="Enabled First", command=lambda: _sort_channels("enabled"))
+    sort_menu.add_command(label="By Platform", command=lambda: _sort_channels("platform"))
+    sort_menu.add_command(label="By Name (A–Z)", command=lambda: _sort_channels("name"))
+
+    def _show_sort_menu():
+        try:
+            sort_menu.tk_popup(sort_btn.winfo_rootx(),
+                               sort_btn.winfo_rooty() + sort_btn.winfo_height())
+        finally:
+            sort_menu.grab_release()
+
+    sort_btn = tk.Button(move_btn_frame, text="Sort ▾", command=_show_sort_menu,
+                         width=7, font=("Segoe UI", 8))
+    sort_btn.pack(side=tk.LEFT, padx=2)
+
     # ── Cookie status indicator ──
     cookie_frame = tk.Frame(frame_left)
     cookie_frame.pack(fill=tk.X, pady=(8, 0))
@@ -5575,6 +5803,16 @@ def main_gui(config):
                 ch_name = channels[idx]["name"]
                 recorder.stop_channel(ch_name)
 
+    def _check_now_selected_from_list():
+        """Skip the poll timer and check the selected channel(s) immediately."""
+        selected_items = ch_tree.selection()
+        if not selected_items or not recorder or not recorder.is_running:
+            return
+        for item in selected_items:
+            idx = ch_tree.index(item)
+            if 0 <= idx < len(channels):
+                recorder.check_now(channels[idx]["name"])
+
     def show_context_menu(event):
         # Select the item under cursor if not already selected
         item = ch_tree.identify_row(event.y)
@@ -5598,6 +5836,10 @@ def main_gui(config):
                     ctx_menu.add_command(label="Stop Recording", command=_stop_selected_channel_from_list)
                 else:
                     ctx_menu.add_command(label="Start Recording", command=_start_selected_channel_from_list)
+                # "Check Now" — skip the poll timer for channels that are
+                # waiting between checks (offline, error backoff, etc.)
+                if status_lower.startswith(("offline", "error")):
+                    ctx_menu.add_command(label="Check Now", command=_check_now_selected_from_list)
                 ctx_menu.add_separator()
 
         ctx_menu.add_command(label="Open in Browser", command=open_channel_url)
@@ -5606,6 +5848,7 @@ def main_gui(config):
         ctx_menu.add_command(label="Toggle Selected", command=_toggle_selected_channels)
         ctx_menu.add_command(label="Enable All", command=_enable_all_channels)
         ctx_menu.add_command(label="Disable All", command=_disable_all_channels)
+        ctx_menu.add_cascade(label="Sort", menu=sort_menu)
         ctx_menu.add_separator()
         ctx_menu.add_command(label="Remove", command=remove_selected)
 
@@ -5770,6 +6013,13 @@ def main_gui(config):
         recorder.start_channel(ch_name)
         root.after(0, refresh_status)  # reflect restarting state immediately
 
+    def _check_now_selected_channel():
+        """Skip the poll timer and check the selected channel immediately."""
+        ch_name = _get_selected_status_channel()
+        if not ch_name or not recorder or not recorder.is_running:
+            return
+        recorder.check_now(ch_name)
+
     def _open_status_channel_url():
         ch_name = _get_selected_status_channel()
         if not ch_name:
@@ -5805,6 +6055,8 @@ def main_gui(config):
                 status_ctx_menu.add_command(label="Restart Channel", command=_start_selected_channel)
             else:
                 status_ctx_menu.add_command(label="Stop Channel", command=_stop_selected_channel)
+                if status_lower.startswith(("offline", "error")):
+                    status_ctx_menu.add_command(label="Check Now", command=_check_now_selected_channel)
 
             status_ctx_menu.add_separator()
 
@@ -5874,35 +6126,82 @@ def main_gui(config):
         "Normal (3 min)": 3.0,
         "Fast (1 min)": 1.0,
     }
+    CUSTOM_POLL_LABEL = "Custom…"
+    POLL_MIN_MINUTES = 0.5   # floor — protects against rate limiting / IP bans
+    POLL_MAX_MINUTES = 120.0
+
+    def _custom_poll_display(minutes):
+        return f"Custom ({minutes:g} min)"
 
     poll_label = tk.Label(toggle_frame, text="Polling:", font=("Segoe UI", 9))
     poll_label.pack(side=tk.RIGHT, padx=(0, 2))
 
     current_poll = config.getfloat('Timeouts', 'poll_interval_minutes', fallback=3.0)
-    # Find the closest preset name, or default to "Normal"
-    poll_default = "Normal (3 min)"
+    # Find the matching preset name, or show it as a custom value
+    poll_default = _custom_poll_display(current_poll)
     for name, val in POLL_PRESETS.items():
         if abs(val - current_poll) < 0.1:
             poll_default = name
             break
     poll_var = tk.StringVar(value=poll_default)
+    _last_poll_display = [poll_default]  # remembered so a cancelled dialog can revert
 
-    def on_poll_change(*_args):
-        selected = poll_var.get()
-        minutes = POLL_PRESETS.get(selected, 3.0)
+    def _apply_poll_interval(minutes, display_name):
+        """Persist a new poll interval and push it to running workers."""
         config.config.set('Timeouts', 'poll_interval_minutes', str(minutes))
-        # Write to config.ini so the workers pick it up on next start
+        # Write to config.ini so it survives restarts
         try:
             with open(config.config_file, 'w') as f:
                 config.config.write(f)
         except Exception:
             pass
-        logging.info(f"Polling interval changed to {minutes} minutes ({selected})")
+        # Live-apply: workers re-read the shared runtime dict each cycle,
+        # and set_poll_interval wakes them so the change is immediate.
+        if recorder and recorder.is_running:
+            recorder.set_poll_interval(minutes)
+        _last_poll_display[0] = display_name
+        logging.info(f"Polling interval changed to {minutes} minutes ({display_name})")
+
+    def on_poll_change(*_args):
+        selected = poll_var.get()
+        if selected == CUSTOM_POLL_LABEL:
+            minutes = simpledialog.askfloat(
+                "Custom Polling Interval",
+                f"Minutes between offline checks "
+                f"({POLL_MIN_MINUTES:g}–{POLL_MAX_MINUTES:g}):\n\n"
+                f"Values below {POLL_MIN_MINUTES:g} min are not allowed — "
+                f"checking too often risks rate limiting or IP bans.",
+                parent=root,
+                minvalue=POLL_MIN_MINUTES, maxvalue=POLL_MAX_MINUTES)
+            if minutes is None:
+                # Cancelled — restore whatever was selected before
+                poll_var.set(_last_poll_display[0])
+                return
+            display = _custom_poll_display(minutes)
+            poll_var.set(display)
+            _apply_poll_interval(minutes, display)
+        else:
+            minutes = POLL_PRESETS.get(selected, 3.0)
+            _apply_poll_interval(minutes, selected)
 
     poll_combo = ttk.Combobox(toggle_frame, textvariable=poll_var,
-                              values=list(POLL_PRESETS.keys()), state="readonly", width=14)
+                              values=list(POLL_PRESETS.keys()) + [CUSTOM_POLL_LABEL],
+                              state="readonly", width=14)
     poll_combo.pack(side=tk.RIGHT, padx=(0, 6))
     poll_combo.bind("<<ComboboxSelected>>", on_poll_change)
+
+    # ── Check Now button — skip the poll timer on all active channels ──
+    def _check_all_now():
+        if recorder and recorder.is_running:
+            recorder.check_all_now()
+        else:
+            logging.info("Check Now clicked but no recording session is running")
+
+    check_now_btn = ttk.Button(toggle_frame, text="Check Now",
+                               command=_check_all_now, width=10)
+    check_now_btn.pack(side=tk.RIGHT, padx=(0, 6))
+    _Tooltip(check_now_btn,
+             "Skip the wait — immediately check all\nenabled channels for live streams.\n(Right-click a single channel for a\nper-channel Check Now.)")
 
     about_btn = ttk.Button(toggle_frame, text="About", command=_about_dialog, width=6)
     about_btn.pack(side=tk.RIGHT, padx=(0, 4))
