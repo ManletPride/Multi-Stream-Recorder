@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
-__version__ = "1.6.3"
+__version__ = "1.7.0"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -139,6 +139,16 @@ HAS_CURL_CFFI = False
 try:
     import importlib
     HAS_CURL_CFFI = importlib.util.find_spec("curl_cffi") is not None
+except Exception:
+    pass
+
+# Check if websocket-client is available (optional — enables Kick push
+# notifications so recordings start seconds after a stream goes live,
+# instead of waiting for the next poll).  pip install websocket-client
+HAS_WEBSOCKET = False
+try:
+    import importlib
+    HAS_WEBSOCKET = importlib.util.find_spec("websocket") is not None
 except Exception:
     pass
 
@@ -936,6 +946,37 @@ def sanitize_path_component(name):
     name = name.rstrip('. ')
     # A name that became empty or just underscores after sanitization
     return name[:100] if name.strip('_') else 'unknown'
+
+
+def channel_key_to_dirs(channel_key):
+    """Map a channel_key to its on-disk (platform, username_dir) pair.
+
+    This MUST mirror record_worker's directory derivation exactly, because
+    BackgroundCleaner uses it to match status_dict entries (keyed by
+    channel_key) to directories under Recorded/.  The two key formats:
+
+        kick channels:    bare name          ->  ('kick',   name)
+        everything else:  'platform:name'    ->  (platform, name)
+
+    with two custom-URL wrinkles copied from record_worker: tiktok.com URLs
+    use the parsed handle for the folder name, and all other custom URLs use
+    the site domain (e.g. 'chaturbate').
+    """
+    if ":" in channel_key:
+        platform, username = channel_key.split(":", 1)
+    else:
+        platform, username = "kick", channel_key
+
+    if platform == "custom":
+        url = username
+        if 'tiktok.com' in url.lower():
+            _, tiktok_user = parse_custom_url(url)
+            username = (tiktok_user if tiktok_user != 'unknown'
+                        else extract_domain_from_url(url))
+        else:
+            username = extract_domain_from_url(url)
+
+    return platform, sanitize_path_component(username)
 
 
 # ────────────────────────────────────────────────
@@ -3682,7 +3723,19 @@ def record_worker(args):
 
                 # Normal offline — flat interval with jitter (no backoff)
                 sleep_time = jittered_sleep(poll_base_seconds, poll_jitter_percent)
-                new_status = {"status": "Offline", "detail": f"next check ~{int(sleep_time)}s", "size": "", "time": "", "progress": 0}
+                detail = f"next check ~{int(sleep_time)}s"
+                if platform == "kick":
+                    # Push coverage flag is set by KickPushListener in the
+                    # main process via the shared runtime dict.  When the
+                    # socket is down the tag simply disappears and the detail
+                    # reads exactly like pre-1.7.0 — that absence IS the
+                    # degraded-mode indicator.
+                    try:
+                        if runtime.get(f"kick_push:{channel_key}", False):
+                            detail = f"push: listening · {detail}"
+                    except Exception:
+                        pass  # Manager unavailable during shutdown
+                new_status = {"status": "Offline", "detail": detail, "size": "", "time": "", "progress": 0}
                 if new_status != last_status:
                     status_queue.put((channel_key, new_status))
                     last_status = new_status.copy()
@@ -4216,6 +4269,26 @@ class BackgroundCleaner:
         if not os.path.exists(self.recorded_base):
             return False
 
+        # Bug #4 fix, corrected (v1.7.0): map every busy channel in
+        # status_dict to its ON-DISK (platform, username_dir) using the same
+        # derivation as record_worker, and skip those directories entirely.
+        #
+        # The previous guard reconstructed the key as f"{platform}:{username_dir}",
+        # which never matched Kick channels (bare-name keys) or custom
+        # channels (full-URL keys) — so actively-recording Kick/custom files
+        # could be caught by a cleanup pass triggered from stopping a
+        # DIFFERENT channel, remuxed as partials, and re-remuxed on every
+        # subsequent pass.  Windows file locking prevented the raw file from
+        # being moved (which is why no data was lost), but the partial MP4s
+        # in Processed looked like finished recordings until shutdown.
+        busy_dirs = set()
+        for ch_key, st in list(self.status_dict.items()):
+            if st.get("status") in ("Recording", "Remuxing...", "Processing..."):
+                try:
+                    busy_dirs.add(channel_key_to_dirs(ch_key))
+                except Exception:
+                    pass
+
         # Scan recorded_base dynamically so new platforms (tiktok, etc.)
         # are picked up automatically without needing a hardcoded list.
         for platform in os.listdir(self.recorded_base):
@@ -4234,25 +4307,17 @@ class BackgroundCleaner:
                 os.makedirs(pending_dir, exist_ok=True)
 
                 # Bug #4 fix: if the worker for this channel is actively
-                # remuxing a file in-process, the .ts is still open/locked
-                # even though its size looks static (remux reads, not writes).
-                # Skip the entire channel directory in that case — the worker
-                # will move the file to PendingDeletion itself once done.
-                #
-                # Same for actively RECORDING channels: a per-channel stop
-                # cleanup (stop_channel's delayed _channel_cleanup) scans all
-                # directories globally, and on Windows an in-progress .ts can
-                # pass the size-growth check below because NTFS doesn't update
-                # the visible file size until the writer flushes metadata.
-                # That produced a partial remux of a live recording whose
-                # stale MP4 later short-circuited the real remux at shutdown.
-                channel_key = f"{platform}:{username_dir}"
-                channel_status = self.status_dict.get(channel_key, {}).get("status", "")
-                if channel_status in ("Remuxing...", "Recording"):
+                # recording, remuxing, or processing, its .ts may be open/
+                # locked (or about to be handled by the worker itself).
+                # Skip the entire channel directory — the worker moves its
+                # own file to PendingDeletion once done.  See busy_dirs
+                # construction above for why the match is done on
+                # (platform, username_dir) rather than a reconstructed key.
+                if (platform, username_dir) in busy_dirs:
                     logging.info(
-                        f"Cleanup: {channel_key} is actively "
-                        f"{'remuxing' if channel_status == 'Remuxing...' else 'recording'} — "
-                        "skipping its directory to avoid contention"
+                        f"Cleanup: {platform}/{username_dir} has an active "
+                        "worker (recording/remuxing) — skipping its "
+                        "directory to avoid contention"
                     )
                     found_locked = True
                     continue
@@ -4263,11 +4328,10 @@ class BackgroundCleaner:
 
                     raw_file = os.path.join(username_path, filename)
 
-                    # In-use probe: try to open the file for append.  On
-                    # Windows, streamlink/ffmpeg hold their output with a
-                    # share mode that denies this, so a PermissionError is a
-                    # reliable "still being written" signal — unlike the
-                    # size-growth check, which NTFS metadata lag can fool.
+                    # In-use probe 1: try to open the file for append.  ffmpeg
+                    # holds its output with a share mode that denies this, so
+                    # PermissionError is a reliable "still being written"
+                    # signal for ffmpeg-based recordings.
                     try:
                         with open(raw_file, 'ab'):
                             pass
@@ -4276,7 +4340,35 @@ class BackgroundCleaner:
                         found_locked = True
                         continue
                     except Exception:
-                        pass  # transient error — fall through to the size check
+                        pass  # transient error — fall through to the next probe
+
+                    # In-use probe 2: rename round-trip.  Python-based writers
+                    # (streamlink, yt-dlp) open with shared read/write, so the
+                    # append probe passes — but they don't set
+                    # FILE_SHARE_DELETE, so a rename fails while they hold the
+                    # file.  This catches an in-progress recording BEFORE we
+                    # waste a full remux on it, instead of discovering the
+                    # lock at the move-to-PendingDeletion step afterwards.
+                    probe_name = raw_file + ".cleanupprobe"
+                    try:
+                        os.rename(raw_file, probe_name)
+                        os.rename(probe_name, raw_file)
+                    except PermissionError:
+                        logging.warning(
+                            f"Cleanup: {filename} is locked by a writer "
+                            "(rename probe) — likely still recording, skipping")
+                        found_locked = True
+                        continue
+                    except OSError:
+                        # Rename failed for a non-lock reason; if the file got
+                        # stuck under the probe name, restore it.
+                        if os.path.exists(probe_name) and not os.path.exists(raw_file):
+                            try:
+                                os.rename(probe_name, raw_file)
+                            except Exception:
+                                pass
+                        found_locked = True
+                        continue
 
                     try:
                         size1 = os.path.getsize(raw_file)
@@ -4450,6 +4542,275 @@ def purge_old_pending_files(root_path, max_age_days, logger=None):
 #          StreamRecorder
 # ────────────────────────────────────────────────
 
+# ============ KICK PUSH NOTIFICATIONS ============
+# Kick's public Pusher endpoint (same socket the kick.com website uses).
+# If Kick rotates the app key, grab the new URL from DevTools -> Network ->
+# WS filter on any kick.com page and update it here.
+KICK_PUSHER_URL = (
+    "wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679"
+    "?protocol=7&client=js&version=8.4.0-rc2&flash=false"
+)
+KICK_LIVE_EVENT = "App\\Events\\StreamerIsLive"
+KICK_STOP_EVENT = "App\\Events\\StopStreamBroadcast"
+KICK_ID_CACHE_FILE = "kick_channel_ids.json"   # lives next to config.ini
+PUSH_RECONNECT_BASE = 5        # seconds; doubles up to the cap below
+PUSH_RECONNECT_MAX = 300
+
+
+def _safe_int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+class KickPushListener:
+    """Single-connection Pusher listener that wakes Kick workers on go-live.
+
+    Holds ONE WebSocket subscribed to ``channel.{id}`` for every active Kick
+    channel.  When Kick pushes ``App\\Events\\StreamerIsLive``, this calls
+    recorder.check_now(slug) — the exact same wake path as the GUI's
+    "Check Now" button.  Polling is never disabled; push is purely additive.
+    If the socket is down (or websocket-client isn't installed), MSR behaves
+    exactly as it did before this feature existed.
+
+    Runs as a daemon thread in the main process.  It never records anything
+    and never marks a stream live — the worker's normal streamlink check
+    remains the source of truth, so spurious/duplicate events are harmless.
+    """
+
+    def __init__(self, recorder, config):
+        self.recorder = recorder           # StreamRecorder instance
+        self.config = config
+        self.logger = logging.getLogger()
+        self._ws = None
+        self._thread = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        # slug -> numeric channel_id (resolved lazily, cached to disk)
+        self._ids: dict = {}
+        # channel_id (int) -> slug, for routing incoming events
+        self._id_to_slug: dict = {}
+        # slugs we want subscribed (bare Kick channel names == channel_key)
+        self._wanted: set = set()
+        # slugs confirmed subscribed on the current connection
+        self._subscribed: set = set()
+        self._cache_path = os.path.join(
+            os.path.dirname(os.path.abspath(
+                getattr(config, 'config_file', 'config.ini'))),
+            KICK_ID_CACHE_FILE)
+        self._load_id_cache()
+
+    # ── public API ──
+
+    def start(self):
+        if not HAS_WEBSOCKET:
+            self.logger.info(
+                "Kick push: websocket-client not installed — polling only "
+                "(pip install websocket-client to enable push notifications)")
+            return
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="kick-push-listener")
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        ws = self._ws
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    def set_channels(self, kick_slugs):
+        """Update the wanted-channel set.  Subscribes/unsubscribes live if
+        connected; otherwise the set is picked up on the next connect."""
+        new = set(kick_slugs)
+        with self._lock:
+            added = new - self._wanted
+            removed = self._wanted - new
+            self._wanted = new
+        for slug in removed:
+            self._set_push_flag(slug, False)
+            self._unsubscribe(slug)
+        for slug in added:
+            self._subscribe(slug)
+
+    # ── connection loop ──
+
+    def _run(self):
+        import websocket  # websocket-client (guarded by HAS_WEBSOCKET)
+        backoff = PUSH_RECONNECT_BASE
+        while not self._stop.is_set():
+            self._subscribed.clear()
+            connected_at = time.monotonic()
+            try:
+                self._ws = websocket.WebSocketApp(
+                    KICK_PUSHER_URL,
+                    on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=lambda w, e: self.logger.warning(
+                        f"Kick push: socket error: {e}"),
+                    on_close=lambda w, c, r: self.logger.info(
+                        f"Kick push: socket closed ({c})"),
+                )
+                # ping keeps Pusher from dropping the idle connection
+                self._ws.run_forever(ping_interval=30, ping_timeout=10)
+            except Exception as e:
+                self.logger.warning(f"Kick push: connection failed: {e}")
+            finally:
+                self._ws = None
+                # Connection is gone — clear every push flag so the workers'
+                # status line stops advertising push coverage.
+                for slug in list(self._subscribed) or list(self._wanted):
+                    self._set_push_flag(slug, False)
+                self._subscribed.clear()
+
+            if self._stop.is_set():
+                break
+            # A connection that survived a while was healthy — reset backoff
+            if time.monotonic() - connected_at > 60:
+                backoff = PUSH_RECONNECT_BASE
+            self.logger.info(f"Kick push: reconnecting in {backoff}s")
+            if self._stop.wait(backoff):
+                break
+            backoff = min(backoff * 2, PUSH_RECONNECT_MAX)
+
+    def _on_open(self, ws):
+        self.logger.info("Kick push: connected — subscribing channels")
+        with self._lock:
+            wanted = list(self._wanted)
+        for slug in wanted:
+            self._subscribe(slug)
+
+    def _on_message(self, ws, raw):
+        try:
+            msg = json.loads(raw)
+        except (ValueError, TypeError):
+            return
+        event = msg.get("event", "")
+
+        if event == "pusher_internal:subscription_succeeded":
+            chan = msg.get("channel", "")          # e.g. "channel.102755229"
+            cid = chan.rsplit(".", 1)[-1]
+            slug = self._id_to_slug.get(_safe_int(cid))
+            if slug:
+                self._subscribed.add(slug)
+                self._set_push_flag(slug, True)
+                self.logger.info(f"Kick push: listening for {slug} ({chan})")
+            return
+
+        if event == KICK_LIVE_EVENT:
+            try:
+                data = json.loads(msg.get("data", "{}"))
+                cid = data.get("livestream", {}).get("channel_id")
+            except (ValueError, TypeError):
+                cid = None
+            slug = self._id_to_slug.get(_safe_int(cid))
+            if slug:
+                title = ""
+                try:
+                    title = data["livestream"].get("session_title") or ""
+                except Exception:
+                    pass
+                self.logger.info(
+                    f"Kick push: {slug} went LIVE ({title!r}) — waking worker")
+                self.recorder.check_now(slug)
+            return
+
+        if event == KICK_STOP_EVENT:
+            # Informational only — the recording process notices the stream
+            # ending on its own (stall detector).  Never stop anything from
+            # here; a push event must not be able to kill a recording.
+            return
+
+    # ── subscription helpers ──
+
+    def _subscribe(self, slug):
+        ws = self._ws
+        if ws is None:
+            return  # not connected — _on_open will subscribe everything wanted
+        cid = self._resolve_channel_id(slug)
+        if cid is None:
+            self.logger.info(
+                f"Kick push: no channel id for {slug} — polling only")
+            return
+        self._id_to_slug[cid] = slug
+        try:
+            ws.send(json.dumps({
+                "event": "pusher:subscribe",
+                "data": {"auth": "", "channel": f"channel.{cid}"},
+            }))
+        except Exception as e:
+            self.logger.warning(f"Kick push: subscribe failed for {slug}: {e}")
+
+    def _unsubscribe(self, slug):
+        ws = self._ws
+        cid = self._ids.get(slug)
+        if ws is None or cid is None:
+            return
+        try:
+            ws.send(json.dumps({
+                "event": "pusher:unsubscribe",
+                "data": {"channel": f"channel.{cid}"},
+            }))
+        except Exception:
+            pass
+        self._subscribed.discard(slug)
+
+    # ── channel id resolution + cache ──
+
+    def _resolve_channel_id(self, slug):
+        cid = self._ids.get(slug)
+        if cid is not None:
+            return cid
+        if not HAS_CURL_CFFI:
+            self.logger.info(
+                "Kick push: curl_cffi not installed — cannot resolve "
+                f"channel id for {slug} (pip install curl_cffi)")
+            return None
+        try:
+            from curl_cffi import requests as curl_requests
+            r = curl_requests.get(
+                f"https://kick.com/api/v2/channels/{slug}",
+                impersonate="chrome", timeout=15)
+            cid = int(r.json()["id"])
+        except Exception as e:
+            self.logger.warning(f"Kick push: id lookup failed for {slug}: {e}")
+            return None
+        self._ids[slug] = cid
+        self._save_id_cache()
+        return cid
+
+    def _load_id_cache(self):
+        try:
+            with open(self._cache_path, "r", encoding="utf-8") as f:
+                self._ids = {k: int(v) for k, v in json.load(f).items()}
+            self._id_to_slug = {v: k for k, v in self._ids.items()}
+        except (OSError, ValueError):
+            self._ids = {}
+
+    def _save_id_cache(self):
+        try:
+            with open(self._cache_path, "w", encoding="utf-8") as f:
+                json.dump(self._ids, f, indent=2)
+        except OSError:
+            pass
+
+    # ── shared-state plumbing ──
+
+    def _set_push_flag(self, slug, value):
+        """Expose per-channel push coverage to workers via the shared runtime
+        dict (same live-update mechanism as poll_interval_minutes)."""
+        try:
+            self.recorder.runtime[f"kick_push:{slug}"] = bool(value)
+        except Exception:
+            pass  # Manager may be shutting down
+
+
 class StreamRecorder:
     """Main recorder that manages worker processes."""
 
@@ -4496,6 +4857,22 @@ class StreamRecorder:
         self._spawning: set = set()
         self._spawn_lock = threading.Lock()
         self.cleaner = BackgroundCleaner(config, status_dict=self.status_dict)
+        # Kick push notifications: one Pusher socket that wakes workers the
+        # instant a Kick channel goes live (supplements polling, never
+        # replaces it).  No-op if websocket-client isn't installed.
+        self.kick_push = KickPushListener(self, config)
+
+    def _sync_kick_push(self):
+        """Align the push listener's subscriptions with the currently active
+        Kick channels (bare-name channel keys, minus individually stopped
+        ones).  Called on session start and on per-channel start/stop."""
+        try:
+            tracked = set(self.channels) | set(self.processes.keys())
+            kick_slugs = [ch for ch in tracked
+                          if ":" not in ch and ch not in self.stopped_channels]
+            self.kick_push.set_channels(kick_slugs)
+        except Exception as e:
+            logging.warning(f"Kick push: subscription sync failed: {e}")
 
     def _get_wake_event(self, channel_name):
         """Return the wake event for a channel, creating it on first use.
@@ -4561,8 +4938,17 @@ class StreamRecorder:
         while not self.status_queue.empty():
             try:
                 ch, new_status = self.status_queue.get_nowait()
-                if ch in self.status_dict:
-                    self.status_dict[ch] = new_status
+                if ch not in self.status_dict:
+                    continue
+                # Ignore stale updates from a killed worker: stop_channel sets
+                # the status to 'Stopped', but the worker may have queued a
+                # 'Recording'/'Checking...' update just before it died.
+                # Applying it would flip the dead channel back to 'Recording',
+                # which both misleads the GUI and makes the cleanup busy-dir
+                # guard skip the channel's directory until session end.
+                if ch in self.stopped_channels:
+                    continue
+                self.status_dict[ch] = new_status
             except Exception:
                 break
 
@@ -4597,6 +4983,7 @@ class StreamRecorder:
             self.stopped_channels.add(channel_name)
             # Drain any lingering dead processes from the list
             self.processes[channel_name] = []
+            self._sync_kick_push()
             return
 
         # Kill them all
@@ -4622,6 +5009,10 @@ class StreamRecorder:
         self.status_dict[channel_name] = {
             "status": "Stopped", "detail": "by user", "size": "", "time": "", "progress": 0
         }
+
+        # Drop the push subscription for this channel (Kick channels only —
+        # set_channels handles the filtering)
+        self._sync_kick_push()
 
         # Run cleanup for this channel's files in background.
         # We wait long enough for any in-flight remux in the killed worker process
@@ -4707,6 +5098,10 @@ class StreamRecorder:
             self.processes[channel_name] = [proc]
             logging.info(f"Started process for {channel_name} (PID {proc.pid})")
 
+            # Re-subscribe push for this channel (covers restart of a stopped
+            # channel and brand-new channels added mid-session)
+            self._sync_kick_push()
+
         finally:
             with self._spawn_lock:
                 self._spawning.discard(channel_name)
@@ -4717,6 +5112,13 @@ class StreamRecorder:
         self.is_running = False
         logging.info("Stop requested — shutting down processes...")
         self.should_stop.set()
+
+        # Stop the Kick push listener first — no point waking workers that
+        # are about to be killed
+        try:
+            self.kick_push.stop()
+        except Exception:
+            pass
 
         # Collect all alive processes across every channel
         pids_to_kill = []
@@ -4741,6 +5143,18 @@ class StreamRecorder:
 
         logging.info("Checking for orphaned ffmpeg processes...")
         kill_orphan_ffmpeg_processes(logging.getLogger())
+
+        # All workers are dead now — normalize any stale 'Recording'/'Remuxing'
+        # statuses so the busy-directory guard in BackgroundCleaner doesn't
+        # skip these channels' directories forever (their files are exactly
+        # what the post-stop cleanup needs to process).
+        for ch in list(self.status_dict.keys()):
+            if self.status_dict.get(ch, {}).get("status") in (
+                    "Recording", "Remuxing...", "Processing...", "Checking..."):
+                self.status_dict[ch] = {
+                    "status": "Stopped", "detail": "session ended",
+                    "size": "", "time": "", "progress": 0,
+                }
 
         # Start background cleanup (safe now — no recording processes running)
         self.cleaner.start()
@@ -4786,6 +5200,11 @@ class StreamRecorder:
             proc.start()
             self.processes[ch] = [proc]
             logging.info(f"Started process for {ch} (PID {proc.pid})")
+
+        # Start the Kick push listener (harmless no-op without Kick channels
+        # or without websocket-client installed)
+        self._sync_kick_push()
+        self.kick_push.start()
 
         # Monitor processes — restart any that exit unexpectedly
         while self.is_running and not self.should_stop.is_set():
@@ -5921,6 +6340,7 @@ def main_gui(config):
         deps.append(f"psutil: {'yes' if HAS_PSUTIL else 'no'}")
         deps.append(f"pystray: {'yes' if HAS_TRAY else 'no'}")
         deps.append(f"curl_cffi: {'yes' if HAS_CURL_CFFI else 'no'} (browser impersonation)")
+        deps.append(f"websocket-client: {'yes' if HAS_WEBSOCKET else 'no'} (Kick push notifications)")
         deps_str = "\n".join(deps)
 
         messagebox.showinfo(
