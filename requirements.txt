@@ -2,13 +2,18 @@
 # Install with: pip install -r requirements.txt
 
 # ── Required ──────────────────────────────────────
-yt-dlp>=2024.01.01        # Stream detection & recording (Kick, YouTube, custom URLs)
+yt-dlp[default]>=2024.01.01   # Stream detection & recording (YouTube, Rumble, TikTok, custom URLs).
+                              # [default] pulls in yt-dlp-ejs, needed for YouTube's JS challenge —
+                              # without it YouTube recordings drop out every ~15 seconds.
+streamlink>=8.0.0             # Kick and Twitch detection & recording. 8.x includes the built-in
+                              # Cloudflare JS challenge solver that Kick requires.
 
 # ── Recommended ───────────────────────────────────
-streamlink>=6.0.0         # Twitch recording (not needed if only using Kick/YouTube)
 psutil>=5.9.0             # Clean process shutdown & orphan cleanup
 curl_cffi>=0.10.0         # Browser impersonation for Cloudflare-protected sites (Rumble);
-                          # also used for Fishtank.live API (HTTP/3)
+                          # Fishtank.live API (HTTP/3); Kick push channel-ID lookup
+websocket-client>=1.6.0   # Kick push notifications — recordings start within seconds of
+                          # go-live via Kick's WebSocket event feed (v1.7.0+)
 
 # ── Optional (GUI enhancements) ──────────────────
 pystray>=0.19.0           # System tray icon (minimize to tray)
