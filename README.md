@@ -10,6 +10,7 @@ A desktop application for simultaneously recording live streams from **Kick**, *
 * **Split-track HLS** — Automatically detects and records CMAF streams with separate video/audio playlists (used by Chaturbate and other CDN-backed platforms)
 * **Concurrent recording** — Monitor and record multiple streams simultaneously
 * **Automatic detection** — Polls channels and starts recording the moment a stream goes live
+* **Kick push notifications** — Kick recordings start within *seconds* of a stream going live: MSR holds a WebSocket to Kick's own real-time event feed (the same one the kick.com website uses) and reacts to the go-live event instantly, instead of waiting for the next poll. Polling continues underneath as an automatic fallback
 * **Smart polling** — Configurable check intervals with jitter to avoid rate limiting; exponential backoff on errors only
 * **Custom poll rate** — Pick a preset (1/3/5 min) or set any custom interval from 30 seconds to 2 hours; changes apply instantly to running sessions
 * **Check Now** — Skip the poll timer entirely: one button checks every enabled channel immediately, or right-click a single channel to check just that one
@@ -74,7 +75,8 @@ pip install "yt-dlp[default]"     # Required for YouTube, Rumble, TikTok, custom
 pip install streamlink            # Required for Twitch and Kick
 pip install psutil                # Recommended — cleaner process management
 pip install pystray Pillow plyer  # Optional — tray icon & notifications
-pip install curl_cffi             # Optional — Rumble Cloudflare bypass
+pip install curl_cffi             # Optional — Rumble Cloudflare bypass; Kick push channel-ID lookup
+pip install websocket-client      # Optional — Kick push notifications (instant go-live detection)
 ```
 
 ### 3. Run
@@ -191,6 +193,7 @@ E:\Streams\
 ├── PendingDeletion\       # Temp files awaiting cleanup
 ├── channels.json          # Channel list
 ├── config.ini             # Configuration
+├── kick_channel_ids.json  # Cached Kick channel IDs (auto-created; used by push notifications)
 └── cookies.txt            # Browser cookies (optional)
 ```
 
@@ -209,11 +212,12 @@ E:\Streams\
 ## How It Works
 
 1. **Monitoring**: Each channel gets its own worker process. Workers check if the stream is live at the configured polling interval with random jitter.
-2. **Detection**: Kick streams are checked via streamlink (with Cloudflare JS challenge solver). Twitch streams are checked via streamlink. YouTube and custom URLs use yt-dlp's `--dump-json`. Rumble channel pages are resolved to their current live video URL.
-3. **Recording**: Live streams are recorded as MPEG-TS files. Kick and Twitch use streamlink. YouTube, Rumble, and standard custom URLs use yt-dlp with ffmpeg as the HLS downloader. Custom URLs whose streams have separate video and audio playlists (CMAF/split-track HLS) are recorded using a direct ffmpeg command that follows both playlists concurrently and muxes them in real time.
-4. **Stream info**: Once the output file reaches ~1.5 MB, a background ffprobe thread reads it and updates the status display with measured resolution, frame rate, and bitrate.
-5. **Reconnection**: If a recording drops unexpectedly (process exits after >10 seconds of recording), the worker enters a 3-minute fast-poll mode (every 15 seconds) to catch stream reconnects.
-6. **Processing**: When you click Stop (or the stream ends), raw .ts files are remuxed to .mp4 with ffmpeg (including `+faststart` for seekability), metadata sidecars are saved, and the originals are moved to PendingDeletion.
+2. **Push notifications (Kick)**: Alongside polling, a single background WebSocket subscribes to Kick's real-time event feed for every enabled Kick channel. When Kick announces a stream going live, the matching worker is woken instantly for an immediate check — the same mechanism as the Check Now button. If the socket is ever down, workers simply continue polling; push supplements polling, never replaces it.
+3. **Detection**: Kick streams are checked via streamlink (with Cloudflare JS challenge solver). Twitch streams are checked via streamlink. YouTube and custom URLs use yt-dlp's `--dump-json`. Rumble channel pages are resolved to their current live video URL.
+4. **Recording**: Live streams are recorded as MPEG-TS files. Kick and Twitch use streamlink. YouTube, Rumble, and standard custom URLs use yt-dlp with ffmpeg as the HLS downloader. Custom URLs whose streams have separate video and audio playlists (CMAF/split-track HLS) are recorded using a direct ffmpeg command that follows both playlists concurrently and muxes them in real time.
+5. **Stream info**: Once the output file reaches ~1.5 MB, a background ffprobe thread reads it and updates the status display with measured resolution, frame rate, and bitrate.
+6. **Reconnection**: If a recording drops unexpectedly (process exits after >10 seconds of recording), the worker enters a 3-minute fast-poll mode (every 15 seconds) to catch stream reconnects.
+7. **Processing**: When you click Stop (or the stream ends), raw .ts files are remuxed to .mp4 with ffmpeg (including `+faststart` for seekability), metadata sidecars are saved, and the originals are moved to PendingDeletion.
 
 ## Polling Behavior
 
@@ -222,6 +226,7 @@ The polling system is designed to be responsive without being abusive to servers
 | State | Check Interval | Behavior |
 | --- | --- | --- |
 | **Offline** | Every 3 min ± jitter | Flat interval, no backoff. Catches streams within minutes of going live. |
+| **Offline (Kick, push active)** | Instant + polling | Kick's event feed wakes the worker within seconds of go-live; the poll timer keeps running as a fallback. |
 | **Error** | Doubles each time, max 15 min | Exponential backoff on server errors. Resets immediately on success. |
 | **Reconnect** | Every 15 seconds for 3 min | Fast polling after a stream drops unexpectedly. |
 | **Recording** | Continuous | No polling needed — the recording process handles the stream. |
@@ -229,6 +234,25 @@ The polling system is designed to be responsive without being abusive to servers
 The GUI includes a **Polling** dropdown to switch between Relaxed (5 min), Normal (3 min), and Fast (1 min) presets — or select **Custom…** to enter any interval from 0.5 to 120 minutes. A floor of 30 seconds is enforced; checking more often than that risks rate limiting or IP bans, which is exactly what the jitter system exists to prevent. Interval changes apply to running sessions immediately — workers don't need a restart, and they don't finish out their old sleep first.
 
 The **Check Now** button skips the poll timer entirely and immediately checks every enabled channel (with a small stagger between them, so a long channel list doesn't hit its platforms all at once). To check a single channel, right-click it in the channel list or status table and select **Check Now** — available whenever the channel is offline or in error backoff. Use this when a stream just went live and you don't want to wait out the current polling cycle.
+
+### Kick Push Notifications
+
+Polling has an unavoidable blind spot: a stream that goes live right after a check isn't caught until the next one, so the first minute or three of a broadcast can be missed. For Kick channels, MSR closes this gap with push notifications.
+
+At session start, MSR opens a single WebSocket to Kick's real-time event feed (the Pusher service that powers the kick.com website's own live notifications) and subscribes to every enabled Kick channel. When Kick pushes its go-live event, the matching worker is woken immediately — recordings typically begin within seconds of the broadcast starting. In the status table, Kick channels covered by push show it in the detail column:
+
+```
+Offline    push: listening · next check ~57s
+```
+
+Design notes:
+
+- **Push supplements polling; it never replaces it.** The poll timer keeps running underneath. If the WebSocket disconnects, is blocked, or the required packages aren't installed, Kick channels behave exactly as they did before this feature existed — the `push: listening` tag disappearing from the detail column is the indicator that you're on polling only.
+- **The push event is a hint, not a truth.** A go-live event triggers the normal streamlink liveness check before any recording starts, so spurious or duplicate events are harmless.
+- **One connection, all channels.** Adding, removing, starting, or stopping Kick channels mid-session updates the subscriptions live.
+- Channel IDs are resolved once per channel and cached in `kick_channel_ids.json`, so the Cloudflare-protected lookup happens only on the first session per channel.
+
+Requires two optional packages: `pip install websocket-client curl_cffi`. Without them, Kick channels fall back to polling with a note in the log.
 
 ## Troubleshooting
 
@@ -249,6 +273,10 @@ This is also why the install instructions above use `yt-dlp[default]` rather tha
 **Kick 403 errors** — Make sure you don't have an old third-party Kick plugin overriding streamlink's built-in one. Check `%APPDATA%\streamlink\plugins\` for a `kick.py` file and delete it if present. Streamlink 8.x includes a built-in Kick plugin with Cloudflare bypass.
 
 **Kick streams not recording** — Kick requires streamlink 8.0+. Update streamlink: `pip install -U streamlink`. The program uses streamlink (not yt-dlp) for Kick detection and recording.
+
+**Kick push: no "push: listening" in the status column** — Push notifications require two optional packages: `pip install websocket-client curl_cffi`. Check the log at session start: `websocket-client not installed` means the socket can't be opened at all; `curl_cffi not installed — cannot resolve channel id` means the one-time channel-ID lookup failed, so that channel is polling-only. Either way, recording still works normally via polling.
+
+**Kick push: was working, stopped working** — If the log shows the socket connecting but no `Kick push: listening for <channel>` lines follow, Kick has likely rotated their Pusher application key (it happens occasionally). Open any kick.com page with DevTools → Network → **WS** filter, copy the new `wss://ws-usX.pusher.com/app/...` URL, and update `KICK_PUSHER_URL` near the top of the script. Delete `kick_channel_ids.json` only if channels were renamed — IDs themselves never change.
 
 **Rumble streams not detected** — Add Rumble channels as custom URLs using the channel page format: `https://rumble.com/c/ChannelName`. If you get 403 errors, install `curl_cffi` for browser impersonation: `pip install curl_cffi`.
 
@@ -346,7 +374,7 @@ After each recording is remuxed, MSR verifies that the output MP4 contains an au
 
 ## Platform Notes
 
-**Kick**: Uses streamlink for both detection and recording. Streamlink 8.x includes a built-in Cloudflare JS challenge solver that handles Kick's aggressive bot detection. Cookies are optional. Streams are recorded in 1080p by default. **Important**: Remove any old third-party `kick.py` plugins from `%APPDATA%\streamlink\plugins\` — they override the built-in plugin and break Cloudflare bypass.
+**Kick**: Uses streamlink for both detection and recording. Streamlink 8.x includes a built-in Cloudflare JS challenge solver that handles Kick's aggressive bot detection. Cookies are optional. Streams are recorded in 1080p by default. With `websocket-client` and `curl_cffi` installed, Kick channels also get **push notifications** — go-live events arrive over Kick's own WebSocket feed and recordings start within seconds instead of waiting for the next poll (see *Kick Push Notifications* above). **Important**: Remove any old third-party `kick.py` plugins from `%APPDATA%\streamlink\plugins\` — they override the built-in plugin and break Cloudflare bypass.
 
 **Twitch**: Uses streamlink with `--twitch-disable-ads` and `--twitch-low-latency`. Cookies are optional but enable subscriber-only features.
 
@@ -376,7 +404,8 @@ For platforms that serve CMAF HLS with separate video and audio playlists, MSR a
 | yt-dlp | Yes | YouTube, Rumble, custom URL recording |
 | streamlink | Yes | Kick and Twitch stream recording |
 | psutil | Recommended | Clean process management |
-| curl_cffi | Recommended | Rumble Cloudflare bypass; Fishtank.live API (HTTP/3) |
+| curl_cffi | Recommended | Rumble Cloudflare bypass; Fishtank.live API (HTTP/3); Kick push channel-ID lookup |
+| websocket-client | Recommended | Kick push notifications (instant go-live detection) |
 | pystray + Pillow | Optional | System tray icon |
 | plyer | Optional | Desktop notifications |
 
