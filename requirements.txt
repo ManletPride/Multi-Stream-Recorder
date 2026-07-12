@@ -19,6 +19,7 @@ websocket-client>=1.6.0   # Kick push notifications — recordings start within 
 pystray>=0.19.0           # System tray icon (minimize to tray)
 Pillow>=9.0.0             # Required by pystray for tray icon rendering
 plyer>=2.1.0              # Desktop notifications (stream started/stopped)
+colorama>=0.4.6           # Colored console/log output (Windows terminal support)
 
 # ── External tools (not pip-installable) ──────────
 # ffmpeg — required for remuxing .ts → .mp4
@@ -31,3 +32,8 @@ plyer>=2.1.0              # Desktop notifications (stream started/stopped)
 #   YouTube recordings will drop out roughly every 15 seconds.
 #   Download: https://deno.com/
 #   Must be available in PATH
+#
+# tkinter — required for the GUI (default mode, i.e. running without --headless).
+#   Bundled with the standard Windows/macOS python.org installers, but on
+#   Linux it's a separate OS package, not something pip can install:
+#   sudo apt install python3-tk (Debian/Ubuntu) / sudo dnf install python3-tkinter (Fedora)
