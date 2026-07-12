@@ -74,6 +74,13 @@ try:
     HAS_TRAY = True
 except ImportError:
     HAS_TRAY = False
+except Exception:
+    # On Linux, pystray's Xorg backend tries to connect to a display at
+    # import time and raises Xlib.error.DisplayNameError (not ImportError)
+    # when none is available -- e.g. headless servers, --headless mode
+    # over SSH, or CI. Treat that the same as "tray unavailable" instead
+    # of letting it crash the whole script on startup.
+    HAS_TRAY = False
 
 try:
     from plyer import notification as plyer_notification
