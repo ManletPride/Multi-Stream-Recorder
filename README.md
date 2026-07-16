@@ -128,6 +128,9 @@ cookies_file =                    # Auto-detected if empty
 quality = best                    # Stream quality
 max_record_hours = 12.0           # Auto-stop after N hours (0 = no limit)
 max_file_size_gb = 8.0            # Split recording when file exceeds this size (0 = disabled)
+split_on_resolution_change = true # Split when the live video's resolution changes mid-stream
+                                   # (e.g. TikTok multi-guest battles), instead of muxing two
+                                   # resolutions into one file, which corrupts playback
 min_disk_space_gb = 5.0           # Pause if disk space falls below
 min_file_size_mb = 2.0            # Delete recordings smaller than this
 filename_pattern = {username}_{timestamp}  # Output filename pattern
@@ -289,6 +292,10 @@ This is also why the install instructions above use `yt-dlp[default]` rather tha
 **Fishtank recordings have no audio** — Fishtank's CDN occasionally serves video-only HLS segments for certain cameras (notably Cameraman). This is a server-side issue and cannot be fixed by the recorder. MSR will log a `⚠ NO AUDIO TRACK` warning immediately after remux so affected files are easy to find.
 
 **Fishtank: many short recordings in a row** — If Fishtank's CDN is resetting connections every 20–30 seconds (common during busy periods), MSR will detect this as a micro-fragment storm after 5 consecutive short recordings and apply a backoff before retrying. This is normal behavior — it reduces log noise and avoids hammering their servers during instability.
+
+**TikTok: video glitches partway through a recording (e.g. during multi-guest battles)** — When a TikTok host starts a multi-guest battle (or the layout otherwise changes), the live feed's resolution changes mid-stream. Since recording is a direct stream copy (no re-encoding), muxing two different resolutions into one file corrupts playback from that point on. MSR now detects this automatically and splits into a new file when it happens, so you get two clean recordings instead of one glitchy one. This is controlled by `split_on_resolution_change` in `config.ini` (default: on).
+
+**TikTok cookie indicator shows red even with valid cookies exported** — Fixed in this version: the cookie-domain matching was missing a case for TikTok channels added via the `tiktok` platform dropdown (it was falling back to matching against `kick.com`). If you're on an older version, re-add the channel as a custom URL (`https://www.tiktok.com/@handle`) as a workaround, or update.
 
 **Large recordings produce corrupt MP4** — The remux timeout scales automatically with file size (1 minute per GB + buffer). If you still have the `.ts` file in PendingDeletion, you can re-remux manually: `ffmpeg -i recording.ts -c copy -movflags +faststart output.mp4`
 

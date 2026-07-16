@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
-__version__ = "1.7.0"
+__version__ = "1.7.1"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -200,6 +200,10 @@ class Config:
             'quality': 'best',
             'max_record_hours': '12.0',
             'max_file_size_gb': '8.0',   # split recording when file exceeds this size (0 = disabled)
+            'split_on_resolution_change': 'true',  # end + start a fresh segment if the live video's
+                                                    # resolution changes mid-stream (e.g. TikTok multi-
+                                                    # guest battles), instead of muxing two resolutions
+                                                    # into one file, which corrupts playback
             'min_disk_space_gb': '5.0',
             'min_file_size_mb': '2.0',
             # Pattern tokens: {username}, {platform}, {date}, {time}, {timestamp}, {title}
@@ -676,6 +680,8 @@ def validate_cookies(cookies_path):
         'a_s',
         # Fishtank
         'sb-wcsaaupukpdmqdjcgaoo-auth-token',
+        # TikTok
+        'sessionid', 'sessionid_ss', 'sid_tt', 'sid_guard',
     }
 
     now = time.time()
@@ -771,6 +777,7 @@ def get_cookie_domain_for_channel(channel_key):
         'twitch:saruei'                          → 'twitch.tv'
         'youtube:@OhDough'                       → 'youtube.com'
         'xqc'  (bare Kick name)                  → 'kick.com'
+        'tiktok:somecreator'                     → 'tiktok.com'
         'custom:https://fansly.com/live/YuukoVT' → 'fansly.com'
         'custom:https://chaturbate.com/alice/'   → 'chaturbate.com'
     """
@@ -781,6 +788,8 @@ def get_cookie_domain_for_channel(channel_key):
         return 'youtube.com'
     elif channel_key.startswith('fishtank:'):
         return 'fishtank.live'
+    elif channel_key.startswith('tiktok:'):
+        return 'tiktok.com'
     elif channel_key.startswith('custom:'):
         url = channel_key.split(':', 1)[1]
         try:
@@ -2958,17 +2967,106 @@ def _probe_stream_info_thread(raw_file, stream_info_ref, ffmpeg_path, logger, mi
         logger.debug(f"ffprobe stream info probe failed: {e}")
 
 
+def _watch_resolution_change_thread(raw_file, resolution_change_ref, ffmpeg_path, logger,
+                                    stop_event, min_size_bytes=1_500_000,
+                                    check_interval=20):
+    """Background thread: detect a mid-recording resolution change and flag a split.
+
+    Recording is done via stream copy (no re-encode), writing the live HLS
+    feed straight to a raw .ts file. If the source resolution changes partway
+    through — the case reported for TikTok multi-guest "battles", where the
+    layout switches from a single portrait feed to a multi-guest grid with a
+    different frame size — the raw file ends up with two different frame
+    sizes muxed together. ffmpeg can't renegotiate resolution mid-copy, so
+    the segment plays back glitched from that point on.
+
+    Rather than trying to transcode on the fly, this establishes a baseline
+    resolution once the file has enough data, then periodically re-probes
+    the *tail* of the growing file (ffprobe -sseof) to see the current live
+    frame size. If it differs from the baseline, resolution_change_ref[0] is
+    set to True so the caller can gracefully end this segment and start a
+    fresh one — the same mechanism already used for max_file_size_gb splits.
+    """
+    import json as _json
+
+    if os.path.dirname(ffmpeg_path):
+        ffprobe = os.path.join(os.path.dirname(ffmpeg_path),
+                               "ffprobe" + ("" if not ffmpeg_path.endswith(".exe") else ".exe"))
+    else:
+        ffprobe = "ffprobe"
+
+    def _probe(extra_args=None):
+        try:
+            cmd = [ffprobe, "-v", "quiet", "-print_format", "json",
+                   "-show_streams", "-select_streams", "v:0"]
+            if extra_args:
+                cmd.extend(extra_args)
+            cmd.append(raw_file)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            data = _json.loads(result.stdout)
+            streams = data.get("streams", [])
+            if not streams:
+                return None
+            w, h = streams[0].get("width"), streams[0].get("height")
+            return (w, h) if (w and h) else None
+        except Exception as e:
+            logger.debug(f"Resolution-change probe failed: {e}")
+            return None
+
+    # Wait for the file to grow enough for a reliable baseline probe.
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if stop_event.is_set():
+            return
+        try:
+            if os.path.exists(raw_file) and os.path.getsize(raw_file) >= min_size_bytes:
+                break
+        except OSError:
+            pass
+        time.sleep(1)
+    else:
+        return  # file never appeared or grew — give up
+
+    baseline = _probe()
+    if not baseline:
+        return  # couldn't establish a baseline — nothing to compare against
+
+    while not stop_event.is_set():
+        # Interruptible sleep so we don't delay shutdown by up to check_interval.
+        for _ in range(check_interval):
+            if stop_event.is_set():
+                return
+            time.sleep(1)
+
+        # Sample near the live edge (-sseof) rather than the start of the file,
+        # so we catch the *current* resolution, not the one from minutes ago.
+        current = _probe(["-sseof", "-5"])
+        if not current:
+            continue
+        if current != baseline:
+            logger.info(
+                f"Resolution changed mid-stream: {baseline[0]}x{baseline[1]} -> "
+                f"{current[0]}x{current[1]} — ending segment to avoid a corrupted file"
+            )
+            resolution_change_ref[0] = True
+            return
+
+
 def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                               platform, logger, status_queue, channel_key,
                               stop_event, last_status, file_creation_timeout=60,
                               tool_name_override=None, verbose=False,
                               max_file_size_gb=0.0, stream_info="",
-                              ffmpeg_path="ffmpeg"):
+                              ffmpeg_path="ffmpeg", watch_resolution_changes=False,
+                              resolution_check_interval=20):
     """Monitor a recording subprocess and update status via queue.
 
     Spawns a background thread to read stderr for real-time logging.
     Detects zero-byte stalls, file growth stalls, max duration limits,
-    file creation timeouts, and optional max-file-size splits.
+    file creation timeouts, optional max-file-size splits, and (when
+    watch_resolution_changes=True) a mid-stream resolution change — the
+    segment is ended and split_requested is set so recording resumes at
+    the new resolution in a fresh file instead of corrupting one file.
 
     When stream_info is empty the monitor will attempt to auto-detect it by
     parsing ffmpeg's Video stream descriptor from stderr.  The detected string
@@ -3018,6 +3116,21 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
         )
         probe_thread.start()
 
+    # Resolution-change watch thread: scoped to this call only (its own stop
+    # event, set when this monitor loop exits for any reason) so it doesn't
+    # keep polling a finished segment's file after a split/reconnect starts
+    # the next one.
+    resolution_change_ref = [False]
+    res_watch_stop_event = threading.Event()
+    if watch_resolution_changes:
+        res_watch_thread = threading.Thread(
+            target=_watch_resolution_change_thread,
+            args=(raw_file, resolution_change_ref, ffmpeg_path, logger, res_watch_stop_event),
+            kwargs={"check_interval": resolution_check_interval},
+            daemon=True, name=f"reswatch-{channel_key}",
+        )
+        res_watch_thread.start()
+
     while proc.poll() is None and not stop_event.is_set():
         elapsed = time.monotonic() - start_time
 
@@ -3050,6 +3163,14 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                     break
                 else:
                     zero_byte_strikes = 0
+
+                # Resolution-change split: the live feed's frame size changed
+                # (e.g. a TikTok multi-guest battle starting/ending) — end this
+                # segment now so the resolution change doesn't corrupt one file.
+                if resolution_change_ref[0]:
+                    split_requested = True
+                    kill_process_tree(proc.pid, logger)
+                    break
 
                 # Max-file-size split: gracefully stop so the caller can remux
                 # this segment and immediately start a fresh one.
@@ -3092,6 +3213,10 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
             logger.warning(f"Error checking file size: {e}")
 
         time.sleep(5)
+
+    # Stop the resolution-watch thread (scoped to this call) so it doesn't
+    # keep polling this now-finished segment's file in the background.
+    res_watch_stop_event.set()
 
     # Wait for stderr thread to finish reading
     stderr_thread.join(timeout=5)
@@ -3843,6 +3968,8 @@ def record_worker(args):
                 max_file_size_gb=max_file_size_gb,
                 stream_info=stream_info,
                 ffmpeg_path=config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg'),
+                watch_resolution_changes=config.getboolean(
+                    'Recording', 'split_on_resolution_change', fallback=True),
             )
 
             # Clean up process tree
