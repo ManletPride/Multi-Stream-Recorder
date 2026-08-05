@@ -2,11 +2,14 @@
 Recorded/
 Processed/
 PendingDeletion/
+Clips/
 
 # User configuration (contains paths, preferences)
+# config.ini also holds the [Fishtank] email/password in plain text.
 config.ini
 window_state.json
 channels.json
+kick_channel_ids.json
 
 # Cookies (sensitive — never commit!)
 cookies.txt
@@ -31,4 +34,10 @@ Thumbs.db
 desktop.ini
 
 # Logs
+# Note: console captures are often saved as .txt, which *.log does not
+# match — hence the explicit entries below.
 *.log
+*.log.[0-9]
+stream_recorder.log*
+console_log.txt
+log_output*.txt

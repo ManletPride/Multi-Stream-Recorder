@@ -1,0 +1,26 @@
+# Normalize line endings.
+#
+# Without this, editing on Windows rewrites files as CRLF while the repo
+# stores LF, and git then reports every line of every file as changed —
+# turning a small release diff into thousands of phantom edits.
+#
+# "text=auto eol=lf" means: store text files as LF in the repository,
+# and check them out as LF.  Git handles the conversion, so editors on
+# any platform work normally.
+* text=auto eol=lf
+
+# Windows-only helper scripts should keep CRLF on checkout, since some
+# Windows tooling mishandles LF-only .bat/.cmd/.ps1 files.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files — never convert, never diff as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.mp4 binary
+*.ts  binary
+*.zip binary
