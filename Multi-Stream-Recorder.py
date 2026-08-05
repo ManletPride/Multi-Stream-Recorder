@@ -35,7 +35,7 @@ License: MIT
 Repository: https://github.com/ManletPride/Multi-Stream-Recorder
 """
 
-__version__ = "1.7.1"
+__version__ = "1.8.0"
 
 # ============ STDLIB IMPORTS ============
 import subprocess
@@ -221,12 +221,28 @@ class Config:
         'Cleanup': {
             'auto_purge_days': '7',          # delete PendingDeletion files older than N days (0=disabled)
             'purge_on_startup': 'true',
+            # stream_recorder.log is rotated at startup once it passes this
+            # size (0 = never rotate).  Rotation happens at launch rather than
+            # continuously because recording workers share the file — see
+            # rotate_log_if_needed().
+            'max_log_size_mb': '20',
+            'log_backup_count': '3',
         },
         'Advanced': {
-            'verbose': 'true',
+            # Passes --verbose to yt-dlp/streamlink AND disables the stderr
+            # noise filter, so a single YouTube recording can emit ~17 MiB of
+            # log an hour (mostly ffmpeg's per-segment HLS cuepoint chatter).
+            # Default off — turn on only when diagnosing a specific failure.
+            'verbose': 'false',
             'streamlink_debug': 'false',
             'ffmpeg_path': 'ffmpeg',
             'concurrent_fragments': '3',
+            # yt-dlp --extractor-args youtube:player_client value.
+            # Blank = let yt-dlp choose (recommended).  Its defaults favour
+            # clients that don't require a PO Token; pinning the wrong one
+            # here causes "No video formats found!" on otherwise-live
+            # streams.  Only set this to work around a YouTube regression.
+            'youtube_player_client': '',
         },
         'GUI': {
             'dark_mode': 'true',
@@ -243,6 +259,23 @@ class Config:
             # Leave blank to fall back to cookie-jar auth (requires fresh cookies).
             'email': '',
             'password': '',
+        },
+        'Clipping': {
+            # Length of the instant clip cut from the live .ts, in seconds.
+            # Remembered across restarts; changeable live from the GUI's
+            # Clip Length selector.
+            'clip_length_seconds': '30',
+            # Where clips/screenshots are written. Blank = streams_dir/Clips.
+            'clips_dir': '',
+            # Screenshot output format: jpg (default), png, or webp.
+            # jpg is ~5x smaller than png at visually indistinguishable
+            # quality for a 1080p frame; png is lossless but ~2 MB a shot.
+            'screenshot_format': 'jpg',
+            # Quality knob — meaning depends on the format above:
+            #   jpg  : 2–31,  LOWER is better (2 = near-lossless)
+            #   webp : 0–100, HIGHER is better (80–90 is a good range)
+            #   png  : ignored (always lossless)
+            'screenshot_quality': '2',
         },
     }
 
@@ -974,16 +1007,25 @@ def channel_key_to_dirs(channel_key):
         kick channels:    bare name          ->  ('kick',   name)
         everything else:  'platform:name'    ->  (platform, name)
 
-    with two custom-URL wrinkles copied from record_worker: tiktok.com URLs
-    use the parsed handle for the folder name, and all other custom URLs use
-    the site domain (e.g. 'chaturbate').
+    with three wrinkles copied from record_worker:
+      • tiktok channels drop a leading '@' — record_worker does
+        `username = username.lstrip('@')` before building paths, so
+        'tiktok:@qvc' records into Recorded/tiktok/qvc, NOT '.../@qvc'.
+      • custom tiktok.com URLs use the parsed handle for the folder name,
+      • all other custom URLs use the site domain (e.g. 'chaturbate').
+
+    Note the '@' is stripped only for tiktok.  YouTube handles keep theirs:
+    record_worker uses '@handle' in the URL but never reassigns username, so
+    'youtube:@foo' really does record into Recorded/youtube/@foo.
     """
     if ":" in channel_key:
         platform, username = channel_key.split(":", 1)
     else:
         platform, username = "kick", channel_key
 
-    if platform == "custom":
+    if platform == "tiktok":
+        username = username.lstrip('@')
+    elif platform == "custom":
         url = username
         if 'tiktok.com' in url.lower():
             _, tiktok_user = parse_custom_url(url)
@@ -993,6 +1035,292 @@ def channel_key_to_dirs(channel_key):
             username = extract_domain_from_url(url)
 
     return platform, sanitize_path_component(username)
+
+
+# ────────────────────────────────────────────────
+#          Instant Clips & Screenshots
+# ────────────────────────────────────────────────
+#
+# Lets the GUI cut a short clip (or grab a screenshot) out of a channel's
+# .ts file *while it's still being recorded*, without touching the
+# recording worker at all. This works because:
+#
+#   1. The raw file lives at a deterministic path (see channel_key_to_dirs)
+#      and only one .ts is actively growing per channel at a time.
+#   2. Reading a file that another process is still appending to is already
+#      how this app gets stream info (_probe_stream_info_thread) and watches
+#      for resolution changes (_watch_resolution_change_thread) — ffmpeg/
+#      ffprobe just read whatever has been flushed to disk and stop there,
+#      the same way `tail` would. No lock contention with the writer.
+#   3. Everything below runs as a plain stream copy (-c copy), so it's a
+#      repackage, not a re-encode — a 30-second clip out of a multi-hour
+#      file takes a fraction of a second regardless of the recording's
+#      total length.
+
+def find_active_recording_file(recorder, channel_key):
+    """Locate the .ts file currently being written for a channel.
+
+    Resolves the on-disk directory the same way BackgroundCleaner does
+    (channel_key_to_dirs), then returns the most recently modified .ts
+    file in it. A channel directory normally holds at most one live .ts —
+    older ones are moved to PendingDeletion by the worker as soon as
+    they're remuxed — so "newest by mtime" reliably means "the one still
+    growing," without needing the worker to publish its file path over IPC.
+
+    Returns None if the channel has no recognizable directory or no .ts
+    file is present (e.g. the stream is still being detected/starting up).
+    """
+    try:
+        platform, username_dir = channel_key_to_dirs(channel_key)
+    except Exception:
+        return None
+    channel_dir = os.path.join(recorder.recorded_base, platform, username_dir)
+    if not os.path.isdir(channel_dir):
+        return None
+    try:
+        ts_files = [
+            os.path.join(channel_dir, f) for f in os.listdir(channel_dir)
+            if f.lower().endswith('.ts')
+        ]
+    except Exception:
+        return None
+    if not ts_files:
+        return None
+    return max(ts_files, key=os.path.getmtime)
+
+
+def create_clip(raw_file, output_file, clip_seconds, ffmpeg_path, logger, timeout=60):
+    """Cut the last *clip_seconds* out of raw_file into output_file (.mp4).
+
+    Probes the current duration, seeks to (duration - clip_seconds) as an
+    *input* option, and stream-copies from there. Input-side -ss on an
+    mpegts source with -c copy makes ffmpeg snap to the nearest preceding
+    keyframe rather than starting mid-frame, so the clip may start a
+    second or two earlier than requested but will never open on a corrupt
+    partial frame. If the recording is younger than the requested clip
+    length, the whole file is used instead.
+
+    Returns (success: bool, message: str) — message is an error reason on
+    failure, or the actual clip length used on success.
+    """
+    if not os.path.exists(raw_file):
+        return False, "recording file not found"
+
+    duration = _probe_duration(ffmpeg_path, raw_file)
+
+    # Duration is a nice-to-have, not a requirement.  Some live MPEG-TS
+    # captures never report one (see _probe_duration for why), and refusing
+    # to clip in that case is wrong: ffmpeg can seek relative to the END of
+    # the file with -sseof without knowing the total length at all.  That's
+    # the same fallback create_screenshot uses, which is exactly why
+    # screenshots kept working on files where clipping bailed out.
+    if duration is not None and duration > 0:
+        start_offset = max(0.0, duration - clip_seconds)
+        actual_length = duration - start_offset
+        seek_args = ["-ss", f"{start_offset:.2f}"]
+        seek_note = ""
+    else:
+        seek_args = ["-sseof", f"-{clip_seconds:.2f}"]
+        actual_length = clip_seconds  # best estimate; may be shorter if the
+                                      # recording is younger than clip_seconds
+        seek_note = " (end-relative seek — duration unavailable)"
+        logger.info("Clip: recording duration unreadable, seeking from end of file instead")
+
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+
+    def _base_cmd(map_args):
+        return [
+            ffmpeg_path, "-hide_banner", "-y",
+            *seek_args,
+            "-i", raw_file,
+            "-t", f"{clip_seconds:.2f}",
+            "-c", "copy", *map_args,
+            "-avoid_negative_ts", "make_zero",
+            "-movflags", "+faststart",
+            "-loglevel", "error",
+            output_file,
+        ]
+
+    def _run(cmd):
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return "timeout"
+        except FileNotFoundError:
+            return "not_found"
+        except Exception as e:
+            return str(e)
+
+    # Map only video/audio, not every stream. Some platforms (Twitch, notably)
+    # mux a timed_id3 metadata track into the .ts that MP4 can't hold — the
+    # main remux_to_mp4() path already strips this; clips need the same
+    # treatment or ffmpeg fails with "Could not write header (incorrect
+    # codec parameters?)" trying to box a stream type MP4 doesn't support.
+    result = _run(_base_cmd(["-map", "0:v?", "-map", "0:a?"]))
+
+    if isinstance(result, str):
+        return False, {"timeout": "ffmpeg timed out", "not_found": "ffmpeg not found"}.get(result, result)
+
+    if (result.returncode != 0 or not os.path.exists(output_file)) and "Could not write header" in (result.stderr or ""):
+        # Last resort: drop audio too, in case a second/odd audio track is
+        # itself the incompatible stream. A silent clip beats no clip.
+        logger.warning("Clip: header write failed with audio mapped — retrying video-only")
+        result = _run(_base_cmd(["-map", "0:v:0"]))
+        if isinstance(result, str):
+            return False, {"timeout": "ffmpeg timed out", "not_found": "ffmpeg not found"}.get(result, result)
+
+    if result.returncode != 0 or not os.path.exists(output_file):
+        err = (result.stderr or "").strip().splitlines()
+        return False, err[-1] if err else f"ffmpeg exited {result.returncode}"
+
+    out_size = os.path.getsize(output_file)
+    if out_size < 1024:
+        try:
+            os.remove(output_file)
+        except Exception:
+            pass
+        return False, "output clip is empty — try again in a few seconds"
+
+    logger.info(f"Clip saved: {output_file} ({human_size(out_size)}, "
+                f"~{actual_length:.0f}s){seek_note}")
+    return True, f"{actual_length:.0f}s"
+
+
+#: Encoder arguments per screenshot format.  The quality knob means a
+#: different thing in each codec, which is why they're mapped separately
+#: rather than passing a bare -q:v to everything:
+#:
+#:   jpg   -q:v  2–31, LOWER is better.  ~2 is visually lossless and lands
+#:               around 200–400 KB for 1080p — roughly a fifth of PNG.
+#:   webp  -quality 0–100, HIGHER is better.  Smaller than JPEG at
+#:               equivalent quality, but less universally accepted by
+#:               older image viewers and some chat clients.
+#:   png   lossless; -q:v is silently ignored by the encoder (which is why
+#:               the old code's "-q:v 2" did nothing and every grab came
+#:               out at full ~2 MB).  compression_level trades CPU for size
+#:               but stays lossless, so it only ever saves a little.
+SCREENSHOT_FORMATS = {
+    "jpg":  {"ext": ".jpg",  "args": lambda q: ["-q:v", str(q)]},
+    "jpeg": {"ext": ".jpg",  "args": lambda q: ["-q:v", str(q)]},
+    "webp": {"ext": ".webp", "args": lambda q: ["-quality", str(q), "-lossless", "0"]},
+    "png":  {"ext": ".png",  "args": lambda q: ["-compression_level", "9"]},
+}
+
+
+def screenshot_extension(fmt):
+    """Return the file extension for a configured screenshot format."""
+    return SCREENSHOT_FORMATS.get(str(fmt).strip().lower(), SCREENSHOT_FORMATS["jpg"])["ext"]
+
+
+def create_screenshot(raw_file, output_file, ffmpeg_path, logger, offset_seconds=3.0,
+                      timeout=30, fmt="jpg", quality=2):
+    """Grab a single frame from near the current end of raw_file.
+
+    Unlike create_clip, this has to actually *decode* video to produce a
+    still image — and that's what makes the very end of a live .ts file
+    hostile: the final fraction of a second on disk is a partially-flushed
+    TS packet and an incomplete GOP, with the frame's remaining slices
+    still buffered in the recording process. Decoding into that region
+    fails ("error while decoding MB …, bytestream -7"), and because
+    ffmpeg treats a failed decode of a single frame as a non-fatal
+    condition, it can also exit 0 having written no file at all — which
+    is exactly the two errors this replaced.
+
+    So instead of grabbing the literal last frame, seek to a few seconds
+    *before* the end, where the data is complete, and retry with a
+    progressively larger backoff if the first attempt still lands in a
+    damaged region. Seeking is done from the start (-ss on the input)
+    using the duration ffprobe reports, since ffprobe only counts complete
+    data — this is the same reason create_clip's stream copy never hit
+    the problem.
+
+    fmt selects the output codec (see SCREENSHOT_FORMATS); the extension of
+    output_file should already match it — use screenshot_extension().
+    """
+    if not os.path.exists(raw_file):
+        return False, "recording file not found"
+
+    fmt_key = str(fmt).strip().lower()
+    spec = SCREENSHOT_FORMATS.get(fmt_key)
+    if spec is None:
+        logger.warning(f"Unknown screenshot_format '{fmt}' — falling back to jpg")
+        fmt_key, spec = "jpg", SCREENSHOT_FORMATS["jpg"]
+
+    # The jpg and webp quality scales run in opposite directions, so a value
+    # left over from switching formats can silently produce a garbage image
+    # (webp at "2" is near-unreadable, not near-lossless).  Clamp anything
+    # outside a format's sane range back to a good default rather than
+    # handing it to ffmpeg as-is.
+    if fmt_key in ("jpg", "jpeg") and not 2 <= quality <= 31:
+        logger.warning(f"screenshot_quality {quality} out of range for jpg (2–31) — using 2")
+        quality = 2
+    elif fmt_key == "webp" and not 50 <= quality <= 100:
+        logger.warning(f"screenshot_quality {quality} out of range for webp (50–100) — using 85")
+        quality = 85
+
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+
+    duration = _probe_duration(ffmpeg_path, raw_file)
+
+    # Back off further from the live edge on each retry. The first offset is
+    # normally enough; the later ones cover streams with long GOPs or a
+    # recorder that buffers more before flushing.
+    attempts = [offset_seconds, offset_seconds * 2, offset_seconds * 4]
+    last_error = "no frame could be decoded"
+
+    for attempt_num, offset in enumerate(attempts, start=1):
+        if duration is not None and duration > 0:
+            seek_args = ["-ss", f"{max(0.0, duration - offset):.2f}"]
+        else:
+            # ffprobe couldn't read a duration (very new file) — fall back to
+            # end-relative seeking and hope there's enough complete data.
+            seek_args = ["-sseof", f"-{offset:.2f}"]
+
+        cmd = [
+            ffmpeg_path, "-hide_banner", "-y",
+            *seek_args,
+            "-i", raw_file,
+            "-map", "0:v:0", "-an",     # video only — ignore audio/timed_id3
+            "-frames:v", "1", *spec["args"](quality),
+            "-loglevel", "error",
+            output_file,
+        ]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return False, "ffmpeg timed out"
+        except FileNotFoundError:
+            return False, "ffmpeg not found"
+        except Exception as e:
+            return False, str(e)
+
+        # A written file is the only real success signal here: ffmpeg can
+        # report returncode 0 while producing nothing when the frame it
+        # tried to decode was incomplete, so returncode alone is not enough.
+        wrote_file = os.path.exists(output_file) and os.path.getsize(output_file) > 1024
+        if result.returncode == 0 and wrote_file:
+            out_size = os.path.getsize(output_file)
+            logger.info(f"Screenshot saved: {output_file} ({human_size(out_size)}, "
+                        f"~{offset:.0f}s behind live)")
+            return True, "ok"
+
+        err_lines = (result.stderr or "").strip().splitlines()
+        last_error = err_lines[-1] if err_lines else f"ffmpeg exited {result.returncode} without writing a frame"
+
+        # Clear any truncated/empty leftover before the next attempt so a
+        # stale partial file can't be mistaken for a success.
+        if os.path.exists(output_file) and not wrote_file:
+            try:
+                os.remove(output_file)
+            except Exception:
+                pass
+
+        if attempt_num < len(attempts):
+            logger.warning(f"Screenshot: frame at ~{offset:.0f}s behind live was incomplete "
+                           f"— retrying further back")
+
+    return False, last_error
 
 
 # ────────────────────────────────────────────────
@@ -1113,10 +1441,56 @@ def kill_orphan_ffmpeg_processes(logger=None):
 #          Logging
 # ────────────────────────────────────────────────
 
-def setup_logging(root_path):
+def rotate_log_if_needed(log_file, max_bytes, backup_count):
+    """Roll stream_recorder.log over at startup if it has grown too large.
+
+    Deliberately NOT logging.handlers.RotatingFileHandler: every recording
+    worker is a separate process that opens this same file, and mid-run
+    rollover requires renaming a file that those other processes still hold
+    open — which fails outright on Windows.  Rotating once at startup, before
+    any worker exists, sidesteps the problem entirely.  The trade-off is that
+    the active log can exceed max_bytes during a single long session; it gets
+    trimmed at the next launch.
+
+    Keeps stream_recorder.log.1 … .N, oldest discarded.
+    """
+    try:
+        if max_bytes <= 0 or not os.path.isfile(log_file):
+            return
+        if os.path.getsize(log_file) < max_bytes:
+            return
+
+        oldest = f"{log_file}.{backup_count}"
+        if os.path.exists(oldest):
+            os.remove(oldest)
+        for i in range(backup_count - 1, 0, -1):
+            src, dst = f"{log_file}.{i}", f"{log_file}.{i + 1}"
+            if os.path.exists(src):
+                os.replace(src, dst)
+        if backup_count > 0:
+            os.replace(log_file, f"{log_file}.1")
+        else:
+            os.remove(log_file)
+    except Exception:
+        pass  # logging must never be the thing that stops the app starting
+
+
+def setup_logging(root_path, config=None):
     """Setup logging for main process."""
     os.makedirs(root_path, exist_ok=True)
     log_file = os.path.join(root_path, "stream_recorder.log")
+
+    # Rotate before the handler opens the file, and before any worker
+    # process is spawned (see rotate_log_if_needed for why that matters).
+    max_mb = 20.0
+    backups = 3
+    if config is not None:
+        try:
+            max_mb = config.getfloat('Cleanup', 'max_log_size_mb', fallback=20.0)
+            backups = config.getint('Cleanup', 'log_backup_count', fallback=3)
+        except Exception:
+            pass
+    rotate_log_if_needed(log_file, int(max_mb * 1024 * 1024), backups)
 
     formatter = logging.Formatter(
         "%(asctime)s [PID %(process)d] %(message)s",
@@ -1249,87 +1623,160 @@ def check_stream_kick_api(channel_name, logger, timeout=15, cookies_file=None):
 
 
 
+def parse_rumble_channel_html(page_html, logger):
+    """Find the currently-live video in a Rumble channel page's HTML.
+
+    Rumble renders its channel video grid from a JSON payload embedded in
+    ``<rum-videos-grid><script type="application/json">{"items":[…]}</script>``.
+    Each item carries explicit livestream fields, which is far more stable
+    to read than the rendered markup:
+
+        live               true only while the stream is actually broadcasting
+        livestream_status  0 = normal VOD
+                           1 = livestream that has ENDED (DVR replay available)
+                           2 = live right now
+        videos[0].url      direct HLS playlist for the stream
+
+    Only ``live: true`` / status 2 counts as live.  Status 1 matters because
+    an ended stream keeps its DVR playlist and can still show thousands of
+    concurrent viewers — treating "has an HLS URL" as "is live" would
+    re-record finished broadcasts on every poll.
+
+    Returns (live_url: str | None, title: str | None, hls_url: str | None).
+    """
+    import re as _re
+    import html as _html
+
+    # ── Primary: the embedded JSON grid payload ──
+    for block in _re.findall(
+            r'<script type="application/json">\s*(\{.*?\})\s*</script>',
+            page_html, _re.S):
+        try:
+            data = json.loads(block)
+        except Exception:
+            try:
+                data = json.loads(_html.unescape(block))
+            except Exception:
+                continue
+        if not isinstance(data, dict):
+            continue
+        for item in data.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("live") is not True and item.get("livestream_status") != 2:
+                continue
+            url = item.get("url") or ""
+            if not url and item.get("relative_url"):
+                url = "https://rumble.com" + item["relative_url"]
+            if not url:
+                continue
+            title = item.get("title") or None
+            hls = None
+            for v in item.get("videos") or []:
+                if isinstance(v, dict) and v.get("url"):
+                    hls = v["url"]
+                    break
+            return url, title, hls
+
+    # ── Fallback: the pre-2026 rendered markup.  Rumble dropped this class
+    # when they moved the grid to a JSON payload, but it costs nothing to
+    # keep in case some page variants still ship it. ──
+    for m in _re.finditer(r'thumbnail__thumb--live"', page_html):
+        chunk = page_html[m.start(): m.start() + 2000]
+        href_m = _re.search(r'href="(/v[a-z0-9]+-[^"]+\.html)', chunk)
+        if href_m:
+            logger.info("Rumble: matched legacy thumbnail__thumb--live markup")
+            return "https://rumble.com" + href_m.group(1), None, None
+
+    return None, None, None
+
+
+def fetch_rumble_page(page_url, logger, timeout=20, cookies_file=None):
+    """Fetch a Rumble page as a browser would.
+
+    Returns (html: str | None, error: str | None).  Raising is avoided so
+    callers can treat a fetch failure the same as "nothing live found".
+    """
+    import urllib.request
+    import urllib.error
+    import http.cookiejar
+
+    opener = urllib.request.build_opener()
+    if cookies_file:
+        try:
+            cj = http.cookiejar.MozillaCookieJar(cookies_file)
+            cj.load(ignore_discard=True, ignore_expires=True)
+            opener.add_handler(urllib.request.HTTPCookieProcessor(cj))
+        except Exception as ce:
+            logger.debug(f"Rumble fetch: could not load cookies ({ce}), proceeding without")
+
+    req = urllib.request.Request(
+        page_url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        }
+    )
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", errors="replace"), None
+    except urllib.error.HTTPError as e:
+        return None, f"HTTP {e.code}"
+    except urllib.error.URLError as e:
+        return None, str(e.reason)
+    except Exception as e:
+        return None, str(e)
+
+
 def check_stream_rumble_html(channel_name, logger, timeout=20, cookies_file=None):
-    """Check if a Rumble channel is live by scraping the channel page HTML.
+    """Check if a Rumble channel is live by reading the channel page.
 
-    Fetches ``https://rumble.com/c/CHANNEL`` with cookies and looks for the
-    ``thumbnail__thumb--live`` CSS class, which Rumble adds to the thumbnail
-    wrapper of any currently-live video.  When found, the adjacent
-    ``videostream__link`` href gives the live video page URL directly.
-
-    The live video URL is then passed to yt-dlp (single video page, not a
-    playlist) to resolve the actual HLS stream for recording.
+    Tries ``/c/CHANNEL`` first and falls back to ``/user/CHANNEL`` on a 404,
+    since Rumble splits creators across both path styles.  Parsing is done by
+    parse_rumble_channel_html() — see there for the detection rules.
 
     Returns (is_live: bool, stream_title: str | None, resolved_url: str | None,
              error: str | None).
     resolved_url is the full ``https://rumble.com/vXXXXX-slug.html`` URL of
     the live video, ready to hand to yt-dlp for recording.
     """
-    import urllib.request
-    import urllib.error
-    import http.cookiejar
-    import re as _re
+    page_html = None
+    last_error = None
+    for path in ("c", "user"):
+        channel_url = f"https://rumble.com/{path}/{channel_name}"
+        logger.info(f"Rumble HTML check: {channel_url}")
+        page_html, last_error = fetch_rumble_page(channel_url, logger, timeout, cookies_file)
+        if page_html is not None:
+            break
+        if last_error == "HTTP 404" and path == "c":
+            logger.info(f"Rumble: /c/{channel_name} not found — trying /user/{channel_name}")
+            continue
+        logger.warning(f"Rumble HTML check failed: {last_error}")
+        return False, None, None, last_error
 
-    channel_url = f"https://rumble.com/c/{channel_name}"
-    logger.info(f"Rumble HTML check: {channel_url}")
+    if page_html is None:
+        return False, None, None, last_error or "channel page unavailable"
 
-    try:
-        # Build opener with cookie file if available
-        opener = urllib.request.build_opener()
-        if cookies_file:
-            try:
-                cj = http.cookiejar.MozillaCookieJar(cookies_file)
-                cj.load(ignore_discard=True, ignore_expires=True)
-                opener.add_handler(urllib.request.HTTPCookieProcessor(cj))
-            except Exception as ce:
-                logger.debug(f"Rumble HTML check: could not load cookies ({ce}), proceeding without")
+    live_url, title, hls_url = parse_rumble_channel_html(page_html, logger)
 
-        req = urllib.request.Request(
-            channel_url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/122.0.0.0 Safari/537.36"
-                ),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
-            }
-        )
-        with opener.open(req, timeout=timeout) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
-
-    except urllib.error.HTTPError as e:
-        logger.warning(f"Rumble HTML check HTTP error: {e.code}")
-        return False, None, None, f"HTTP {e.code}"
-    except urllib.error.URLError as e:
-        logger.warning(f"Rumble HTML check URL error: {e.reason}")
-        return False, None, None, str(e.reason)
-    except Exception as e:
-        logger.warning(f"Rumble HTML check error: {e}")
-        return False, None, None, str(e)
-
-    # Find every thumbnail__thumb--live occurrence in the HTML (not CSS).
-    # CSS occurrences are followed by { while HTML ones are followed by "
-    live_video_urls = []
-    for m in _re.finditer(r'thumbnail__thumb--live"', html):
-        # Look for the next videostream__link href within ~2000 chars
-        chunk = html[m.start(): m.start() + 2000]
-        href_m = _re.search(r'href="(/v[a-z0-9]+-[^"]+\.html)', chunk)
-        if href_m:
-            slug = href_m.group(1)
-            full_url = "https://rumble.com" + slug
-            if full_url not in live_video_urls:
-                live_video_urls.append(full_url)
-
-    if not live_video_urls:
+    if not live_url:
         logger.info("Rumble HTML check: no live stream found on channel page")
         return False, None, None, None
 
-    live_url = live_video_urls[0]
     logger.info(f"Rumble HTML check: found live video URL — {live_url}")
-    # Title will be resolved by yt-dlp when it processes the video URL
-    return True, None, live_url, None
+    if title:
+        logger.info(f"Rumble stream title: {title}")
+    if hls_url:
+        # Not used for recording (yt-dlp resolves its own, with the right
+        # headers), but logging it makes extractor breakage obvious: if
+        # yt-dlp starts failing, this line proves the stream was findable.
+        logger.debug(f"Rumble direct HLS playlist: {hls_url}")
+    return True, title, live_url, None
 
 
 def _find_rumble_live_url(url, logger, timeout, cookies_file, impersonate=False):
@@ -1390,6 +1837,24 @@ def _find_rumble_live_url(url, logger, timeout, cookies_file, impersonate=False)
             return entry_url
 
     logger.info("Rumble playlist scan: no live entry found in playlist")
+
+    # Fallback: read the channel page directly.  yt-dlp's flat-playlist scan
+    # depends on its Rumble extractor keeping up with site changes; the page's
+    # own embedded JSON is the same data the site renders from, so it keeps
+    # working when the extractor lags behind a redesign.  Only worth doing on
+    # the non-impersonated pass — the second call would just repeat it.
+    if not impersonate:
+        logger.info("Rumble playlist scan: falling back to channel page HTML")
+        page_html, err = fetch_rumble_page(url, logger, timeout, cookies_file)
+        if page_html is None:
+            logger.warning(f"Rumble channel page fetch failed: {err}")
+            return None
+        live_url, title, _hls = parse_rumble_channel_html(page_html, logger)
+        if live_url:
+            logger.info(f"Rumble HTML fallback: found live entry — {title!r} → {live_url}")
+            return live_url
+        logger.info("Rumble HTML fallback: no live entry on channel page")
+
     return None
 
 
@@ -2718,12 +3183,33 @@ def build_recording_command_ytdlp(url, raw_file, config, verbose, streamlink_deb
     if cookies_file:
         cmd.extend(["--cookies", cookies_file])
 
-    # For YouTube live streams, use the web player client directly.
-    # This avoids the n-challenge JS solver entirely (which produces noisy
-    # warnings when the bundled solver script is out of date), and is
-    # sufficient for live HLS streams where the JS challenge doesn't apply.
+    # YouTube player client selection.
+    #
+    # This used to be hardcoded to `player_client=web` to sidestep the
+    # n-challenge JS solver.  That backfired: YouTube now requires a GVS PO
+    # Token for the `web` client's formats (and binds that token to the video
+    # ID), so forcing `web` without a PO Token provider makes yt-dlp report
+    #     "No video formats found!"
+    # and the recording dies instantly — while the *check* command, which
+    # never forced a client, kept reporting the stream as live.  That
+    # mismatch is what made this look like a detection bug rather than a
+    # download one.
+    #
+    # yt-dlp's own defaults (tv,ios,web — or tv,web with cookies) are chosen
+    # to prefer clients that do NOT currently need a PO Token, so the right
+    # move is to stay out of the way and let it pick.  The JS challenge that
+    # forcing `web` was avoiding is handled properly nowadays by yt-dlp-ejs
+    # with Deno installed (see requirements.txt).
+    #
+    # Left configurable because YouTube changes which clients work every few
+    # months: set youtube_player_client in [Advanced] to override without
+    # editing code (e.g. "tv", "mweb", "default,-web").  Blank = yt-dlp's
+    # default, which is what you want unless you're working around a
+    # regression.
     if "youtube.com" in url or "youtu.be" in url:
-        cmd.extend(["--extractor-args", "youtube:player_client=web"])
+        player_client = (config.get('Advanced', 'youtube_player_client', fallback='') or '').strip()
+        if player_client:
+            cmd.extend(["--extractor-args", f"youtube:player_client={player_client}"])
 
     if verbose or streamlink_debug:
         cmd.append("--verbose")
@@ -2845,6 +3331,17 @@ def _stderr_reader_thread(proc, logger, tool_name, verbose=False):
         'consider increasing the value for the',  # ffmpeg advisory suggesting higher analyzeduration
                                         # / probesize when falling back to master URL.  Harmless;
                                         # our values are already set generously.
+        "skip ('#ext-x-",               # ffmpeg's HLS demuxer announcing every playlist tag it
+                                        # doesn't handle — overwhelmingly #EXT-X-DATERANGE and
+                                        # #EXT-X-CUEPOINT ad markers.  YouTube re-advertises the
+                                        # full set of ad cuepoints in EVERY playlist refresh, so
+                                        # this scales with (ad breaks × refreshes) and utterly
+                                        # dominates the log: 1,309 of 1,530 lines (84% of all
+                                        # bytes) in one 24/7 YouTube session.  It carries no
+                                        # diagnostic value — "skipped a tag I don't parse" is
+                                        # ffmpeg working correctly — so it's suppressed even in
+                                        # verbose mode, where it would otherwise bury the output
+                                        # that verbose was turned on to see.
     )
 
     # Per-pattern occurrence counters for throttling repetitive warnings.
@@ -3227,7 +3724,23 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
 def _probe_duration(ffmpeg_path, raw_file):
     """Return the duration of *raw_file* in seconds using ffprobe (or ffmpeg -i).
 
-    Returns None if the duration cannot be determined.
+    Tries several strategies, because a live-growing MPEG-TS is a much harder
+    case than a finished file:
+
+      1. format=duration — works for finished files and most growing ones.
+      2. the video stream's own duration — MPEG-TS has no container-level
+         duration field, so ffprobe has to derive one by seeking to the end
+         and reading the last timestamp.  That derivation reports N/A on some
+         live captures (notably when PTS values are near the 33-bit MPEG-TS
+         wraparound, or when the tail packet is mid-write), while the
+         per-stream value still resolves.
+      3. parsing "Duration:" out of `ffmpeg -i` stderr.
+
+    Strategies 1 and 2 get an enlarged probesize/analyzeduration, since the
+    defaults can bail out before finding timestamps on a portrait/low-bitrate
+    stream.
+
+    Returns None if every strategy fails.
     """
     # Derive ffprobe path from ffmpeg path (lives alongside ffmpeg)
     _ffmpeg_dir = os.path.dirname(ffmpeg_path)
@@ -3235,30 +3748,45 @@ def _probe_duration(ffmpeg_path, raw_file):
         ffprobe_path = os.path.join(_ffmpeg_dir, "ffprobe.exe") if _ffmpeg_dir else "ffprobe.exe"
     else:
         ffprobe_path = os.path.join(_ffmpeg_dir, "ffprobe") if _ffmpeg_dir else "ffprobe"
-    try:
-        result = subprocess.run(
-            [ffprobe_path, "-v", "error",
-             "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1",
-             raw_file],
-            capture_output=True, text=True, timeout=15,
-        )
-        val = result.stdout.strip()
-        if val and val != "N/A":
-            return float(val)
-    except Exception:
-        pass
+
+    _big = ["-probesize", "50M", "-analyzeduration", "20M"]
+    attempts = (
+        [ffprobe_path, "-v", "error", *_big,
+         "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", raw_file],
+        [ffprobe_path, "-v", "error", *_big,
+         "-select_streams", "v:0",
+         "-show_entries", "stream=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", raw_file],
+    )
+    for cmd in attempts:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+            for val in (result.stdout or "").split():
+                val = val.strip()
+                if val and val != "N/A":
+                    try:
+                        d = float(val)
+                    except ValueError:
+                        continue
+                    if d > 0:
+                        return d
+        except Exception:
+            continue
+
     # Fallback: parse "Duration: HH:MM:SS.ss" from ffmpeg -i stderr
     try:
         result = subprocess.run(
             [ffmpeg_path, "-i", raw_file, "-hide_banner"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=20,
         )
         import re as _re
         m = _re.search(r"Duration:\s*(\d+):(\d{2}):(\d{2})\.(\d+)", result.stderr)
         if m:
             h, mn, s, cs = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
-            return h * 3600 + mn * 60 + s + cs / 100
+            total = h * 3600 + mn * 60 + s + cs / 100
+            if total > 0:
+                return total
     except Exception:
         pass
     return None
@@ -5737,7 +6265,14 @@ def main_gui(config):
     # Restore geometry
     geom = win_state.get('geometry', '1100x760')
     root.geometry(geom)
-    root.minsize(960, 720)
+    # Width floor raised from 960 to 1060 in v1.8.0: the bottom toolbar packs
+    # right-to-left, so when it runs out of horizontal room the *leftmost*
+    # widget (the About button) is the one that gets clipped — it was
+    # rendering as "At". Adding the Clip Length label + selector pushed the
+    # bar's natural width past the old 960 floor, so the floor has to move
+    # with it rather than the button being widened (which needs MORE room,
+    # not less, and so makes the clipping worse).
+    root.minsize(1060, 720)
 
     root.grid_rowconfigure(0, weight=1)
     root.grid_columnconfigure(0, weight=0)
@@ -5855,6 +6390,7 @@ def main_gui(config):
         platform_label.configure(bg=t['bg'], fg=t['fg'])
         status_label.configure(bg=t['bg'], fg=t['fg'])
         poll_label.configure(bg=t['bg'], fg=t['fg'])
+        clip_label.configure(bg=t['bg'], fg=t['fg'])
         cookie_frame.configure(bg=t['bg'])
         cookie_label.configure(bg=t['bg'], fg=t['fg'])
         cookie_indicator.configure(bg=t['bg'])
@@ -6590,6 +7126,78 @@ def main_gui(config):
         import webbrowser
         webbrowser.open(url)
 
+    # ── Instant clip / screenshot — cut from the live .ts without
+    # touching the recording worker (see create_clip / create_screenshot) ──
+    def _clips_output_dir(platform, username_dir):
+        """Resolve the output directory for clips/screenshots of a channel,
+        honoring the clips_dir config override (blank = streams_dir/Clips)."""
+        base = config.get('Clipping', 'clips_dir', fallback='').strip()
+        if not base:
+            base = os.path.join(config.get('Paths', 'streams_dir'), 'Clips')
+        return os.path.join(base, platform, username_dir)
+
+    def _run_clip_job(ch_name, kind):
+        """Off the GUI thread: resolve the live .ts, cut a clip or grab a
+        screenshot, and report the result via log line + desktop notification."""
+        display = _get_display_name(ch_name)
+        label = "Clip" if kind == "clip" else "Screenshot"
+
+        raw_file = find_active_recording_file(recorder, ch_name)
+        if not raw_file:
+            logging.warning(f"{label}: no active recording file found for {display}")
+            send_notification(f"{label} failed", f"{display}: no active recording found",
+                              category="error", channel=ch_name)
+            return
+
+        platform, username_dir = channel_key_to_dirs(ch_name)
+        out_dir = _clips_output_dir(platform, username_dir)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        ffmpeg_path = config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg')
+
+        if kind == "clip":
+            clip_seconds = config.getint('Clipping', 'clip_length_seconds', fallback=30)
+            out_file = os.path.join(out_dir, f"{username_dir}_{ts}_{clip_seconds}s.mp4")
+            ok, msg = create_clip(raw_file, out_file, clip_seconds, ffmpeg_path, logging)
+        else:
+            shot_fmt = config.get('Clipping', 'screenshot_format', fallback='jpg')
+            shot_quality = config.getint('Clipping', 'screenshot_quality', fallback=2)
+            ext = screenshot_extension(shot_fmt)
+            out_file = os.path.join(out_dir, f"{username_dir}_{ts}{ext}")
+            ok, msg = create_screenshot(raw_file, out_file, ffmpeg_path, logging,
+                                        fmt=shot_fmt, quality=shot_quality)
+
+        if ok:
+            logging.info(f"{label} saved for {display}: {out_file}")
+            send_notification(f"{label} saved", f"{display} — {os.path.basename(out_file)}",
+                              category="complete", channel=ch_name)
+        else:
+            logging.error(f"{label} failed for {display}: {msg}")
+            send_notification(f"{label} failed", f"{display}: {msg}",
+                              category="error", channel=ch_name)
+
+    def _clip_selected_channel():
+        ch_name = _get_selected_status_channel()
+        if not ch_name or not recorder or not recorder.is_running:
+            return
+        st = recorder.status_dict.get(ch_name, {})
+        if st.get("status", "").lower() != "recording":
+            return
+        clip_seconds = config.getint('Clipping', 'clip_length_seconds', fallback=30)
+        logging.info(f"Clip Now: cutting last {clip_seconds}s for {_get_display_name(ch_name)}")
+        threading.Thread(target=_run_clip_job, args=(ch_name, "clip"), daemon=True,
+                         name=f"clip-{ch_name}").start()
+
+    def _screenshot_selected_channel():
+        ch_name = _get_selected_status_channel()
+        if not ch_name or not recorder or not recorder.is_running:
+            return
+        st = recorder.status_dict.get(ch_name, {})
+        if st.get("status", "").lower() != "recording":
+            return
+        logging.info(f"Screenshot Now: grabbing a frame for {_get_display_name(ch_name)}")
+        threading.Thread(target=_run_clip_job, args=(ch_name, "screenshot"), daemon=True,
+                         name=f"shot-{ch_name}").start()
+
     def _show_status_context_menu(event):
         """Show context menu on status tree with options appropriate to channel state."""
         item = tree.identify_row(event.y)
@@ -6611,6 +7219,12 @@ def main_gui(config):
                 status_ctx_menu.add_command(label="Stop Channel", command=_stop_selected_channel)
                 if status_lower.startswith(("offline", "error")):
                     status_ctx_menu.add_command(label="Check Now", command=_check_now_selected_channel)
+                if status_lower == "recording":
+                    clip_seconds = config.getint('Clipping', 'clip_length_seconds', fallback=30)
+                    status_ctx_menu.add_command(
+                        label=f"Clip Now ({clip_seconds}s)", command=_clip_selected_channel)
+                    status_ctx_menu.add_command(
+                        label="Screenshot Now", command=_screenshot_selected_channel)
 
             status_ctx_menu.add_separator()
 
@@ -6743,6 +7357,77 @@ def main_gui(config):
                               state="readonly", width=14)
     poll_combo.pack(side=tk.RIGHT, padx=(0, 6))
     poll_combo.bind("<<ComboboxSelected>>", on_poll_change)
+
+    # ── Clip length selector — length used by "Clip Now" in the status
+    # tree's right-click menu (see _clip_selected_channel below) ──
+    CLIP_PRESETS = {
+        "15 sec": 15,
+        "30 sec": 30,
+        "1 min": 60,
+        "2 min": 120,
+        "5 min": 300,
+    }
+    CUSTOM_CLIP_LABEL = "Custom…"
+    CLIP_MIN_SECONDS = 5
+    CLIP_MAX_SECONDS = 1800  # 30 min — a stream-copy cut stays fast even at
+                              # this length, no real reason to allow more
+
+    def _custom_clip_display(seconds):
+        return f"Custom ({seconds}s)"
+
+    clip_label = tk.Label(toggle_frame, text="Clip Length:", font=("Segoe UI", 9))
+    clip_label.pack(side=tk.RIGHT, padx=(0, 2))
+
+    current_clip_len = config.getint('Clipping', 'clip_length_seconds', fallback=30)
+    clip_default = _custom_clip_display(current_clip_len)
+    for name, val in CLIP_PRESETS.items():
+        if val == current_clip_len:
+            clip_default = name
+            break
+    clip_var = tk.StringVar(value=clip_default)
+    _last_clip_display = [clip_default]  # remembered so a cancelled dialog can revert
+
+    def _apply_clip_length(seconds, display_name):
+        """Persist the clip length so it survives restarts. Nothing needs to
+        be pushed to workers — clips are cut on demand from the main process,
+        not by the recording workers themselves."""
+        config.config.set('Clipping', 'clip_length_seconds', str(int(seconds)))
+        try:
+            with open(config.config_file, 'w') as f:
+                config.config.write(f)
+        except Exception:
+            pass
+        _last_clip_display[0] = display_name
+        logging.info(f"Clip length changed to {int(seconds)}s ({display_name})")
+
+    def on_clip_length_change(*_args):
+        selected = clip_var.get()
+        if selected == CUSTOM_CLIP_LABEL:
+            seconds = simpledialog.askinteger(
+                "Custom Clip Length",
+                f"Seconds to grab when clipping a live recording "
+                f"({CLIP_MIN_SECONDS}–{CLIP_MAX_SECONDS}):",
+                parent=root,
+                minvalue=CLIP_MIN_SECONDS, maxvalue=CLIP_MAX_SECONDS)
+            if seconds is None:
+                # Cancelled — restore whatever was selected before
+                clip_var.set(_last_clip_display[0])
+                return
+            display = _custom_clip_display(seconds)
+            clip_var.set(display)
+            _apply_clip_length(seconds, display)
+        else:
+            seconds = CLIP_PRESETS.get(selected, 30)
+            _apply_clip_length(seconds, selected)
+
+    clip_combo = ttk.Combobox(toggle_frame, textvariable=clip_var,
+                              values=list(CLIP_PRESETS.keys()) + [CUSTOM_CLIP_LABEL],
+                              state="readonly", width=12)
+    clip_combo.pack(side=tk.RIGHT, padx=(0, 6))
+    clip_combo.bind("<<ComboboxSelected>>", on_clip_length_change)
+    _Tooltip(clip_combo,
+             "Length of the clip cut when you use\n'Clip Now' on a recording channel\n"
+             "(right-click it in the status list).")
 
     # ── Check Now button — skip the poll timer on all active channels ──
     def _check_all_now():
@@ -7257,7 +7942,7 @@ examples:
 
     config = Config(args.config)
 
-    setup_logging(config.get('Paths', 'streams_dir'))
+    setup_logging(config.get('Paths', 'streams_dir'), config)
 
     logging.info(f"Multi-Stream Recorder v{__version__} starting...")
     logging.info(f"yt-dlp available: {HAS_YTDLP} (version: {YTDLP_VERSION})")

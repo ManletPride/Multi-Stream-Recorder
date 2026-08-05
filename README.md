@@ -12,21 +12,18 @@ A desktop application for simultaneously recording live streams from **Kick**, *
 * **Automatic detection** — Polls channels and starts recording the moment a stream goes live
 * **Kick push notifications** — Kick recordings start within *seconds* of a stream going live: MSR holds a WebSocket to Kick's own real-time event feed (the same one the kick.com website uses) and reacts to the go-live event instantly, instead of waiting for the next poll. Polling continues underneath as an automatic fallback
 * **Smart polling** — Configurable check intervals with jitter to avoid rate limiting; exponential backoff on errors only
+* **Instant clips & screenshots** — While a channel is recording, right-click it and pick **Clip Now** to stream-copy the last N seconds of its live .ts into a standalone MP4, or **Screenshot Now** to grab a still — neither interrupts the ongoing recording. Clip length is adjustable from a toolbar selector (15 sec to 30 min)
 * **Custom poll rate** — Pick a preset (1/3/5 min) or set any custom interval from 30 seconds to 2 hours; changes apply instantly to running sessions
 * **Check Now** — Skip the poll timer entirely: one button checks every enabled channel immediately, or right-click a single channel to check just that one
 * **Fast reconnect** — If a stream drops briefly (streamer disconnect), re-detects within 15 seconds
-* **File splitting** — Automatically splits recordings at a configurable size limit (default 8 GB) for easier archiving and editing
-* **Clean MP4 output** — Automatically remuxes raw .ts recordings to .mp4 with ffmpeg
+* **File splitting** — Automatically splits recordings at a configurable size limit (default 8 GB), and on mid-stream resolution changes that would otherwise corrupt playback
+* **Clean MP4 output** — Automatically remuxes raw .ts recordings to .mp4 with ffmpeg, and warns if a finished recording has no audio track
 * **Cloudflare bypass** — Kick streams use streamlink's built-in JS challenge solver; Rumble uses browser impersonation fallback
 * **Dark mode GUI** — Full dark/light theme with system tray support and desktop notifications
 * **Live stream info** — Status table shows resolution, frame rate, and bitrate for all active recordings
-* **Persistent column widths** — Status table column widths are saved between sessions
-* **Cookie support** — Use browser cookies for authenticated access (subscriber-only streams, age-gated content)
-* **Cookie health indicator** — Visual status showing if your cookies are valid, expiring, or need renewal
+* **Cookie support** — Use browser cookies for authenticated access (subscriber-only streams, age-gated content), with an indicator showing whether yours are valid or expiring
 * **Per-channel control** — Start or stop individual channels mid-session via right-click context menu
-* **Channel reorder & sort** — Rearrange your channel list with ▲/▼ buttons, sort it by enabled status, platform, or name with one click, or double-click a row to toggle it on/off
 * **Recording metadata** — JSON sidecar files with channel info, stream title, duration, and timestamps
-* **Audio stream verification** — Warns immediately after remux if a recording contains no audio track
 * **Micro-fragment throttle** — Detects CDN reset storms (repeated sub-30s recordings) and backs off rather than accumulating dozens of tiny files
 * **Auto-cleanup** — Configurable retention period for processed files
 * **Robust shutdown** — No orphaned processes, no zombie ffmpeg instances
@@ -144,10 +141,22 @@ reconnect_grace_minutes = 3       # Fast polling after a stream drops
 [Cleanup]
 auto_purge_days = 7               # Delete old temp files (0 = disabled)
 purge_on_startup = true           # Clean up when program starts
+max_log_size_mb = 20              # Rotate stream_recorder.log at startup past this size (0 = never)
+log_backup_count = 3              # How many rotated logs to keep (.1 … .N)
+
+[Clipping]
+clip_length_seconds = 30          # Default length for "Clip Now" — also settable live from
+                                   # the toolbar's Clip Length selector (15 sec to 30 min)
+clips_dir =                       # Where clips/screenshots are saved (blank = streams_dir\Clips)
+screenshot_format = jpg           # jpg (default), png, or webp
+screenshot_quality = 2            # jpg: 2–31 (lower is better) | webp: 50–100 (higher is better)
+                                   # png: ignored — always lossless
 
 [Advanced]
-verbose = false                   # Extra logging
+verbose = false                   # Extra logging — see "Logging" below before turning this on
 ffmpeg_path = ffmpeg              # Path to ffmpeg binary
+youtube_player_client =           # yt-dlp player_client override (blank = yt-dlp's default,
+                                   # which is what you want; see YouTube troubleshooting)
 
 [GUI]
 dark_mode = true                  # Start in dark mode
@@ -193,6 +202,9 @@ E:\Streams\
 │   ├── youtube\
 │   └── custom\
 │   └── fishtank\
+├── Clips\                 # Clips and screenshots grabbed from live recordings
+│   ├── kick\
+│   └── twitch\
 ├── PendingDeletion\       # Temp files awaiting cleanup
 ├── channels.json          # Channel list
 ├── config.ini             # Configuration
@@ -210,7 +222,7 @@ E:\Streams\
 | `F1` | About dialog |
 | Double-click on channel | Toggle channel on/off |
 | Right-click on channel | Context menu (Start/Stop Recording, Check Now, Open in Browser, Copy, Sort, Remove) |
-| Right-click on status | Context menu (Restart/Stop Channel, Check Now, Open in Browser) |
+| Right-click on status | Context menu (Restart/Stop Channel, Check Now, Clip Now, Screenshot Now, Open in Browser) |
 
 ## How It Works
 
@@ -221,6 +233,29 @@ E:\Streams\
 5. **Stream info**: Once the output file reaches ~1.5 MB, a background ffprobe thread reads it and updates the status display with measured resolution, frame rate, and bitrate.
 6. **Reconnection**: If a recording drops unexpectedly (process exits after >10 seconds of recording), the worker enters a 3-minute fast-poll mode (every 15 seconds) to catch stream reconnects.
 7. **Processing**: When you click Stop (or the stream ends), raw .ts files are remuxed to .mp4 with ffmpeg (including `+faststart` for seekability), metadata sidecars are saved, and the originals are moved to PendingDeletion.
+
+## Instant Clips & Screenshots
+
+Right-click a channel that's currently recording in the status list for two options:
+
+- **Clip Now** — stream-copies the last N seconds (set by the **Clip Length** toolbar selector) out of that channel's live .ts file into its own MP4, saved under `Clips\{platform}\{channel}\`.
+- **Screenshot Now** — grabs a single frame from near the current end of the same .ts file as a still image.
+
+Screenshots default to **JPEG at near-lossless quality** (~200–400 KB for a 1080p frame). Set `screenshot_format` in `config.ini` to `png` for lossless output (~2 MB per 1080p frame) or `webp` for the smallest files. Note that the quality scales run in opposite directions between formats — jpg is 2–31 where lower is better, webp is 50–100 where higher is better — so change `screenshot_quality` to match whenever you switch formats; out-of-range values are clamped to a sane default with a warning in the log.
+
+Both read the .ts file the worker is still actively writing — the same way the stream-info probe and resolution-change watcher already do — so the main recording is never paused, restarted, or otherwise touched. Clips use `-c copy` (no re-encoding), so cutting a clip out of a multi-hour file takes a fraction of a second regardless of how long the recording has been running. Because the cut point isn't guaranteed to land exactly on a keyframe, ffmpeg snaps to the nearest preceding one, so a clip may start up to a couple of seconds earlier than requested rather than opening on a broken frame.
+
+## Logging
+
+MSR writes to `stream_recorder.log` in your streams directory, and mirrors the same output to the console and the GUI's **Logs** tab.
+
+`verbose` in `config.ini` is **off by default, and should usually stay off.** Turning it on does two things: it passes `--verbose` to yt-dlp/streamlink, and it disables the stderr noise filter that normally discards per-segment chatter. Turn it on to diagnose a specific failure, then turn it back off.
+
+A handful of patterns are dropped even in verbose mode, because they flood the log without ever being useful. The worst offender is ffmpeg's HLS demuxer announcing every playlist tag it doesn't parse (`Skip ('#EXT-X-DATERANGE…`, `#EXT-X-CUEPOINT`) — YouTube re-advertises its full set of ad markers on every playlist refresh, so in one 24/7 YouTube session those lines alone were **84% of the entire log**. "Skipped a tag I don't handle" is ffmpeg working correctly, so it's suppressed unconditionally; genuine errors and warnings are never filtered in either mode.
+
+The log is rotated at startup once it passes `max_log_size_mb`, keeping `log_backup_count` older copies (`stream_recorder.log.1` … `.3`). Rotation happens at launch rather than continuously because recording workers are separate processes writing to the same file, and renaming a file they hold open fails on Windows. A single very long session can therefore exceed the limit; it gets trimmed the next time you start MSR.
+
+The GUI's Logs tab trims itself to the most recent few thousand lines, so leaving MSR running for days won't grow its memory use.
 
 ## Polling Behavior
 
@@ -259,49 +294,37 @@ Requires two optional packages: `pip install websocket-client curl_cffi`. Withou
 
 ## Troubleshooting
 
-**"ffmpeg not found"** — Install ffmpeg and ensure it's in your system PATH. Test with `ffmpeg -version` in a terminal.
+**"ffmpeg not found"** — Install ffmpeg and make sure it's in your system PATH. Test with `ffmpeg -version`.
 
-**YouTube 403/503 errors** — Your cookies have likely expired. Re-export them from your browser. The cookie indicator in the GUI will warn you when this happens.
+**YouTube 403/503 errors** — Usually expired cookies (re-export them; the GUI indicator warns you). Otherwise update yt-dlp: `pip install -U "yt-dlp[default]"`. Keep the `[default]` extra — it pulls in `yt-dlp-ejs` for YouTube's JS challenge.
 
-**YouTube channels fail to record / "Challenge solver not supported"** — yt-dlp uses a JavaScript challenge solver (`yt-dlp-ejs`) to handle YouTube's bot detection. If the installed version is outdated, checks will fail silently. Fix by reinstalling yt-dlp with its optional dependencies:
-```
-pip install -U "yt-dlp[default]"
-```
-This is also why the install instructions above use `yt-dlp[default]` rather than plain `yt-dlp`. If YouTube recording breaks after a yt-dlp update, run this command first.
+**YouTube: detected as live, but recording dies immediately with "No video formats found!"** — YouTube requires a GVS PO Token for certain player clients, and binds it to the video ID. If a client is pinned that needs one, yt-dlp finds no downloadable formats even though the stream is plainly live — the give-away is that detection keeps working while every recording ends in seconds (often tripping the micro-fragment throttle). Leave `youtube_player_client` blank in `config.ini`: yt-dlp's defaults deliberately favour clients that don't need a PO Token. Only set it to work around a specific regression, and install [Deno](https://deno.com/) so the JS challenge can be solved properly.
 
-**TikTok stream not detected** — Make sure you have valid TikTok cookies in `cookies.txt`. The `msToken` and `ttwid` values expire periodically; re-export from a logged-in browser session when detection stops working. If detection fails for a US-based gaming streamer specifically, this is the yt-dlp regional endpoint bug — the Webcast API fallback (v1.6.0+) handles it automatically and logs `"Webcast API confirms LIVE"` when it fires.
+**TikTok stream not detected** — Check that `cookies.txt` has current TikTok cookies; `msToken` and `ttwid` expire periodically and need re-exporting from a logged-in session. US-based streamers on TikTok's regional infrastructure are handled automatically by a Webcast API fallback, which logs `"Webcast API confirms LIVE"` when it fires.
 
-**TikTok: "No video formats found"** — This appears when yt-dlp checks the bare profile URL (`@username`) instead of the live endpoint. MSR automatically rewrites TikTok profile URLs to `/live` before checking — if you added the channel as a `custom:` URL using only the profile URL, re-add it using the `tiktok` platform dropdown instead.
+**TikTok: "No video formats found"** — The channel was added as a `custom:` URL pointing at the bare profile instead of the live endpoint. Re-add it using the `tiktok` platform dropdown.
 
-**Kick 403 errors** — Make sure you don't have an old third-party Kick plugin overriding streamlink's built-in one. Check `%APPDATA%\streamlink\plugins\` for a `kick.py` file and delete it if present. Streamlink 8.x includes a built-in Kick plugin with Cloudflare bypass.
+**Kick 403 errors / streams not recording** — Kick needs streamlink 8.0+ (`pip install -U streamlink`), which has the built-in Cloudflare challenge solver. Also check `%APPDATA%\streamlink\plugins\` for an old third-party `kick.py` and delete it — it overrides the built-in plugin and breaks the bypass.
 
-**Kick streams not recording** — Kick requires streamlink 8.0+. Update streamlink: `pip install -U streamlink`. The program uses streamlink (not yt-dlp) for Kick detection and recording.
+**Kick push: no "push: listening" in the status column** — Push needs two optional packages: `pip install websocket-client curl_cffi`. The session-start log says which is missing. Recording still works normally via polling either way.
 
-**Kick push: no "push: listening" in the status column** — Push notifications require two optional packages: `pip install websocket-client curl_cffi`. Check the log at session start: `websocket-client not installed` means the socket can't be opened at all; `curl_cffi not installed — cannot resolve channel id` means the one-time channel-ID lookup failed, so that channel is polling-only. Either way, recording still works normally via polling.
+**Kick push: was working, stopped working** — If the socket connects but no `Kick push: listening for <channel>` lines follow, Kick has rotated their Pusher application key. Open any kick.com page with DevTools → Network → **WS**, copy the new `wss://ws-usX.pusher.com/app/...` URL, and update `KICK_PUSHER_URL` near the top of the script.
 
-**Kick push: was working, stopped working** — If the log shows the socket connecting but no `Kick push: listening for <channel>` lines follow, Kick has likely rotated their Pusher application key (it happens occasionally). Open any kick.com page with DevTools → Network → **WS** filter, copy the new `wss://ws-usX.pusher.com/app/...` URL, and update `KICK_PUSHER_URL` near the top of the script. Delete `kick_channel_ids.json` only if channels were renamed — IDs themselves never change.
+**Rumble streams not detected** — Check the log for the `Rumble HTML check:` line to confirm it's fetching the right channel page. For 403s, install `curl_cffi` for browser impersonation. Note that Rumble periodically restructures its channel pages; if detection breaks after a site change, the `parse_rumble_channel_html` function is the single place that reads their page format.
 
-**Rumble streams not detected** — Add Rumble channels as custom URLs using the channel page format: `https://rumble.com/c/ChannelName`. If you get 403 errors, install `curl_cffi` for browser impersonation: `pip install curl_cffi`.
+**Twitch recordings have no audio** — Rare, and usually a streamlink version issue: `pip install -U streamlink`.
 
-**Custom URL: "Requested format is not available"** — The stream uses separate video and audio playlists (CMAF/split-track HLS). This is handled automatically in v1.6.0+. If you see this error on an older version, update to the latest release.
+**Fishtank recordings have no audio** — Fishtank's CDN sometimes serves video-only segments on certain cameras (notably Cameraman). Server-side; the recorder can't fix it, but logs `⚠ NO AUDIO TRACK` after remux so affected files are easy to find.
 
-**Custom URL: 403 on ffmpeg** — The CDN rejected ffmpeg's default User-Agent. This is also handled automatically in v1.6.0+ — MSR forwards yt-dlp's exact browser headers to ffmpeg. If you still see this, check that your `cookies.txt` is current for the relevant site.
+**Fishtank: many short recordings in a row** — Their CDN resetting connections every 20–30 seconds during busy periods. MSR detects this after 5 consecutive short recordings and backs off. Normal behavior.
 
-**Twitch recordings have no audio** — This is rare but can happen with certain streamlink versions. Update streamlink: `pip install -U streamlink`
+**Large .ts files left in Recorded** — Raw recordings that were never remuxed, usually from force-quitting instead of using Stop. Restart and they're cleaned up automatically. To remux one by hand: `ffmpeg -i recording.ts -c copy -movflags +faststart output.mp4`
 
-**Fishtank recordings have no audio** — Fishtank's CDN occasionally serves video-only HLS segments for certain cameras (notably Cameraman). This is a server-side issue and cannot be fixed by the recorder. MSR will log a `⚠ NO AUDIO TRACK` warning immediately after remux so affected files are easy to find.
+**Screenshot fails with a decode error** — The very end of a live .ts is an incomplete frame, so grabs are taken ~3 seconds behind the live edge, retrying further back if needed. A failure here usually means the recording only just started; wait a few seconds and try again.
 
-**Fishtank: many short recordings in a row** — If Fishtank's CDN is resetting connections every 20–30 seconds (common during busy periods), MSR will detect this as a micro-fragment storm after 5 consecutive short recordings and apply a backoff before retrying. This is normal behavior — it reduces log noise and avoids hammering their servers during instability.
+**Clip fails: "could not read recording duration"** — Fixed in v1.8.0. MPEG-TS has no container-level duration field, so ffprobe derives one by seeking to the end of the file; on some live captures that derivation returns N/A even though the recording is perfectly healthy. Clipping no longer requires it — it falls back to seeking relative to the end of the file (`-sseof`), the same method screenshots use, which is why screenshots kept working when clips didn't.
 
-**TikTok: video glitches partway through a recording (e.g. during multi-guest battles)** — When a TikTok host starts a multi-guest battle (or the layout otherwise changes), the live feed's resolution changes mid-stream. Since recording is a direct stream copy (no re-encoding), muxing two different resolutions into one file corrupts playback from that point on. MSR now detects this automatically and splits into a new file when it happens, so you get two clean recordings instead of one glitchy one. This is controlled by `split_on_resolution_change` in `config.ini` (default: on).
-
-**TikTok cookie indicator shows red even with valid cookies exported** — Fixed in this version: the cookie-domain matching was missing a case for TikTok channels added via the `tiktok` platform dropdown (it was falling back to matching against `kick.com`). If you're on an older version, re-add the channel as a custom URL (`https://www.tiktok.com/@handle`) as a workaround, or update.
-
-**Large recordings produce corrupt MP4** — The remux timeout scales automatically with file size (1 minute per GB + buffer). If you still have the `.ts` file in PendingDeletion, you can re-remux manually: `ffmpeg -i recording.ts -c copy -movflags +faststart output.mp4`
-
-**Large .ts files in Recorded folder** — These are raw recordings that haven't been remuxed yet. This happens if you force-quit the program instead of using Stop. Restart the program and it will clean them up automatically on startup.
-
-**Program won't close** — If the window is unresponsive, use Ctrl+Q. The program uses a multi-layered shutdown: graceful stop → process tree kill → orphan cleanup → os.\_exit as a final backstop.
+**Program won't close** — Use Ctrl+Q if the window is unresponsive. Shutdown is layered: graceful stop → process tree kill → orphan cleanup → `os._exit` as a final backstop.
 
 
 ## Fishtank.live
@@ -365,8 +388,6 @@ All Season 5 cameras are supported:
 
 Short aliases also work — `cam` for Cameraman, `dirc` for Director, `dmrm` for Dorm, etc. Raw stream IDs like `dirc-5` and `dmrm-5` are accepted directly. Some rooms require a **season pass** subscription.
 
-The Goo Factory (`br3g-5`) is the final revealed Season 5 room, confirmed via stream traffic analysis. The Dorm Alternate (`dmrm2-5`) and Job Board (`jobb-5`) were identified the same way; the Closet (`dmcl-5`), Market Alternate (`mrke2-5`), and Arena (`bare-5`) were confirmed in v1.5.5.
-
 > **Season 5 renames**: `balcony` → `eastwing` (`bkny-5`), `hallwayup` → `westwing` (`hwup-5`), `hallwaydown` → `hallway` (`hwdn-5`), `jacuzzi` → `laundry` (`jckz-5`). The old aliases still work for backwards compatibility.
 
 > **Fishtank-only preset**: A `channels_fishtank.json` file is available in the repository with all 24 Season 5 cameras pre-populated. Rename it to `channels.json` and enable whichever cameras you want to record.
@@ -392,9 +413,11 @@ TikTok's CDN delivers mobile-portrait video (typically 540×960 or 720×1280) at
 
 **US-TTP regional detection**: A majority of US-based TikTok streamers (especially gaming streamers) run on TikTok's US regional infrastructure (`webcast.us.tiktok.com`). yt-dlp's TikTok extractor currently hardcodes the global endpoint (`webcast.tiktok.com`), which returns "offline" for these accounts even when they are actively live. MSR includes a fallback that directly queries both regional Webcast API endpoints whenever yt-dlp reports a TikTok channel as offline. If the fallback confirms the stream is live, recording proceeds normally — no user action required. The log will note `"Webcast API confirms LIVE"` when this override fires.
 
-**YouTube**: Uses yt-dlp. Cookies are recommended to avoid throttling. YouTube Live DVR streams work but may produce "keepalive request failed" messages in verbose mode — these are harmless and don't affect the recording.
+**YouTube**: Uses yt-dlp. Cookies are recommended to avoid throttling. Install [Deno](https://deno.com/) so yt-dlp can solve YouTube's JS n-challenge — without it, recordings tend to drop out every ~15 seconds. Player client selection is left to yt-dlp by default, which is deliberate: YouTube requires PO Tokens for some clients, so pinning one in `youtube_player_client` is a good way to break recording (see Troubleshooting). YouTube Live DVR streams work but may produce "keepalive request failed" messages in verbose mode — harmless.
 
-**Rumble**: Uses yt-dlp. Add channels as custom URLs using the channel page format (`https://rumble.com/c/ChannelName`). The program automatically resolves channel pages to the current live video URL. If Cloudflare blocks access, the program falls back to browser impersonation via `curl_cffi` (install with `pip install curl_cffi`). When a Rumble channel is offline, the program correctly detects this without downloading previous VODs.
+**Rumble**: Select **rumble** from the platform dropdown and enter the channel name (e.g. `BadlandsMedia`), or add the full channel URL as a custom URL. Both `/c/Name` and `/user/Name` styles work — MSR tries `/c/` first and falls back to `/user/` automatically.
+
+Live detection reads the JSON payload Rumble embeds in its channel page (the same data the site renders its video grid from), which is considerably more durable than matching CSS classes in the markup. A video counts as live only when its `live` flag is set — an *ended* livestream keeps its DVR playlist and can still show thousands of concurrent viewers, so treating "has a stream URL" as "is live" would re-record finished broadcasts on every poll. Once a live entry is found, its video page URL is handed to yt-dlp to resolve the actual stream. For custom Rumble URLs, yt-dlp's playlist scan is tried first and this HTML check acts as a fallback, so detection survives the extractor lagging behind a site redesign. If Cloudflare blocks access, install `curl_cffi` for browser impersonation.
 
 **Fishtank.live**: Uses ffmpeg's HLS downloader with a token obtained from the Fishtank API. Requires a `[Fishtank]` section in `config.ini` with your account email and password. All Season 5 cameras are supported. Tokens are refreshed proactively by a background thread (5-minute buffer before expiry) — important because some streams like Cameraman are issued 30-minute tokens rather than the usual 24-hour ones. After each remux, audio track presence is verified and a warning is logged if a recording is silent. No cookies required.
 
