@@ -96,10 +96,6 @@
     "enabled": false
   },
   {
-    "name": "fishtank:br3g",
-    "enabled": false
-  },
-  {
     "name": "fishtank:goofactory",
     "enabled": false
   }

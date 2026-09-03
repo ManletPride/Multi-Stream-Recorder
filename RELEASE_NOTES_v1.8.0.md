@@ -46,7 +46,7 @@ log_backup_count = 3       # How many rotated logs to keep
 
 ## Upgrading
 
-Drop in the new `Multi-Stream-Recorder.py`. New settings are added to your existing `config.ini` automatically on first launch.
+Drop in the new `Multi-Stream-Recorder.py` over the old one (v1.8.0 is still a single file). New settings are added to your existing `config.ini` automatically on first launch. The `msr\` package arrives in [v2.0.0](RELEASE_NOTES_v2.0.0.md).
 
 One thing to note: settings already present in your `config.ini` keep their current values, so **existing users need to set `verbose = false` manually** to get the quieter logging. Fresh installs get it by default.
 

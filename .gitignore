@@ -21,6 +21,11 @@ __pycache__/
 dist/
 build/
 *.spec
+.venv/
+venv/
+
+# Disk-space write probe (only appears if streams_dir is the repo folder)
+.msr_write_probe
 
 # IDE
 .vscode/

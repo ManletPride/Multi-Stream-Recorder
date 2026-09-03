@@ -2,6 +2,8 @@
 
 A desktop application for simultaneously recording live streams from **Kick**, **Twitch**, **YouTube**, **Rumble**, **TikTok**, **Fishtank.live**, and any site supported by yt-dlp. Set it up, press record, and walk away — it monitors channels, auto-records when they go live, and produces clean MP4 files.
 
+This is **v2.0.0**. Upgrading from the v1.8.0 single-file app: copy `Multi-Stream-Recorder.py` **and** the `msr\` folder, then fully quit and relaunch. Details: [RELEASE_NOTES_v2.0.0.md](RELEASE_NOTES_v2.0.0.md).
+
 ![Dark Mode Screenshot](screenshots/dark-mode.png)
 
 ## Features
@@ -10,19 +12,21 @@ A desktop application for simultaneously recording live streams from **Kick**, *
 * **Split-track HLS** — Automatically detects and records CMAF streams with separate video/audio playlists (used by Chaturbate and other CDN-backed platforms)
 * **Concurrent recording** — Monitor and record multiple streams simultaneously
 * **Automatic detection** — Polls channels and starts recording the moment a stream goes live
-* **Kick push notifications** — Kick recordings start within *seconds* of a stream going live: MSR holds a WebSocket to Kick's own real-time event feed (the same one the kick.com website uses) and reacts to the go-live event instantly, instead of waiting for the next poll. Polling continues underneath as an automatic fallback
+* **Kick push notifications** — Kick recordings start within seconds of going live via Kick's own WebSocket event feed, with polling as fallback (see *Kick Push Notifications*)
 * **Smart polling** — Configurable check intervals with jitter to avoid rate limiting; exponential backoff on errors only
-* **Instant clips & screenshots** — While a channel is recording, right-click it and pick **Clip Now** to stream-copy the last N seconds of its live .ts into a standalone MP4, or **Screenshot Now** to grab a still — neither interrupts the ongoing recording. Clip length is adjustable from a toolbar selector (15 sec to 30 min)
+* **Instant clips & screenshots** — While a channel is recording, use **Clip Now** or **Screenshot** on the Status tab (or right-click the row) to stream-copy the last N seconds of its live .ts into a standalone MP4, or grab a still — neither interrupts the ongoing recording. Clips start on a video keyframe so audio and video begin together. Toolbar presets are 15 sec–5 min; Custom goes from 5 sec to 30 min
 * **Custom poll rate** — Pick a preset (1/3/5 min) or set any custom interval from 30 seconds to 2 hours; changes apply instantly to running sessions
 * **Check Now** — Skip the poll timer entirely: one button checks every enabled channel immediately, or right-click a single channel to check just that one
 * **Fast reconnect** — If a stream drops briefly (streamer disconnect), re-detects within 15 seconds
 * **File splitting** — Automatically splits recordings at a configurable size limit (default 8 GB), and on mid-stream resolution changes that would otherwise corrupt playback
 * **Clean MP4 output** — Automatically remuxes raw .ts recordings to .mp4 with ffmpeg, and warns if a finished recording has no audio track
-* **Cloudflare bypass** — Kick streams use streamlink's built-in JS challenge solver; Rumble uses browser impersonation fallback
+* **Cloudflare bypass** — Kick streams use streamlink's built-in JS challenge solver; Rumble records the HLS playlist from the channel page (ffmpeg) so yt-dlp does not have to open Cloudflare-gated video pages
 * **Dark mode GUI** — Full dark/light theme with system tray support and desktop notifications
 * **Live stream info** — Status table shows resolution, frame rate, and bitrate for all active recordings
+* **Disk & network meters** — Status header shows whole-disk write rate and NIC download rate (`psutil`). Hover for this app’s recording totals; the text colors if the recordings disk is write-busy
 * **Cookie support** — Use browser cookies for authenticated access (subscriber-only streams, age-gated content), with an indicator showing whether yours are valid or expiring
-* **Per-channel control** — Start or stop individual channels mid-session via right-click context menu
+* **Per-channel control** — Start or stop individual channels mid-session via right-click; removing a channel from the roster also stops its worker
+* **Roster jump** — **Top** (next to the up/down arrows) or right-click **Move to Top** / **Move to Bottom** to jump selected channels without stepping one row at a time
 * **Recording metadata** — JSON sidecar files with channel info, stream title, duration, and timestamps
 * **Micro-fragment throttle** — Detects CDN reset storms (repeated sub-30s recordings) and backs off rather than accumulating dozens of tiny files
 * **Auto-cleanup** — Configurable retention period for processed files
@@ -30,73 +34,39 @@ A desktop application for simultaneously recording live streams from **Kick**, *
 
 ## Quick Start
 
-### 1. Install Prerequisites
+1. **Python 3.10+** from [python.org](https://www.python.org/downloads/). On Windows, check **Add python.exe to PATH**. Debian/Ubuntu also needs Tk for the GUI: `sudo apt install python3-tk`.
 
-**Python 3.10+** is required. Then install the external tools:
-
-**ffmpeg** (required):
+2. **ffmpeg and ffprobe** on your PATH. Close and reopen the terminal, then check:
 
 ```
-# Windows — download from https://www.gyan.dev/ffmpeg/builds/
-# Add the bin/ folder to your system PATH
-
-# Linux
-sudo apt install ffmpeg
-
-# macOS
-brew install ffmpeg
+ffmpeg -version
+ffprobe -version
 ```
 
-**yt-dlp** (required for YouTube, Rumble, TikTok, custom URLs):
+Windows (easiest): `winget install Gyan.FFmpeg`  
+Or download a build from https://www.gyan.dev/ffmpeg/builds/ and add its `bin` folder to PATH.  
+Linux: `sudo apt install ffmpeg`  
+macOS: `brew install ffmpeg`
 
-```
-pip install "yt-dlp[default]"
-```
+3. Put `Multi-Stream-Recorder.py` and the `msr\` folder in the **same directory**. The `.py` file is only the launcher.
 
-**streamlink** (required for Twitch and Kick):
-
-```
-pip install streamlink
-```
-
-### 2. Install Python Dependencies
+4. In that directory:
 
 ```
 pip install -r requirements.txt
-```
-
-Or install individually:
-
-```
-pip install "yt-dlp[default]"     # Required for YouTube, Rumble, TikTok, custom URLs
-pip install streamlink            # Required for Twitch and Kick
-pip install psutil                # Recommended — cleaner process management
-pip install pystray Pillow plyer  # Optional — tray icon & notifications
-pip install curl_cffi             # Optional — Rumble Cloudflare bypass; Kick push channel-ID lookup
-pip install websocket-client      # Optional — Kick push notifications (instant go-live detection)
-```
-
-### 3. Run
-
-```
 python Multi-Stream-Recorder.py
 ```
 
-On first launch, the program creates a `config.ini` with sensible defaults. Edit `streams_dir` to set where recordings are saved.
+First launch writes `config.ini`. Recordings go to `%USERPROFILE%\Videos\Multi-Stream Recorder` (Windows) or `~/Videos/Multi-Stream Recorder`. Set `streams_dir` in `config.ini` to use another folder.
 
-### 4. Add Channels
+5. In the GUI: pick a platform, enter the channel name (Kick `asmongold`, Twitch `saruei`, …) or a full URL for **custom**, click **Add** (or Enter), then **Start Recording**.
 
-Use the GUI to add channels:
+**If you need it later**
 
-1. Select a platform from the dropdown (kick, twitch, youtube, rumble, tiktok, fishtank, custom)
-2. Enter the channel name (e.g., `asmongold` for Kick, `saruei` for Twitch)
-3. For custom URLs, paste the full URL:
-   - Rumble channels: `https://rumble.com/c/ChannelName`
-   - Chaturbate: `https://chaturbate.com/username/`
-   - Any yt-dlp supported site: paste the stream URL
-4. Click **Add** or press **Enter**
-
-Press **Start Recording** — the program will monitor all channels and record any that go live.
+- YouTube recordings that drop every ~15 seconds → install [Deno](https://deno.com/) and confirm `deno --version`
+- Subscriber-only or age-gated streams → [Cookies Setup](#cookies-setup)
+- No window: `python Multi-Stream-Recorder.py --headless` (enabled rows in `channels.json`; Ctrl+C to stop)
+- `python Multi-Stream-Recorder.py --version` or `--config my.ini` as needed
 
 ## Cookies Setup
 
@@ -107,9 +77,9 @@ Cookies are optional but recommended for YouTube (avoids throttling) and require
 1. Install the [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) browser extension (Chrome/Edge)
 2. Visit the streaming site and log in
 3. Click the extension icon → **Export** → save as `cookies.txt`
-4. Place the file in your streams directory (e.g., `E:\Streams\cookies.txt`)
+4. Place the file in your streams directory (`streams_dir` in `config.ini` — by default `Videos\Multi-Stream Recorder`)
 
-The program auto-detects `cookies.txt` in your streams directory or the script's folder. The cookie indicator in the GUI shows whether your cookies are valid and warns when auth tokens are expiring.
+The program auto-detects `cookies.txt` in that folder or next to `Multi-Stream-Recorder.py`. The cookie indicator in the GUI shows whether your cookies are valid and warns when auth tokens are expiring. MSR **does not** log in or refresh that file — when tokens expire, re-export from a logged-in browser. Keep one combined `cookies.txt` for all sites; a Rumble-only export must not replace the whole jar.
 
 ## Configuration
 
@@ -117,7 +87,10 @@ All settings are in `config.ini`, auto-created on first run:
 
 ```
 [Paths]
-streams_dir = E:\Streams          # Where recordings are saved
+streams_dir =                     # Blank on first run is filled with
+                                   # %USERPROFILE%\Videos\Multi-Stream Recorder
+                                   # (Windows) or ~/Videos/Multi-Stream Recorder.
+                                   # Existing configs keep whatever you set (e.g. E:\Streams).
 channels_file = channels.json     # Channel list (managed by GUI)
 cookies_file =                    # Auto-detected if empty
 
@@ -164,6 +137,8 @@ minimize_to_tray = true           # Minimize to system tray
 notifications = true              # Desktop notifications
 ```
 
+The generated `config.ini` also has less-commonly changed keys (`stream_check_timeout`, `ffmpeg_timeout`, `concurrent_fragments`, `streamlink_debug`, and others) with comments in the file.
+
 ### Filename Patterns
 
 The `filename_pattern` setting supports these tokens:
@@ -182,7 +157,7 @@ Default: `{username}_{timestamp}` → `asmongold_20260211_213445.mp4`
 ## Directory Structure
 
 ```
-E:\Streams\
+Videos/Multi-Stream Recorder/   # default streams_dir (or the path you set)
 ├── Recorded\              # Raw recordings organized by platform
 │   ├── kick\
 │   │   └── asmongold\
@@ -194,13 +169,15 @@ E:\Streams\
 │   │   └── OhDough\
 │   ├── custom\
 │   │   └── chaturbate\
+│   │       ├── kittycaitlin\
+│   │       └── kaydenwithpaul\
 │   └── fishtank\
 │       └── director\
 ├── Processed\             # Remuxed MP4 files
 │   ├── kick\
 │   ├── twitch\
 │   ├── youtube\
-│   └── custom\
+│   ├── custom\
 │   └── fishtank\
 ├── Clips\                 # Clips and screenshots grabbed from live recordings
 │   ├── kick\
@@ -221,33 +198,51 @@ E:\Streams\
 | `Ctrl+Q` | Quit application |
 | `F1` | About dialog |
 | Double-click on channel | Toggle channel on/off |
-| Right-click on channel | Context menu (Start/Stop Recording, Check Now, Open in Browser, Copy, Sort, Remove) |
-| Right-click on status | Context menu (Restart/Stop Channel, Check Now, Clip Now, Screenshot Now, Open in Browser) |
+| Right-click on channel | Context menu (Start/Stop Recording, Check Now, Open in Browser, Open Clips Folder, Copy, Sort, Move to Top/Bottom, Remove) |
+| Right-click on status | Context menu (Restart/Stop Channel, Check Now, Clip Now, Screenshot Now, Open in Browser, Open Clips Folder) |
+| **Clip Now** / **Screenshot** / **Clips** buttons | Cut a clip, grab a still, or open the clips folder for the row selected in Live Recording Status (same as the context-menu actions) |
 
 ## How It Works
 
 1. **Monitoring**: Each channel gets its own worker process. Workers check if the stream is live at the configured polling interval with random jitter.
-2. **Push notifications (Kick)**: Alongside polling, a single background WebSocket subscribes to Kick's real-time event feed for every enabled Kick channel. When Kick announces a stream going live, the matching worker is woken instantly for an immediate check — the same mechanism as the Check Now button. If the socket is ever down, workers simply continue polling; push supplements polling, never replaces it.
-3. **Detection**: Kick streams are checked via streamlink (with Cloudflare JS challenge solver). Twitch streams are checked via streamlink. YouTube and custom URLs use yt-dlp's `--dump-json`. Rumble channel pages are resolved to their current live video URL.
-4. **Recording**: Live streams are recorded as MPEG-TS files. Kick and Twitch use streamlink. YouTube, Rumble, and standard custom URLs use yt-dlp with ffmpeg as the HLS downloader. Custom URLs whose streams have separate video and audio playlists (CMAF/split-track HLS) are recorded using a direct ffmpeg command that follows both playlists concurrently and muxes them in real time.
+2. **Push notifications (Kick)**: A WebSocket to Kick's event feed wakes the matching worker on go-live. Polling continues as fallback. See *Kick Push Notifications* below.
+3. **Detection**: Kick streams are checked via streamlink (with Cloudflare JS challenge solver). Twitch streams are checked via streamlink. YouTube and custom URLs use yt-dlp's `--dump-json`. Rumble channel pages are parsed for a live entry (and its HLS playlist) from the JSON the site embeds in the page.
+4. **Recording**: Live streams are recorded as MPEG-TS files. Kick and Twitch use streamlink. YouTube and standard custom URLs use yt-dlp with ffmpeg as the HLS downloader. Rumble records that channel-page HLS playlist with ffmpeg when present; otherwise yt-dlp with `--impersonate chrome`. Custom URLs whose streams have separate video and audio playlists (CMAF/split-track HLS, e.g. Chaturbate) are recorded using a direct ffmpeg command that follows both playlists concurrently and muxes them in real time.
 5. **Stream info**: Once the output file reaches ~1.5 MB, a background ffprobe thread reads it and updates the status display with measured resolution, frame rate, and bitrate.
 6. **Reconnection**: If a recording drops unexpectedly (process exits after >10 seconds of recording), the worker enters a 3-minute fast-poll mode (every 15 seconds) to catch stream reconnects.
 7. **Processing**: When you click Stop (or the stream ends), raw .ts files are remuxed to .mp4 with ffmpeg (including `+faststart` for seekability), metadata sidecars are saved, and the originals are moved to PendingDeletion.
 
 ## Instant Clips & Screenshots
 
-Right-click a channel that's currently recording in the status list for two options:
+With a channel selected in **Live Recording Status** (it must be Recording):
 
-- **Clip Now** — stream-copies the last N seconds (set by the **Clip Length** toolbar selector) out of that channel's live .ts file into its own MP4, saved under `Clips\{platform}\{channel}\`.
-- **Screenshot Now** — grabs a single frame from near the current end of the same .ts file as a still image.
+- **Clip Now** (button on the Status header, or right-click the row) — stream-copies the last N seconds (set by the **Clip Length** toolbar selector) out of that channel's live .ts file into its own MP4, saved under `Clips\{platform}\{channel}\` (custom Chaturbate-style URLs: `Clips\custom\<site>\<user>\`).
+- **Screenshot** (button on the Status header, or right-click **Screenshot Now**) — grabs a single frame from near the current end of the same .ts file as a still image.
+- **Clips** (Status header button, or right-click **Open Clips Folder** on a status row or the left roster) — opens that channel's folder under `Clips\`.
 
 Screenshots default to **JPEG at near-lossless quality** (~200–400 KB for a 1080p frame). Set `screenshot_format` in `config.ini` to `png` for lossless output (~2 MB per 1080p frame) or `webp` for the smallest files. Note that the quality scales run in opposite directions between formats — jpg is 2–31 where lower is better, webp is 50–100 where higher is better — so change `screenshot_quality` to match whenever you switch formats; out-of-range values are clamped to a sane default with a warning in the log.
 
-Both read the .ts file the worker is still actively writing — the same way the stream-info probe and resolution-change watcher already do — so the main recording is never paused, restarted, or otherwise touched. Clips use `-c copy` (no re-encoding), so cutting a clip out of a multi-hour file takes a fraction of a second regardless of how long the recording has been running. Because the cut point isn't guaranteed to land exactly on a keyframe, ffmpeg snaps to the nearest preceding one, so a clip may start up to a couple of seconds earlier than requested rather than opening on a broken frame.
+Both read the .ts file the worker is still writing, so the main recording is never paused. Clips use `-c copy` (no re-encoding).
+
+The cut starts on the last video **keyframe** at or before the requested time, using elapsed time in the file — not the MPEG-TS PCR clock, which can sit at ~10000s while the recording is only minutes long. A clip may therefore begin up to a GOP earlier than requested (~2s on Kick) rather than opening frozen with audio playing. Repeat Clip Now clicks on the same channel are ignored until the in-flight cut finishes.
+
+## Project layout
+
+```
+Multi-Stream-Recorder.py   # launcher (run this)
+msr/
+  gui.py                   # Tkinter UI
+  worker.py                # per-channel recording process, clips, remux
+  platforms.py             # Kick / Twitch / YouTube / Rumble / TikTok / Fishtank / custom
+  recorder.py              # session orchestrator, cleanup, Kick push
+  iometer.py               # Status-header disk write / NIC download rates
+  util.py / config.py / deps.py
+tests/                     # unittest (python -m unittest discover -s tests -t .)
+```
 
 ## Logging
 
-MSR writes to `stream_recorder.log` in your streams directory, and mirrors the same output to the console and the GUI's **Logs** tab.
+MSR writes to `stream_recorder.log` in your streams directory, and mirrors the same output to the console and the GUI's **Logs** tab. Stream URLs and ffmpeg/yt-dlp command lines are redacted before logging so Kick/Fishtank JWTs and Cookie/Authorization headers do not land in the file.
 
 `verbose` in `config.ini` is **off by default, and should usually stay off.** Turning it on does two things: it passes `--verbose` to yt-dlp/streamlink, and it disables the stderr noise filter that normally discards per-segment chatter. Turn it on to diagnose a specific failure, then turn it back off.
 
@@ -255,7 +250,7 @@ A handful of patterns are dropped even in verbose mode, because they flood the l
 
 The log is rotated at startup once it passes `max_log_size_mb`, keeping `log_backup_count` older copies (`stream_recorder.log.1` … `.3`). Rotation happens at launch rather than continuously because recording workers are separate processes writing to the same file, and renaming a file they hold open fails on Windows. A single very long session can therefore exceed the limit; it gets trimmed the next time you start MSR.
 
-The GUI's Logs tab trims itself to the most recent few thousand lines, so leaving MSR running for days won't grow its memory use.
+The GUI's Logs tab trims itself to the most recent few thousand lines, and the queue feeding it drops oldest pending lines past 2000, so leaving MSR running for days (or turning verbose on) won't grow its memory use.
 
 ## Polling Behavior
 
@@ -308,9 +303,9 @@ Requires two optional packages: `pip install websocket-client curl_cffi`. Withou
 
 **Kick push: no "push: listening" in the status column** — Push needs two optional packages: `pip install websocket-client curl_cffi`. The session-start log says which is missing. Recording still works normally via polling either way.
 
-**Kick push: was working, stopped working** — If the socket connects but no `Kick push: listening for <channel>` lines follow, Kick has rotated their Pusher application key. Open any kick.com page with DevTools → Network → **WS**, copy the new `wss://ws-usX.pusher.com/app/...` URL, and update `KICK_PUSHER_URL` near the top of the script.
+**Kick push: was working, stopped working** — If the socket connects but no `Kick push: listening for <channel>` lines follow, Kick has rotated their Pusher application key. Open any kick.com page with DevTools → Network → **WS**, copy the new `wss://ws-usX.pusher.com/app/...` URL, and update `KICK_PUSHER_URL` in `msr/recorder.py`.
 
-**Rumble streams not detected** — Check the log for the `Rumble HTML check:` line to confirm it's fetching the right channel page. For 403s, install `curl_cffi` for browser impersonation. Note that Rumble periodically restructures its channel pages; if detection breaks after a site change, the `parse_rumble_channel_html` function is the single place that reads their page format.
+**Rumble streams not detected / HTTP 403** — Detection reads the channel page (`Rumble HTML check:`). Recording prefers the HLS playlist embedded in that page so yt-dlp does not have to open the Cloudflare-gated video page. If you still see 403, install `curl_cffi` (`pip install curl_cffi`) and keep yt-dlp current: `pip install -U "yt-dlp[default]"`. A logged-in Rumble session in `cookies.txt` can help but is not required for public streams. Stale `cf_clearance` cookies sometimes make 403 *worse* — delete the rumble.com rows and re-export if impersonation still fails. Note that Rumble periodically restructures its channel pages; if detection breaks after a site change, `parse_rumble_channel_html` in `msr/platforms.py` is the single place that reads their page format.
 
 **Twitch recordings have no audio** — Rare, and usually a streamlink version issue: `pip install -U streamlink`.
 
@@ -322,14 +317,18 @@ Requires two optional packages: `pip install websocket-client curl_cffi`. Withou
 
 **Screenshot fails with a decode error** — The very end of a live .ts is an incomplete frame, so grabs are taken ~3 seconds behind the live edge, retrying further back if needed. A failure here usually means the recording only just started; wait a few seconds and try again.
 
-**Clip fails: "could not read recording duration"** — Fixed in v1.8.0. MPEG-TS has no container-level duration field, so ffprobe derives one by seeking to the end of the file; on some live captures that derivation returns N/A even though the recording is perfectly healthy. Clipping no longer requires it — it falls back to seeking relative to the end of the file (`-sseof`), the same method screenshots use, which is why screenshots kept working when clips didn't.
+**Clip opens frozen for ~2 seconds with audio playing** — That was a stream-copy seek landing mid-GOP (audio at t=0, video at the next keyframe). Current builds seek to the preceding keyframe in *elapsed* file time. If you still see a full-GOP freeze, fully quit and relaunch MSR so it loads the current `msr/worker.py` — the GUI does not reload modules while running.
+
+**Clip is only a couple of seconds long, or seeks from the wrong place** — Twitch/Kick MPEG-TS can report `format.duration` as the last PCR (~10000s+) instead of elapsed file time, or N/A on a still-healthy live capture. Current builds convert PCR to elapsed seconds and fall back to seeking from the end of the file (`-sseof`) when duration is missing. Fully quit and relaunch if an old worker is still loaded.
 
 **Program won't close** — Use Ctrl+Q if the window is unresponsive. Shutdown is layered: graceful stop → process tree kill → orphan cleanup → `os._exit` as a final backstop.
 
 
 ## Fishtank.live
 
-[Fishtank.live](https://www.fishtank.live/) is a reality TV live streaming site with multiple camera feeds broadcasting simultaneously. MSR supports recording any of its cameras with automatic authentication and live detection.
+[Fishtank.live](https://www.fishtank.live/) is a reality TV live streaming site with multiple camera feeds broadcasting simultaneously. MSR records those cameras with automatic authentication and live detection.
+
+**Room names and stream IDs change every season**, and again in the off-season. Do not treat the alias table below as the live house map. The **API and HLS URL shape stay the same**; when a new season starts, add cameras by their raw stream id from the catalog (see *Finding stream IDs*). Scraping the website HTML does not work — it is a client-rendered shell with no camera list.
 
 ### Setup
 
@@ -341,33 +340,58 @@ email = your@email.com
 password = yourpassword
 ```
 
-A free account is sufficient. The program handles authentication automatically — it logs in, obtains a 24-hour stream token, and refreshes it as needed. No manual cookie export is required.
+A free account is sufficient. The program handles authentication automatically — it logs in, obtains a stream token, and refreshes it as needed. No manual cookie export is required.
 
-### Adding Cameras
+### Adding cameras
 
-Select **fishtank** from the platform dropdown and enter a camera name:
+Select **fishtank** from the platform dropdown and enter either a friendly alias (if we still have one) or the **raw stream id**:
 
 ```
 fishtank:director
 fishtank:kitchen
-fishtank:bar
+fishtank:dirc-5
+fishtank:bar-5
 ```
 
-Or use raw stream IDs directly (e.g. `dirc-5`, `dmrm-5`) if you know them.
+New-season and off-season cameras that are not in the alias table are still valid if you paste the catalog id (`something-6`, `ben-5`, `computer-lab2-5`, …).
 
-### Available Cameras
+### Finding stream IDs
 
-All Season 5 cameras are supported:
+The site loads cameras from `GET https://api.fishtank.live/v1/live-streams` (needs to be logged in in the browser). Each entry in `liveStreams` has:
 
-| Camera name | Room | Access |
+| Field | Meaning |
+| --- | --- |
+| `id` | Stream id to paste into MSR (`dirc-5`, `bar-5`, …) |
+| `name` | Display name this season (Director Mode, Bar, Bedroom 3, …) |
+| `access` | `public`, `normal`, or `season_pass` |
+| `season` | Season number in the id suffix |
+
+Off-season, `liveStreamStatus` and `loadBalancer` are often empty (nothing is live) while `liveStreams` still lists every id. That list is what to copy from — not the page source.
+
+### Stable endpoints
+
+These are what MSR actually talks to; they should survive a season change:
+
+- Login: `POST https://api.fishtank.live/v1/auth/log-in`
+- Catalog / liveness: `GET https://api.fishtank.live/v1/live-streams`
+- HLS: `https://<streams-*.fishtank.live>/hls/live+<id>/index.m3u8?jwt=<token>`
+
+The stream host (`streams-c`, `streams-f`, …) is discovered from the API, not hardcoded.
+
+### Season 5 aliases (snapshot)
+
+Friendly names MSR still recognises from the Season 5 house. Several of these **already do not match the off-season catalog** (Bar is `bar-5` not `brrr-5`; Arena/Goo Factory/Jungle/Computer Lab were renamed to bedrooms; contestant cams `ben-5` / `jet-5` appeared). Old aliases are kept so existing rosters keep resolving. Prefer a raw id once Season 6 ships.
+
+| Camera name | Room (Season 5) | Access (Season 5) |
 |---|---|---|
 | `director` | Director Mode | Free |
 | `dorm` | Dorm | Normal |
 | `dormalt`, `dorm2`, `dmrm2` | Dorm Alternate | Normal |
 | `closet` | Closet | Normal |
 | `kitchen` | Kitchen | Normal |
-| `bar` | Bar | Normal |
+| `bar` | Bar (`bar-5`; S5 house was `brrr-5`) | Normal |
 | `barptz` | Bar PTZ | Season Pass |
+| `baralt`, `bar2`, `brrr2` | Bar Alternate | Normal |
 | `hallway` | Hallway | Normal |
 | `dining` | Dining Room | Normal |
 | `market` | Market | Normal |
@@ -386,26 +410,23 @@ All Season 5 cameras are supported:
 | `arena` | Arena | Normal |
 | `goofactory`, `goofact`, `goo`, `br3g` | Goo Factory | Normal |
 
-Short aliases also work — `cam` for Cameraman, `dirc` for Director, `dmrm` for Dorm, etc. Raw stream IDs like `dirc-5` and `dmrm-5` are accepted directly. Some rooms require a **season pass** subscription.
+Short aliases also work — `cam` for Cameraman, `dirc` for Director, `dmrm` for Dorm. Season 5 renames (`balcony` → `eastwing`, `hallwayup` → `westwing`, `jacuzzi` → `laundry`) still resolve.
 
-> **Season 5 renames**: `balcony` → `eastwing` (`bkny-5`), `hallwayup` → `westwing` (`hwup-5`), `hallwaydown` → `hallway` (`hwdn-5`), `jacuzzi` → `laundry` (`jckz-5`). The old aliases still work for backwards compatibility.
-
-> **Fishtank-only preset**: A `channels_fishtank.json` file is available in the repository with all 24 Season 5 cameras pre-populated. Rename it to `channels.json` and enable whichever cameras you want to record.
+`channels_fishtank.json` is the same Season 5 snapshot. Rename it to `channels.json` only if you want that house roster; it will not track Season 6 by itself.
 
 ### How It Works
 
-Detection and recording both use fishtank.live's HLS streams served by MistServer. On each poll the program queries the live-streams API to check which cameras are active, then records via ffmpeg's HLS downloader. The JWT token is obtained from the API at login and refreshed automatically — a background thread monitors the token's expiry and renews it proactively with a 5-minute buffer, preventing coverage gaps on streams like Cameraman that are issued short-lived 30-minute tokens.
+Detection and recording both use fishtank.live's HLS streams served by MistServer. On each poll the program queries the live-streams API to see which ids are `online`, then records via ffmpeg's HLS downloader. The JWT comes from the login API and is refreshed automatically — a background thread renews it with a 5-minute buffer, which matters for cameras that get short-lived 30-minute tokens (Cameraman in Season 5).
 
-Before each recording starts, MSR fetches the HLS master playlist and selects the highest-bandwidth variant automatically — this ensures recordings are always captured at the best available quality rather than whichever rendition the server happens to list first.
+Before each recording starts, MSR fetches the HLS master playlist and selects the highest-bandwidth variant, rather than whichever rendition the server lists first.
 
-After each recording is remuxed, MSR verifies that the output MP4 contains an audio track. Fishtank's CDN occasionally delivers video-only HLS segments; a clear warning is logged immediately so affected files are easy to identify.
+After each remux, MSR checks that the MP4 has an audio track. Fishtank's CDN occasionally delivers video-only HLS segments; a warning is logged so those files are easy to find.
 
 ## Platform Notes
 
-**Kick**: Uses streamlink for both detection and recording. Streamlink 8.x includes a built-in Cloudflare JS challenge solver that handles Kick's aggressive bot detection. Cookies are optional. Streams are recorded in 1080p by default. With `websocket-client` and `curl_cffi` installed, Kick channels also get **push notifications** — go-live events arrive over Kick's own WebSocket feed and recordings start within seconds instead of waiting for the next poll (see *Kick Push Notifications* above). **Important**: Remove any old third-party `kick.py` plugins from `%APPDATA%\streamlink\plugins\` — they override the built-in plugin and break Cloudflare bypass.
+**Kick**: Uses streamlink for both detection and recording (`quality = best` in `config.ini`, which is streamlink's best available rendition). Streamlink 8.x includes a built-in Cloudflare JS challenge solver that handles Kick's aggressive bot detection. Cookies are optional. With `websocket-client` and `curl_cffi` installed, Kick channels also get push notifications (see *Kick Push Notifications* above). **Important**: Remove any old third-party `kick.py` plugins from `%APPDATA%\streamlink\plugins\` — they override the built-in plugin and break Cloudflare bypass.
 
 **Twitch**: Uses streamlink with `--twitch-disable-ads` and `--twitch-low-latency`. Cookies are optional but enable subscriber-only features.
-
 
 **TikTok**: Uses yt-dlp for detection and streamlink for recording. Add channels by selecting **tiktok** from the platform dropdown and entering the username (with or without `@`). Valid TikTok session cookies are required — export them from a logged-in browser session using the Get cookies.txt extension and place the file in your streams directory. The `msToken` and `ttwid` cookies are the critical ones; when they expire, re-export.
 
@@ -417,11 +438,13 @@ TikTok's CDN delivers mobile-portrait video (typically 540×960 or 720×1280) at
 
 **Rumble**: Select **rumble** from the platform dropdown and enter the channel name (e.g. `BadlandsMedia`), or add the full channel URL as a custom URL. Both `/c/Name` and `/user/Name` styles work — MSR tries `/c/` first and falls back to `/user/` automatically.
 
-Live detection reads the JSON payload Rumble embeds in its channel page (the same data the site renders its video grid from), which is considerably more durable than matching CSS classes in the markup. A video counts as live only when its `live` flag is set — an *ended* livestream keeps its DVR playlist and can still show thousands of concurrent viewers, so treating "has a stream URL" as "is live" would re-record finished broadcasts on every poll. Once a live entry is found, its video page URL is handed to yt-dlp to resolve the actual stream. For custom Rumble URLs, yt-dlp's playlist scan is tried first and this HTML check acts as a fallback, so detection survives the extractor lagging behind a site redesign. If Cloudflare blocks access, install `curl_cffi` for browser impersonation.
+Live detection reads the JSON payload Rumble embeds in its channel page (the same data the site renders its video grid from), which is considerably more durable than matching CSS classes in the markup. A video counts as live only when its `live` flag is set — an *ended* livestream keeps its DVR playlist and can still show thousands of concurrent viewers, so treating "has a stream URL" as "is live" would re-record finished broadcasts on every poll. When that JSON includes a direct HLS playlist (`videos[].url`), recording uses ffmpeg on that playlist (Rumble `Referer`) and never opens the Cloudflare-gated `/vXXXX` video page. If the playlist is missing, yt-dlp fetches the video page with `--impersonate chrome` on the first try (`curl_cffi` required). A public channel does not need a Rumble login; MSR never refreshes `cookies.txt`. For custom Rumble URLs, yt-dlp's playlist scan is tried first and this HTML check acts as a fallback.
 
-**Fishtank.live**: Uses ffmpeg's HLS downloader with a token obtained from the Fishtank API. Requires a `[Fishtank]` section in `config.ini` with your account email and password. All Season 5 cameras are supported. Tokens are refreshed proactively by a background thread (5-minute buffer before expiry) — important because some streams like Cameraman are issued 30-minute tokens rather than the usual 24-hour ones. After each remux, audio track presence is verified and a warning is logged if a recording is silent. No cookies required.
+**Fishtank.live**: See the *Fishtank.live* section above. ffmpeg HLS with an API token from `[Fishtank]` email/password in `config.ini`. No cookies required. Camera aliases are a seasonal snapshot; new rooms are added as raw stream ids from `/v1/live-streams`.
 
 **Custom URLs**: Uses yt-dlp, which supports [1,800+ sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md). Direct `.m3u8` HLS links also work. Select "custom" from the platform dropdown and paste the full URL.
+
+Recordings for `https://site.com/username/` URLs (Chaturbate, Fansly, and similar) go in `Recorded/custom/<site>/<username>/` rather than one folder for the whole site. If the URL has no username in the path (a raw `.m3u8`, a site root), files stay in `Recorded/custom/<site>/` as before. Existing files in that bag folder are not moved.
 
 For platforms that serve CMAF HLS with separate video and audio playlists, MSR automatically detects the split-track format during the stream check and routes recording through a direct ffmpeg command rather than yt-dlp's download pipeline. This handles sites like Chaturbate where yt-dlp would otherwise fail to merge the tracks for a live stream. No configuration is required — detection and routing happen transparently.
 
@@ -431,13 +454,26 @@ For platforms that serve CMAF HLS with separate video and audio playlists, MSR a
 | --- | --- | --- |
 | Python 3.10+ | Yes | Runtime |
 | ffmpeg + ffprobe | Yes | Remux .ts → .mp4; stream info detection |
-| yt-dlp | Yes | YouTube, Rumble, custom URL recording |
-| streamlink | Yes | Kick and Twitch stream recording |
-| psutil | Recommended | Clean process management |
+| yt-dlp | Yes | YouTube, Rumble, TikTok detection, custom URL recording |
+| streamlink | Yes | Kick, Twitch, and TikTok stream recording |
+| Deno | Recommended | YouTube n-challenge solving (without it, recordings drop every ~15s) |
+| psutil | Recommended | Process cleanup; Status-header disk write and NIC download meters |
 | curl_cffi | Recommended | Rumble Cloudflare bypass; Fishtank.live API (HTTP/3); Kick push channel-ID lookup |
 | websocket-client | Recommended | Kick push notifications (instant go-live detection) |
 | pystray + Pillow | Optional | System tray icon |
 | plyer | Optional | Desktop notifications |
+| colorama | Optional | Colored console output on Windows |
+| tkinter | Yes (GUI) | Bundled on Windows/macOS; Linux: `sudo apt install python3-tk` |
+
+## Legal / acceptable use
+
+This program is for **personal archival** of livestreams you are allowed to record. It does not give you any right to copy, redistribute, or commercially use someone else's stream. You must follow each site's terms of service, copyright, and the laws where you live.
+
+**Cookies** (`cookies.txt`) are your browser login. Anyone with that file can act as you on those sites. Do not share it. MSR never uploads it and never refreshes it.
+
+**Adult content:** Custom URLs include sites such as Chaturbate. Those rooms are adult. Do not use this software to record or store content involving minors. You must be of legal age in your jurisdiction to record adult streams.
+
+See [SECURITY.md](SECURITY.md) for how to report vulnerabilities and what the app stores on disk.
 
 ## Author
 
