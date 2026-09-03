@@ -365,31 +365,83 @@ def _is_rumble_channel_url(url):
     return True
 
 
+# roomId in SIGI / universal data — quoted or bare number.
+_TIKTOK_ROOM_ID_RE = re.compile(r'"roomId"\s*:\s*"?(\d+)"?')
+
+
+def tiktok_room_id_from_html(html):
+    """First roomId in a TikTok profile or /live HTML page, or None."""
+    m = _TIKTOK_ROOM_ID_RE.search(html or "")
+    return m.group(1) if m else None
+
+
+def tiktok_parse_api_live_room(data):
+    """Parse ``/api-live/user/room`` JSON.
+
+    Returns ``(is_live, room_id, title)``. Status 2 is live; 4 is ended.
+    A leftover roomId on an ended 24/7 channel is not treated as live.
+    """
+    if not isinstance(data, dict):
+        return False, None, None
+    payload = data.get("data") if isinstance(data.get("data"), dict) else data
+    user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+    live_room = payload.get("liveRoom") if isinstance(payload.get("liveRoom"), dict) else {}
+    statuses = []
+    for val in (user.get("status"), live_room.get("status")):
+        try:
+            statuses.append(int(val))
+        except (TypeError, ValueError):
+            pass
+    room_id = user.get("roomId") or live_room.get("roomId")
+    if room_id is not None:
+        room_id = str(room_id)
+    title = live_room.get("title") or user.get("nickname") or None
+    return (2 in statuses), room_id, title
+
+
+def _tiktok_http_get(url, opener, timeout, logger):
+    """GET *url*. Prefer curl_cffi chrome impersonation; else cookie opener."""
+    if HAS_CURL_CFFI:
+        try:
+            from curl_cffi import requests as cffi_requests
+            resp = cffi_requests.get(
+                url,
+                impersonate="chrome",
+                timeout=timeout,
+                headers={
+                    "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
+                    "Referer": "https://www.tiktok.com/",
+                },
+            )
+            if resp.status_code == 200 and resp.text:
+                return resp.text
+            logger.info(
+                f"TikTok fallback GET {redact_for_log(url)} "
+                f"curl_cffi HTTP {resp.status_code}"
+            )
+        except Exception as e:
+            logger.info(f"TikTok fallback curl_cffi GET failed: {redact_for_log(e)}")
+    with opener.open(url, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
 def check_tiktok_live_webcast(username, cookies_file, logger, timeout=30):
-    """Check TikTok live status via direct Webcast API call.
+    """Check TikTok live status when yt-dlp reports offline.
 
-    yt-dlp hardcodes webcast.tiktok.com, but US-TTP accounts (the majority
-    of US-based TikTok streamers) use webcast.us.tiktok.com.  Calling the
-    global endpoint for a US-TTP room returns status 4 (offline) even when
-    the stream is live, which is the root cause of TikTok US live streams
-    not being detected.
+    Order:
+      1. ``GET /api-live/user/room`` (uniqueId, no roomId needed — 24/7 news
+         LIVEs often omit roomId on the profile page).
+      2. roomId from the profile page, then ``/@user/live``.
+      3. webcast.us.tiktok.com then webcast.tiktok.com (US-TTP vs global).
 
-    This function:
-      1. Fetches the profile page and extracts the roomId from the embedded
-         JSON (same field yt-dlp reads successfully).
-      2. Queries BOTH webcast.us.tiktok.com and webcast.tiktok.com until one
-         returns status 2 (live).
+    Any endpoint returning status 2 is live. Misses are logged at info.
 
-    Returns (is_live: bool, room_id: str | None, title: str | None, error: str | None).
+    Returns (is_live, room_id, title, error).
     """
     import urllib.request
     import http.cookiejar
-    import re as _re
 
-    profile_url = f"https://www.tiktok.com/@{username}"
-
-    # Build a cookie jar from the Netscape cookies.txt so TikTok doesn't
-    # serve a stripped-down page or a bot-detection redirect.
+    handle = (username or "").lstrip("@")
     cj = http.cookiejar.MozillaCookieJar()
     if cookies_file:
         try:
@@ -399,53 +451,87 @@ def check_tiktok_live_webcast(username, cookies_file, logger, timeout=30):
 
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
     opener.addheaders = [
-        ('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                       'AppleWebKit/537.36 (KHTML, like Gecko) '
-                       'Chrome/124.0.0.0 Safari/537.36'),
-        ('Accept-Language', 'en-US,en;q=0.9'),
-        ('Referer', 'https://www.tiktok.com/'),
+        ("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/124.0.0.0 Safari/537.36"),
+        ("Accept-Language", "en-US,en;q=0.9"),
+        ("Referer", "https://www.tiktok.com/"),
     ]
 
-    # ── Step 1: get roomId from profile page ─────────────────────────────
+    last_err = None
+    room_id = None
+
+    # ── 1. api-live/user/room (works without a prior roomId) ────────────
+    api_url = (
+        "https://www.tiktok.com/api-live/user/room/"
+        f"?aid=1988&sourceType=54&uniqueId={urllib.parse.quote(handle)}"
+    )
     try:
-        with opener.open(profile_url, timeout=timeout) as resp:
-            html = resp.read().decode('utf-8', errors='replace')
+        body = _tiktok_http_get(api_url, opener, timeout, logger)
+        data = json.loads(body)
+        is_live, room_id, title = tiktok_parse_api_live_room(data)
+        if is_live:
+            logger.info(
+                f"TikTok webcast check: LIVE via api-live/user/room "
+                f"(roomId={room_id}) for @{handle}"
+            )
+            return True, room_id, title, None
+        if room_id:
+            logger.info(
+                f"TikTok api-live/user/room: @{handle} status not live "
+                f"(roomId={room_id})"
+            )
+        else:
+            last_err = "api-live/user/room did not report live"
     except Exception as e:
-        return False, None, None, f"profile fetch failed: {e}"
+        last_err = f"api-live/user/room failed: {e}"
+        logger.info(f"TikTok webcast check: {redact_for_log(last_err)}")
 
-    m = _re.search(r'"roomId"\s*:\s*"(\d+)"', html)
-    if not m:
-        return False, None, None, "no roomId in profile page (user not live or page changed)"
-
-    room_id = m.group(1)
-    logger.info(f"TikTok webcast check: roomId={room_id} for @{username}")
-
-    # ── Step 2: query Webcast API — US endpoint first, global as fallback ─
-    webcast_hosts = [
-        'webcast.us.tiktok.com',   # US-TTP accounts (most US streamers)
-        'webcast.tiktok.com',       # Global TikTok accounts
-    ]
-
-    for host in webcast_hosts:
-        api_url = (f"https://{host}/webcast/room/info/"
-                   f"?aid=1988&room_id={room_id}")
+    # ── 2. roomId from profile, then /live (24/7 rooms hide it on profile)
+    for label, page_url in (
+        ("profile", f"https://www.tiktok.com/@{handle}"),
+        ("live page", f"https://www.tiktok.com/@{handle}/live"),
+    ):
+        if room_id:
+            break
         try:
-            with opener.open(api_url, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode('utf-8', errors='replace'))
+            html = _tiktok_http_get(page_url, opener, timeout, logger)
         except Exception as e:
-            logger.debug(f"TikTok webcast check ({host}): request failed: {e}")
+            last_err = f"{label} fetch failed: {e}"
+            logger.info(f"TikTok webcast check: {redact_for_log(last_err)}")
             continue
+        found = tiktok_room_id_from_html(html)
+        if found:
+            room_id = found
+            logger.info(f"TikTok webcast check: roomId={room_id} from {label} for @{handle}")
+        else:
+            last_err = f"no roomId on {label}"
+            logger.info(f"TikTok webcast check: {last_err} for @{handle}")
 
-        room_data = data.get('data') or {}
-        status = room_data.get('status')
-        logger.debug(f"TikTok webcast check ({host}): status={status}")
+    if not room_id:
+        return False, None, None, last_err or "no roomId (profile, /live, api-live)"
 
-        if status == 2:  # 2 = live, 4 = offline/ended
-            title_data = room_data.get('title') or ''
+    # ── 3. Webcast room/info — US-TTP first, global fallback ────────────
+    statuses = []
+    for host in ("webcast.us.tiktok.com", "webcast.tiktok.com"):
+        api_url = f"https://{host}/webcast/room/info/?aid=1988&room_id={room_id}"
+        try:
+            body = _tiktok_http_get(api_url, opener, timeout, logger)
+            data = json.loads(body)
+        except Exception as e:
+            logger.info(f"TikTok webcast check ({host}): request failed: {redact_for_log(e)}")
+            continue
+        room_data = data.get("data") if isinstance(data.get("data"), dict) else {}
+        status = room_data.get("status")
+        statuses.append(f"{host}={status}")
+        logger.info(f"TikTok webcast check ({host}): status={status}")
+        if status == 2:
+            title_data = room_data.get("title") or ""
             logger.info(f"TikTok webcast check: LIVE via {host} (status=2)")
             return True, room_id, title_data or None, None
 
-    return False, room_id, None, None
+    detail = ", ".join(statuses) if statuses else (last_err or "no webcast response")
+    return False, room_id, None, f"webcast did not confirm live ({detail})"
 
 
 def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):

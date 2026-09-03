@@ -1742,20 +1742,19 @@ def record_worker(args):
                 if resolved_url:
                     recording_url = resolved_url
                     logger.info(f"Using resolved URL for recording: {redact_for_log(recording_url)}")
-                # yt-dlp hardcodes webcast.tiktok.com but US-TTP streamers need
-                # webcast.us.tiktok.com — if yt-dlp says offline, verify with a
-                # direct Webcast API call that tries both regional endpoints.
-                if not is_live and error in ("video unavailable", "extraction failed", None):
-                    logger.info("TikTok: yt-dlp reported offline — cross-checking via Webcast API")
+                # yt-dlp often reports 24/7 / US-TTP LIVEs as offline. Confirm
+                # via api-live/user/room, /live HTML roomId, then Webcast.
+                if not is_live:
+                    logger.info("TikTok: yt-dlp reported offline — cross-checking via TikTok live APIs")
                     wc_live, _, wc_title, wc_err = check_tiktok_live_webcast(
                         username, cookies_file, logger, stream_check_timeout)
                     if wc_live:
-                        logger.info("TikTok: Webcast API confirms LIVE (yt-dlp used wrong regional endpoint)")
+                        logger.info("TikTok: live API confirms LIVE (yt-dlp said offline)")
                         is_live = True
                         stream_title = wc_title or stream_title
                         error = None
-                    elif wc_err:
-                        logger.debug(f"TikTok Webcast fallback: {wc_err}")
+                    else:
+                        logger.info(f"TikTok live API fallback: {wc_err or 'not live'}")
             elif platform in ["youtube", "custom"]:
                 is_live, stream_title, error, need_impersonate, resolved_url, format_urls = check_stream_ytdlp(url, logger, stream_check_timeout, cookies_file)
                 # If yt-dlp resolved to a different URL (e.g. Rumble channel -> video),

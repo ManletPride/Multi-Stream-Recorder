@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- TikTok: when yt-dlp reports offline, confirm via `/api-live/user/room`, `roomId` on the profile **and** `/live` page, then both Webcast hosts. Misses log at info (24/7 news LIVEs such as `@aljazeeraenglish` often omit `roomId` on the profile, so the old fallback stayed silent).
+
 ## v2.0.0
 
 User-facing summary and upgrade steps: [RELEASE_NOTES_v2.0.0.md](RELEASE_NOTES_v2.0.0.md).
