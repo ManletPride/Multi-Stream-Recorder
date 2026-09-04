@@ -2,7 +2,7 @@
 
 A desktop application for simultaneously recording live streams from **Kick**, **Twitch**, **YouTube**, **Rumble**, **TikTok**, **Fishtank.live**, and any site supported by yt-dlp. Set it up, press record, and walk away — it monitors channels, auto-records when they go live, and produces clean MP4 files.
 
-This is **v2.0.0**. Upgrading from the v1.8.0 single-file app: copy `Multi-Stream-Recorder.py` **and** the `msr\` folder, then fully quit and relaunch. Details: [RELEASE_NOTES_v2.0.0.md](RELEASE_NOTES_v2.0.0.md).
+This is **v2.0.1**. Upgrading from the v1.8.0 single-file app: copy `Multi-Stream-Recorder.py` **and** the `msr\` folder, then fully quit and relaunch. Details: [RELEASE_NOTES_v2.0.0.md](RELEASE_NOTES_v2.0.0.md). Size-split overlap: [RELEASE_NOTES_v2.0.1.md](RELEASE_NOTES_v2.0.1.md).
 
 ![Dark Mode Screenshot](screenshots/dark-mode.png)
 
@@ -14,11 +14,11 @@ This is **v2.0.0**. Upgrading from the v1.8.0 single-file app: copy `Multi-Strea
 * **Automatic detection** — Polls channels and starts recording the moment a stream goes live
 * **Kick push notifications** — Kick recordings start within seconds of going live via Kick's own WebSocket event feed, with polling as fallback (see *Kick Push Notifications*)
 * **Smart polling** — Configurable check intervals with jitter to avoid rate limiting; exponential backoff on errors only
-* **Instant clips & screenshots** — While a channel is recording, use **Clip Now** or **Screenshot** on the Status tab (or right-click the row) to stream-copy the last N seconds of its live .ts into a standalone MP4, or grab a still — neither interrupts the ongoing recording. Clips start on a video keyframe so audio and video begin together. Toolbar presets are 15 sec–5 min; Custom goes from 5 sec to 30 min
+* **Instant clips & screenshots** — While a channel is recording (including during a background remux of a previous file), use **Clip Now** or **Screenshot** on the Status tab (or right-click the row) to stream-copy the last N seconds of its live .ts into a standalone MP4, or grab a still — neither interrupts the ongoing recording. Clips start on a video keyframe so audio and video begin together. Toolbar presets are 15 sec–5 min; Custom goes from 5 sec to 30 min
 * **Custom poll rate** — Pick a preset (1/3/5 min) or set any custom interval from 30 seconds to 2 hours; changes apply instantly to running sessions
 * **Check Now** — Skip the poll timer entirely: one button checks every enabled channel immediately, or right-click a single channel to check just that one
 * **Fast reconnect** — If a stream drops briefly (streamer disconnect), re-detects within 15 seconds
-* **File splitting** — Automatically splits recordings at a configurable size limit (default 8 GB), and on mid-stream resolution changes that would otherwise corrupt playback
+* **File splitting** — Automatically splits recordings at a configurable size limit (default 8 GB), and on mid-stream resolution changes that would otherwise corrupt playback. At the size limit the next file starts *before* the current one is closed (a few seconds of overlap, no dropped live audio); the closed segment is remuxed in the background. Clip Now keeps working and the status row shows remux progress
 * **Clean MP4 output** — Automatically remuxes raw .ts recordings to .mp4 with ffmpeg, and warns if a finished recording has no audio track
 * **Cloudflare bypass** — Kick streams use streamlink's built-in JS challenge solver; Rumble records the HLS playlist from the channel page (ffmpeg) so yt-dlp does not have to open Cloudflare-gated video pages
 * **Dark mode GUI** — Full dark/light theme with system tray support and desktop notifications
@@ -97,7 +97,9 @@ cookies_file =                    # Auto-detected if empty
 [Recording]
 quality = best                    # Stream quality
 max_record_hours = 12.0           # Auto-stop after N hours (0 = no limit)
-max_file_size_gb = 8.0            # Split recording when file exceeds this size (0 = disabled)
+max_file_size_gb = 8.0            # Split recording when file exceeds this size (0 = disabled).
+                                   # Next file starts first (a few seconds of overlap); the closed
+                                   # file is remuxed in the background. Clip Now keeps working.
 split_on_resolution_change = true # Split when the live video's resolution changes mid-stream
                                    # (e.g. TikTok multi-guest battles), instead of muxing two
                                    # resolutions into one file, which corrupts playback
@@ -210,11 +212,12 @@ Videos/Multi-Stream Recorder/   # default streams_dir (or the path you set)
 4. **Recording**: Live streams are recorded as MPEG-TS files. Kick and Twitch use streamlink. YouTube and standard custom URLs use yt-dlp with ffmpeg as the HLS downloader. Rumble records that channel-page HLS playlist with ffmpeg when present; otherwise yt-dlp with `--impersonate chrome`. Custom URLs whose streams have separate video and audio playlists (CMAF/split-track HLS, e.g. Chaturbate) are recorded using a direct ffmpeg command that follows both playlists concurrently and muxes them in real time.
 5. **Stream info**: Once the output file reaches ~1.5 MB, a background ffprobe thread reads it and updates the status display with measured resolution, frame rate, and bitrate.
 6. **Reconnection**: If a recording drops unexpectedly (process exits after >10 seconds of recording), the worker enters a 3-minute fast-poll mode (every 15 seconds) to catch stream reconnects.
-7. **Processing**: When you click Stop (or the stream ends), raw .ts files are remuxed to .mp4 with ffmpeg (including `+faststart` for seekability), metadata sidecars are saved, and the originals are moved to PendingDeletion.
+7. **Size split**: When the raw file reaches `max_file_size_gb` (default 8 GB), the next `.ts` starts while the current capture is still writing. Once the new file has data, the old capture is closed and remuxed in the background. The two files overlap by a few seconds so no live audio is dropped. Status stays Recording and shows `remuxing N%`. If the next file never appears, MSR falls back to stopping then restarting (a short gap). A mid-stream **resolution change** still ends the current file first, so one recording does not mix two frame sizes.
+8. **Processing**: When you click Stop (or the stream ends), remaining raw .ts files are remuxed to .mp4 with ffmpeg (including `+faststart` for seekability), metadata sidecars are saved, and the originals are moved to PendingDeletion. Size-split remux does not wait for Stop — it runs while the next segment records.
 
 ## Instant Clips & Screenshots
 
-With a channel selected in **Live Recording Status** (it must be Recording):
+With a channel selected in **Live Recording Status** (Recording, or remuxing a `.ts` that is still on disk):
 
 - **Clip Now** (button on the Status header, or right-click the row) — stream-copies the last N seconds (set by the **Clip Length** toolbar selector) out of that channel's live .ts file into its own MP4, saved under `Clips\{platform}\{channel}\` (custom Chaturbate-style URLs: `Clips\custom\<site>\<user>\`).
 - **Screenshot** (button on the Status header, or right-click **Screenshot Now**) — grabs a single frame from near the current end of the same .ts file as a still image.

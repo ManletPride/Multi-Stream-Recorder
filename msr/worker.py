@@ -111,6 +111,80 @@ def find_active_recording_file(recorder, channel_key):
     return max(ts_files, key=os.path.getmtime)
 
 
+def channel_status_allows_clip(status):
+    """True when Clip Now / Screenshot can run against this channel's status.
+
+    Recording is the normal case. Remuxing is allowed so a size-split remux
+    (or a stream-end remux of a still-present .ts) does not disable clips —
+    ``find_active_recording_file`` still has a .ts to cut from.
+    """
+    s = (status or "").lower()
+    return s.startswith("recording") or "remuxing" in s
+
+
+def _remux_detail_suffix(state):
+    """Short status-detail fragment while a background remux is running."""
+    if not state or not state.get("active"):
+        return ""
+    pct = state.get("pct")
+    if pct is not None:
+        try:
+            return f"remuxing {int(pct)}%"
+        except (TypeError, ValueError):
+            return "remuxing…"
+    return "remuxing…"
+
+
+def _strip_remux_suffix(detail):
+    if not detail:
+        return ""
+    idx = detail.find(" · remuxing")
+    if idx >= 0:
+        return detail[:idx]
+    return detail
+
+
+def _with_remux_suffix(detail, state):
+    """Compose stream-info detail with a remuxing progress suffix."""
+    base = _strip_remux_suffix(detail or "")
+    suffix = _remux_detail_suffix(state)
+    if not suffix:
+        return base
+    if base:
+        return f"{base} · {suffix}"
+    return suffix
+
+
+def _snapshot_remux_state(state, lock):
+    if not state:
+        return None
+    if lock is None:
+        return dict(state)
+    with lock:
+        return dict(state)
+
+
+def wait_until_file_has_data(path, stop_event=None, min_bytes=65536, timeout=30,
+                             poll=0.2):
+    """Return True once *path* exists and is at least *min_bytes*.
+
+    Used for make-before-break size splits: the next capture is started while
+    the current file is still growing, and we only close the old file after
+    this returns True so the two files overlap instead of leaving a hole.
+    """
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        if stop_event is not None and stop_event.is_set():
+            return False
+        try:
+            if os.path.exists(path) and os.path.getsize(path) >= min_bytes:
+                return True
+        except OSError:
+            pass
+        time.sleep(poll)
+    return False
+
+
 def _parse_ffprobe_packet_csv(stdout):
     """Parse ffprobe ``csv=p=0`` packet lines into (pts_times, keyframe_pts).
 
@@ -829,7 +903,9 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                               tool_name_override=None, verbose=False,
                               max_file_size_gb=0.0, stream_info="",
                               ffmpeg_path="ffmpeg", watch_resolution_changes=False,
-                              resolution_check_interval=20):
+                              resolution_check_interval=20,
+                              bg_remux_state=None, remux_lock=None,
+                              on_size_limit=None):
     """Monitor a recording subprocess and update status via queue.
 
     Spawns a background thread to read stderr for real-time logging.
@@ -843,6 +919,12 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
     parsing ffmpeg's Video stream descriptor from stderr.  The detected string
     (e.g. "1920x1080 · 30fps · 4.9Mbps") replaces "starting" in the status
     detail once the stream descriptor appears in the log.
+
+    ``on_size_limit`` (optional) is called *before* the current process is
+    killed when the file hits ``max_file_size_gb``. The callback should start
+    the next capture and return True once that new file has data, so the two
+    files overlap instead of dropping live seconds. If it returns False or
+    raises, the current process is still stopped (gap fallback).
 
     Returns (last_status, split_requested) where split_requested=True means
     the caller should immediately start a new segment rather than entering
@@ -943,14 +1025,30 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                     kill_process_tree(proc.pid, logger)
                     break
 
-                # Max-file-size split: gracefully stop so the caller can remux
-                # this segment and immediately start a fresh one.
+                # Max-file-size split: keep this capture running until
+                # on_size_limit starts the next file and sees data (overlap,
+                # no hole). Then stop this process. If the callback is missing
+                # or fails, stop anyway so the file does not grow without bound.
                 if max_file_size_bytes > 0 and size >= max_file_size_bytes:
                     logger.info(
                         f"File reached {human_size(size)} — splitting "
                         f"(limit: {max_file_size_gb:.1f} GB)"
                     )
                     split_requested = True
+                    if on_size_limit is not None and not stop_event.is_set():
+                        try:
+                            if on_size_limit():
+                                logger.info(
+                                    "Overlap split: next segment is writing — "
+                                    "closing this file"
+                                )
+                            else:
+                                logger.warning(
+                                    "Overlap split: next segment did not start "
+                                    "in time — closing this file (short gap)"
+                                )
+                        except Exception as e:
+                            logger.error(f"Overlap split failed: {e}", exc_info=True)
                     kill_process_tree(proc.pid, logger)
                     break
 
@@ -958,7 +1056,13 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
 
                 # Build detail string: use pre-populated stream_info, auto-detected
                 # info from the stderr parser, or empty while waiting for detection.
+                # A background remux of a previous size-split segment is appended
+                # so the status row shows recording AND remux progress.
                 detail = stream_info_ref[0] if stream_info_ref[0] else "starting"
+                if bg_remux_state:
+                    detail = _with_remux_suffix(
+                        detail, _snapshot_remux_state(bg_remux_state, remux_lock)
+                    )
 
                 new_status = {
                     "status": "Recording",
@@ -1090,7 +1194,7 @@ def _probe_duration(ffmpeg_path, raw_file):
 
 
 def _run_remux_cmd(ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file, logger, timeout,
-                   file_size, label="Remux"):
+                   file_size, label="Remux", progress_cb=None):
     """Run a single ffmpeg remux command, streaming progress to the logger.
 
     ffmpeg is invoked with ``-progress pipe:1 -stats_period 5`` so it writes
@@ -1164,6 +1268,12 @@ def _run_remux_cmd(ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file, logger, timeout,
         if total_secs and total_secs > 0:
             pct = min(100.0, (elapsed_media_us / 1_000_000) / total_secs * 100)
 
+        if progress_cb is not None and pct is not None:
+            try:
+                progress_cb(pct)
+            except Exception:
+                pass
+
         # Decide whether to emit a log line
         pct_trigger  = (pct is not None) and (pct - last_log_pct >= LOG_PCT_STEP)
         time_trigger = (now - last_log_time) >= LOG_TIME_GAP
@@ -1224,7 +1334,8 @@ def _run_remux_cmd(ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file, logger, timeout,
     return proc.returncode, "\n".join(stderr_lines)
 
 
-def remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, timeout=600):
+def remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, timeout=600,
+                 progress_cb=None):
     """Remux recorded .ts file to MP4 format."""
     # Probe for timed_id3 codec (common in Twitch streams)
     has_timed_id3 = False
@@ -1260,7 +1371,8 @@ def remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, timeout=600):
     try:
         returncode, stderr_text = _run_remux_cmd(
             ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file,
-            logger, timeout, file_size, label="Remux"
+            logger, timeout, file_size, label="Remux",
+            progress_cb=progress_cb,
         )
 
         if returncode == -1:
@@ -1294,7 +1406,8 @@ def remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, timeout=600):
                 try:
                     fb_code, fb_stderr = _run_remux_cmd(
                         fallback_cmd, ffmpeg_path, raw_file, mp4_file,
-                        logger, timeout, file_size, label="Fallback remux"
+                        logger, timeout, file_size, label="Fallback remux",
+                        progress_cb=progress_cb,
                     )
                     if fb_code == 0 and os.path.exists(mp4_file):
                         mp4_size = os.path.getsize(mp4_file)
@@ -1336,6 +1449,103 @@ def save_metadata(mp4_file, username, platform, start_time_str, duration_seconds
             json.dump(metadata, f, indent=2, ensure_ascii=False)
     except Exception as e:
         logging.warning(f"Failed to save metadata: {e}")
+
+
+def process_finished_raw(raw_file, mp4_file, pending_dir, ffmpeg_path, logger,
+                         timeout, username, platform, start_wall, elapsed,
+                         stream_title, progress_cb=None):
+    """Remux (or move) a finished raw recording into processed/.
+
+    Shared by the worker's synchronous stream-end path and the background
+    thread used after a size/resolution split. Does not update status_queue
+    — the caller decides whether the channel is still recording.
+
+    Returns ``(success, mp4_size, error)``.
+    """
+    already_mp4 = raw_file.endswith(".mp4")
+    if already_mp4:
+        logger.info("Raw file is already MP4 — skipping remux, moving directly to processed")
+        try:
+            shutil.move(raw_file, mp4_file)
+            mp4_size = os.path.getsize(mp4_file)
+            logger.info(f"Moved to processed: {os.path.basename(mp4_file)} ({human_size(mp4_size)})")
+        except Exception as _mv_err:
+            logger.error(f"Failed to move MP4 to processed: {_mv_err}")
+            return False, 0, str(_mv_err)
+        save_metadata(
+            mp4_file, username, platform,
+            start_wall.isoformat(), elapsed, stream_title,
+        )
+        _log_audio_track(mp4_file, ffmpeg_path, platform, logger)
+        return True, mp4_size, None
+
+    success, mp4_size, error = remux_to_mp4(
+        raw_file, mp4_file, ffmpeg_path, logger, timeout,
+        progress_cb=progress_cb,
+    )
+    if not success:
+        return False, mp4_size, error
+
+    save_metadata(
+        mp4_file, username, platform,
+        start_wall.isoformat(), elapsed, stream_title,
+    )
+    _log_audio_track(mp4_file, ffmpeg_path, platform, logger)
+
+    pending_path = os.path.join(pending_dir, os.path.basename(raw_file))
+    max_retries = 6
+    _move_wait = [5, 10, 10, 15, 15, 15]
+    for attempt in range(max_retries):
+        try:
+            shutil.move(raw_file, pending_path)
+            logger.info(f"Moved raw to: {pending_path}")
+            break
+        except PermissionError as e:
+            if attempt < max_retries - 1:
+                wait = _move_wait[attempt]
+                logger.warning(
+                    f"File locked, retrying in {wait}s… (attempt {attempt + 1}/{max_retries})"
+                )
+                time.sleep(wait)
+            else:
+                logger.error(f"Move failed after {max_retries} attempts: {e}")
+                logger.info(f"File will be cleaned up on next run: {raw_file}")
+        except Exception as e:
+            logger.error(f"Move failed: {e}")
+            break
+
+    return True, mp4_size, None
+
+
+def _log_audio_track(mp4_file, ffmpeg_path, platform, logger):
+    """Warn if the remuxed MP4 has no audio (Fishtank video-only HLS)."""
+    try:
+        probe_cmd = [
+            ffprobe_from_ffmpeg(ffmpeg_path),
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_streams",
+            "-select_streams", "a",
+            mp4_file,
+        ]
+        probe_result = subprocess.run(
+            probe_cmd, capture_output=True, text=True, timeout=30
+        )
+        if probe_result.returncode == 0:
+            probe_data = json.loads(probe_result.stdout or "{}")
+            audio_streams = probe_data.get("streams", [])
+            if not audio_streams:
+                logger.warning(
+                    f"⚠ NO AUDIO TRACK in {os.path.basename(mp4_file)} — "
+                    f"stream delivered video-only segments (silent recording)"
+                )
+            else:
+                codec = audio_streams[0].get("codec_name", "?")
+                channels = audio_streams[0].get("channels", "?")
+                if platform == "fishtank":
+                    logger.info(f"Audio OK: {codec}, {channels}ch")
+    except Exception as _probe_err:
+        logger.debug(f"Audio check skipped: {_probe_err}")
 
 
 def finalize_recording_group(parts, group_base_name, processed_path, pending_dir,
@@ -1620,6 +1830,29 @@ def record_worker(args):
     group_parts = []          # completed segments belonging to the current session
     group_base_name = None    # shared base filename for the current session
 
+    # Background remux of size/resolution-split segments. Recording of the
+    # next file starts immediately; these threads remux the closed .ts and
+    # stitch any reconnect group that belonged to it.
+    remux_lock = threading.Lock()
+    bg_remux_state = {"active": 0, "pct": None}
+    bg_remux_threads = []     # (thread, join_timeout)
+    skip_checking_status = False  # after a split, keep status as Recording
+
+    def _join_background_remuxes():
+        still = [(t, timeout) for t, timeout in bg_remux_threads if t.is_alive()]
+        if not still:
+            bg_remux_threads.clear()
+            return
+        logger.info(f"Waiting for {len(still)} background remux(es) to finish...")
+        for t, timeout in still:
+            t.join(timeout=timeout)
+            if t.is_alive():
+                logger.warning(
+                    f"Background remux thread {t.name} still running after "
+                    f"{timeout}s — leaving it; cleanup will pick up leftovers"
+                )
+        bg_remux_threads[:] = [(t, timeout) for t, timeout in bg_remux_threads if t.is_alive()]
+
     def _finalize_pending_group():
         nonlocal group_parts, group_base_name
         if group_parts:
@@ -1692,10 +1925,26 @@ def record_worker(args):
                     logger.info("Manual check requested — re-checking disk space now")
                 continue
 
-            new_status = {"status": "Checking...", "detail": "", "size": "", "time": "", "progress": 0}
-            if new_status != last_status:
-                status_queue.put((channel_key, new_status))
-                last_status = new_status.copy()
+            if skip_checking_status:
+                # Size/resolution split: keep status as Recording so Clip Now
+                # still works during the brief live re-check, and overlay
+                # remux progress on the existing detail.
+                skip_checking_status = False
+                if last_status:
+                    new_status = last_status.copy()
+                    new_status["status"] = "Recording"
+                    new_status["detail"] = _with_remux_suffix(
+                        last_status.get("detail", ""),
+                        _snapshot_remux_state(bg_remux_state, remux_lock),
+                    )
+                    if new_status != last_status:
+                        status_queue.put((channel_key, new_status))
+                        last_status = new_status.copy()
+            else:
+                new_status = {"status": "Checking...", "detail": "", "size": "", "time": "", "progress": 0}
+                if new_status != last_status:
+                    status_queue.put((channel_key, new_status))
+                    last_status = new_status.copy()
 
             # Check if stream is live
             need_impersonate = False
@@ -1882,75 +2131,290 @@ def record_worker(args):
                 status_queue.put((channel_key, new_status))
                 last_status = new_status.copy()
 
-            # Build recording command
-            if platform == "kick":
-                # Use streamlink for Kick — it has a JS challenge solver for
-                # Cloudflare that yt-dlp lacks.  Same approach as Twitch.
-                record_cmd = build_recording_command_streamlink(url, raw_file, quality, platform, config, verbose, streamlink_debug)
-            elif platform == "fishtank":
-                # recording_url was set to the JWT-bearing HLS URL in the check block
-                record_cmd = build_recording_command_fishtank(recording_url, raw_file, config, verbose)
-            elif platform == "rumble" and rumble_hls_url:
-                record_cmd = build_recording_command_rumble_hls(
-                    rumble_hls_url, raw_file, config, verbose)
-            elif platform in ["youtube", "rumble", "custom"]:
-                if format_urls:
-                    # Split video+audio tracks (e.g. Chaturbate CMAF) — drive ffmpeg
-                    # directly to avoid yt-dlp's live-stream merge deadlock.
-                    record_cmd = build_recording_command_ffmpeg_merge(
-                        format_urls.get("video"), format_urls.get("audio"), raw_file, config, verbose,
-                        manifest_url=format_urls.get("manifest"),
-                        http_headers=format_urls.get("http_headers"),
+            def _build_record_cmd(out_file):
+                nonlocal stream_info
+                if platform == "kick":
+                    # Use streamlink for Kick — it has a JS challenge solver for
+                    # Cloudflare that yt-dlp lacks.  Same approach as Twitch.
+                    return build_recording_command_streamlink(
+                        url, out_file, quality, platform, config, verbose, streamlink_debug)
+                if platform == "fishtank":
+                    return build_recording_command_fishtank(
+                        recording_url, out_file, config, verbose)
+                if platform == "rumble" and rumble_hls_url:
+                    return build_recording_command_rumble_hls(
+                        rumble_hls_url, out_file, config, verbose)
+                if platform in ["youtube", "rumble", "custom"]:
+                    if format_urls:
+                        # Split video+audio tracks (e.g. Chaturbate CMAF) — drive
+                        # ffmpeg directly to avoid yt-dlp's live-stream merge deadlock.
+                        cmd = build_recording_command_ffmpeg_merge(
+                            format_urls.get("video"), format_urls.get("audio"),
+                            out_file, config, verbose,
+                            manifest_url=format_urls.get("manifest"),
+                            http_headers=format_urls.get("http_headers"),
+                        )
+                        _tbr = format_urls.get("tbr")
+                        _w, _h = format_urls.get("width"), format_urls.get("height")
+                        _fps = format_urls.get("fps")
+                        _parts = []
+                        if _w and _h:
+                            _parts.append(f"{_w}x{_h}")
+                        if _fps:
+                            try:
+                                _parts.append(f"{round(float(_fps))}fps")
+                            except (ValueError, TypeError):
+                                pass
+                        if _tbr:
+                            try:
+                                _parts.append(f"{_tbr / 1000:.1f}Mbps")
+                            except (ValueError, TypeError):
+                                pass
+                        if _parts:
+                            stream_info = " · ".join(_parts)
+                        return cmd
+                    return build_recording_command_ytdlp(
+                        recording_url, out_file, config, verbose,
+                        streamlink_debug, cookies_file,
+                        impersonate=need_impersonate)
+                return build_recording_command_streamlink(
+                    url, out_file, quality, platform, config, verbose, streamlink_debug)
+
+            def _spawn_capture(out_file):
+                record_cmd = _build_record_cmd(out_file)
+                logger.info(f"Starting recording: {redact_cmd_for_log(record_cmd)}")
+                return subprocess.Popen(
+                    record_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                )
+
+            def _refresh_fishtank_url():
+                nonlocal recording_url, stream_info
+                if platform != "fishtank" or fishtank_auth is None:
+                    return
+                stream_id = fishtank_auth.resolve_stream_id(username)
+                hls_url, jwt = fishtank_auth.build_stream_url(stream_id)
+                if hls_url:
+                    recording_url, stream_info = resolve_best_fishtank_variant(
+                        hls_url, jwt, logger, timeout=stream_check_timeout
                     )
-                    # Build stream_info from the format data we already have.
-                    # best_v holds the winning video format dict stored in format_urls.
-                    _tbr  = format_urls.get("tbr")
-                    _w, _h = format_urls.get("width"), format_urls.get("height")
-                    _fps  = format_urls.get("fps")
-                    _parts = []
-                    if _w and _h:
-                        _parts.append(f"{_w}x{_h}")
-                    if _fps:
+
+            def _spawn_background_remux(closed_raw, closed_base, closed_size,
+                                        closed_wall, closed_elapsed, closed_title):
+                nonlocal group_parts, group_base_name, last_status
+                nonlocal consecutive_small_remux_fails, _small_remux_backoff
+                nonlocal _crash_backoff, _consecutive_micro_frags, _micro_frag_backoff
+                mp4_out = os.path.join(processed_path, f"{closed_base}.mp4")
+                scaled_timeout = max(
+                    ffmpeg_timeout, int(closed_size / (1024 ** 3) * 60) + 120
+                )
+                logger.info(
+                    f"Remuxing {os.path.basename(closed_raw)} in the background "
+                    "— recording continues"
+                )
+                if scaled_timeout > ffmpeg_timeout:
+                    logger.info(
+                        f"Large file ({human_size(closed_size)}) — remux timeout "
+                        f"scaled to {scaled_timeout}s"
+                    )
+                closing_parts = group_parts
+                closing_name = group_base_name
+                group_parts = []
+                group_base_name = None
+
+                with remux_lock:
+                    bg_remux_state["active"] += 1
+                    bg_remux_state["pct"] = None
+
+                def _on_remux_progress(pct):
+                    with remux_lock:
+                        bg_remux_state["pct"] = pct
+
+                def _bg_remux(
+                    raw_file=closed_raw,
+                    mp4_file=mp4_out,
+                    timeout=scaled_timeout,
+                    start_wall=closed_wall,
+                    elapsed=closed_elapsed,
+                    stream_title=closed_title,
+                    closing_parts=closing_parts,
+                    closing_name=closing_name,
+                ):
+                    try:
+                        time.sleep(2)
+                        success, mp4_size, error = process_finished_raw(
+                            raw_file, mp4_file, pending_dir, ffmpeg_path, logger,
+                            timeout, username, platform, start_wall, elapsed,
+                            stream_title, progress_cb=_on_remux_progress,
+                        )
+                        if success:
+                            closing_parts.append({
+                                'mp4': mp4_file,
+                                'meta': mp4_file.rsplit('.', 1)[0] + '.meta.json',
+                                'start_wall': start_wall,
+                                'elapsed': elapsed,
+                                'title': stream_title,
+                            })
+                            finalize_recording_group(
+                                closing_parts, closing_name, processed_path,
+                                pending_dir, ffmpeg_path, ffmpeg_timeout,
+                                username, platform, logger,
+                            )
+                        else:
+                            logger.error(f"Background remux failed: {error}")
+                            if error == "output too small":
+                                if os.path.exists(mp4_file):
+                                    try:
+                                        os.remove(mp4_file)
+                                    except Exception:
+                                        pass
+                                try:
+                                    shutil.move(
+                                        raw_file,
+                                        os.path.join(pending_dir, os.path.basename(raw_file)),
+                                    )
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        logger.error(f"Background remux crashed: {e}", exc_info=True)
+                    finally:
+                        with remux_lock:
+                            bg_remux_state["active"] = max(0, bg_remux_state["active"] - 1)
+                            if bg_remux_state["active"] == 0:
+                                bg_remux_state["pct"] = None
+
+                t = threading.Thread(
+                    target=_bg_remux, name=f"remux-{channel_key}", daemon=False,
+                )
+                t.start()
+                bg_remux_threads.append((t, scaled_timeout + 60))
+
+                consecutive_small_remux_fails = 0
+                _small_remux_backoff = SMALL_REMUX_BACKOFF_BASE
+                _crash_backoff = CRASH_BACKOFF_BASE
+                _consecutive_micro_frags = 0
+                _micro_frag_backoff = MICRO_FRAG_BACKOFF_BASE
+
+                new_status = {
+                    "status": "Recording",
+                    "detail": _with_remux_suffix(
+                        stream_info or (last_status or {}).get("detail", "") or "starting",
+                        _snapshot_remux_state(bg_remux_state, remux_lock),
+                    ),
+                    "size": (last_status or {}).get("size", ""),
+                    "size_bytes": (last_status or {}).get("size_bytes", 0),
+                    "time": (last_status or {}).get("time", ""),
+                    "progress": (last_status or {}).get("progress", 50),
+                }
+                status_queue.put((channel_key, new_status))
+                last_status = new_status.copy()
+
+            proc = _spawn_capture(raw_file)
+
+            # Size splits start the next capture *before* this process is
+            # killed (on_size_limit), then we remux the closed file and
+            # monitor the already-running next process — no live-check gap.
+            while True:
+                overlap_handoff = {}
+
+                def _on_size_limit():
+                    _refresh_fishtank_url()
+                    next_base = build_filename(
+                        filename_pattern, username, platform, stream_title
+                    )
+                    next_raw = os.path.join(recorded_path, f"{next_base}.ts")
+                    next_wall = datetime.datetime.now()
+                    next_t0 = time.monotonic()
+                    logger.info(
+                        "Overlap split: starting next segment while the "
+                        "current file keeps recording"
+                    )
+                    try:
+                        next_proc = _spawn_capture(next_raw)
+                    except Exception as e:
+                        logger.error(f"Overlap split: failed to spawn next capture: {e}")
+                        return False
+                    wait_s = max(15, min(file_creation_timeout, 45))
+                    if wait_until_file_has_data(
+                        next_raw, stop_event, min_bytes=65536, timeout=wait_s
+                    ):
+                        overlap_handoff.update(
+                            proc=next_proc,
+                            raw_file=next_raw,
+                            base_name=next_base,
+                            start_wall=next_wall,
+                            start_time=next_t0,
+                        )
+                        return True
+                    logger.warning(
+                        f"Overlap split: {os.path.basename(next_raw)} did not "
+                        f"reach 64 KiB within {wait_s}s"
+                    )
+                    if next_proc.poll() is None:
+                        kill_process_tree(next_proc.pid, logger)
                         try:
-                            _parts.append(f"{round(float(_fps))}fps")
-                        except (ValueError, TypeError):
+                            next_proc.wait(timeout=10)
+                        except Exception:
                             pass
-                    if _tbr:
+                    try:
+                        if os.path.exists(next_raw) and os.path.getsize(next_raw) == 0:
+                            os.remove(next_raw)
+                    except Exception:
+                        pass
+                    return False
+
+                last_status, split_requested = monitor_recording_process(
+                    proc, raw_file, start_time, max_record_hours,
+                    platform, logger, status_queue, channel_key,
+                    stop_event, last_status, file_creation_timeout,
+                    verbose=verbose,
+                    max_file_size_gb=max_file_size_gb,
+                    stream_info=stream_info,
+                    ffmpeg_path=config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg') or 'ffmpeg',
+                    watch_resolution_changes=parser_getboolean(
+                        config, 'Recording', 'split_on_resolution_change', True),
+                    bg_remux_state=bg_remux_state,
+                    remux_lock=remux_lock,
+                    on_size_limit=_on_size_limit,
+                )
+
+                next_cap = overlap_handoff.get("proc")
+                if split_requested and next_cap is not None:
+                    if stop_event.is_set():
+                        # Stop during overlap: don't keep the new capture.
+                        if next_cap.poll() is None:
+                            kill_process_tree(next_cap.pid, logger)
+                            try:
+                                next_cap.wait(timeout=10)
+                            except Exception:
+                                pass
+                    else:
+                        elapsed = time.monotonic() - start_time
                         try:
-                            _parts.append(f"{_tbr/1000:.1f}Mbps")
-                        except (ValueError, TypeError):
-                            pass
-                    if _parts:
-                        stream_info = " · ".join(_parts)
-                else:
-                    record_cmd = build_recording_command_ytdlp(recording_url, raw_file, config, verbose,
-                                                               streamlink_debug, cookies_file,
-                                                               impersonate=need_impersonate)
-            else:
-                record_cmd = build_recording_command_streamlink(url, raw_file, quality, platform, config, verbose, streamlink_debug)
+                            closed_size = (
+                                os.path.getsize(raw_file) if os.path.exists(raw_file) else 0
+                            )
+                        except OSError:
+                            closed_size = 0
+                        logger.info(
+                            f"Recording finished — file size: {human_size(closed_size)}"
+                        )
+                        _spawn_background_remux(
+                            raw_file, base_name, closed_size,
+                            start_wall, elapsed, stream_title,
+                        )
+                        proc = next_cap
+                        raw_file = overlap_handoff["raw_file"]
+                        base_name = overlap_handoff["base_name"]
+                        group_base_name = base_name
+                        start_wall = overlap_handoff["start_wall"]
+                        start_time = overlap_handoff["start_time"]
+                        continue
 
-            logger.info(f"Starting recording: {redact_cmd_for_log(record_cmd)}")
-
-            proc = subprocess.Popen(
-                record_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-            )
-
-            # Monitor
-            last_status, split_requested = monitor_recording_process(
-                proc, raw_file, start_time, max_record_hours,
-                platform, logger, status_queue, channel_key,
-                stop_event, last_status, file_creation_timeout,
-                verbose=verbose,
-                max_file_size_gb=max_file_size_gb,
-                stream_info=stream_info,
-                ffmpeg_path=config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg') or 'ffmpeg',
-                watch_resolution_changes=parser_getboolean(
-                    config, 'Recording', 'split_on_resolution_change', True),
-            )
+                break
 
             # Clean up process tree
             if proc.poll() is None:
@@ -2014,7 +2478,10 @@ def record_worker(args):
                     _consecutive_micro_frags = 0
                     _micro_frag_backoff = MICRO_FRAG_BACKOFF_BASE
 
-            time.sleep(2)  # let file handles be released
+            # Size-split remux waits in its own thread; don't delay starting
+            # the next capture while the closed file's handles drain.
+            if not split_requested:
+                time.sleep(2)  # let file handles be released
 
             # ── Alternate streamlink command for Kick ──
             # Kick already records with streamlink. If that first command
@@ -2051,6 +2518,8 @@ def record_worker(args):
                         tool_name_override="streamlink", verbose=verbose,
                         max_file_size_gb=max_file_size_gb,
                         ffmpeg_path=config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg'),
+                        bg_remux_state=bg_remux_state,
+                        remux_lock=remux_lock,
                     )
 
                     if proc.poll() is None:
@@ -2105,34 +2574,47 @@ def record_worker(args):
             # Remux to MP4 (or skip if yt-dlp already produced an MP4)
             mp4_file = os.path.join(processed_path, f"{base_name}.mp4")
             already_mp4 = raw_file.endswith(".mp4")
+            file_size_gb = file_size / (1024 ** 3)
+            scaled_timeout = max(ffmpeg_timeout, int(file_size_gb * 60) + 120)
 
+            # Resolution-change split, or a size split whose overlap handoff
+            # failed: remux in the background and restart via the live check
+            # (short gap). Successful size overlaps never reach here.
+            if split_requested and not stop_event.is_set():
+                _spawn_background_remux(
+                    raw_file, base_name, file_size,
+                    start_wall, elapsed, stream_title,
+                )
+                skip_checking_status = True
+                continue
+
+            # Stream ended or user stopped — remux on this worker before looping
             if already_mp4:
-                # yt-dlp merged bestvideo+bestaudio directly into an MP4 — no remux needed.
-                # Move it straight to processed and synthesize the success values.
-                logger.info("Raw file is already MP4 — skipping remux, moving directly to processed")
-                new_status = {"status": "Processing...", "detail": human_size(file_size), "size": "", "time": "", "progress": 0}
-                if new_status != last_status:
-                    status_queue.put((channel_key, new_status))
-                    last_status = new_status.copy()
-                try:
-                    shutil.move(raw_file, mp4_file)
-                    mp4_size = os.path.getsize(mp4_file)
-                    success, error = True, None
-                    logger.info(f"Moved to processed: {os.path.basename(mp4_file)} ({human_size(mp4_size)})")
-                except Exception as _mv_err:
-                    logger.error(f"Failed to move MP4 to processed: {_mv_err}")
-                    success, mp4_size, error = False, 0, str(_mv_err)
+                new_status = {
+                    "status": "Processing...",
+                    "detail": human_size(file_size),
+                    "size": "", "time": "", "progress": 0,
+                }
             else:
-                new_status = {"status": "Remuxing...", "detail": human_size(file_size), "size": "", "time": "", "progress": 0}
-                if new_status != last_status:
-                    status_queue.put((channel_key, new_status))
-                    last_status = new_status.copy()
-                # Scale timeout based on file size: base timeout or 1 minute per GB, whichever is larger
-                file_size_gb = file_size / (1024**3)
-                scaled_timeout = max(ffmpeg_timeout, int(file_size_gb * 60) + 120)
+                new_status = {
+                    "status": "Remuxing...",
+                    "detail": human_size(file_size),
+                    "size": "", "time": "", "progress": 0,
+                }
                 if scaled_timeout > ffmpeg_timeout:
-                    logger.info(f"Large file ({human_size(file_size)}) — remux timeout scaled to {scaled_timeout}s")
-                success, mp4_size, error = remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, scaled_timeout)
+                    logger.info(
+                        f"Large file ({human_size(file_size)}) — remux timeout "
+                        f"scaled to {scaled_timeout}s"
+                    )
+            if new_status != last_status:
+                status_queue.put((channel_key, new_status))
+                last_status = new_status.copy()
+
+            success, mp4_size, error = process_finished_raw(
+                raw_file, mp4_file, pending_dir, ffmpeg_path, logger,
+                scaled_timeout, username, platform, start_wall, elapsed,
+                stream_title,
+            )
 
             if success:
                 # Successful remux — reset bad-stream counters and crash backoff
@@ -2141,75 +2623,6 @@ def record_worker(args):
                 _crash_backoff = CRASH_BACKOFF_BASE
                 _consecutive_micro_frags = 0
                 _micro_frag_backoff = MICRO_FRAG_BACKOFF_BASE
-
-                # Save metadata sidecar
-                save_metadata(
-                    mp4_file, username, platform,
-                    start_wall.isoformat(),
-                    elapsed,
-                    stream_title,
-                )
-
-                # ── Audio stream sanity check ───────────────────────────────
-                # Fishtank's cameraman stream sometimes delivers video-only HLS
-                # segments (no audio track at all), producing silent MP4s that
-                # are useless for fan clips.  Detect this early so it shows up
-                # clearly in the log rather than being discovered later.
-                try:
-                    probe_cmd = [
-                        ffprobe_from_ffmpeg(ffmpeg_path),
-                        "-v", "quiet",
-                        "-print_format", "json",
-                        "-show_streams",
-                        "-select_streams", "a",
-                        mp4_file,
-                    ]
-                    probe_result = subprocess.run(
-                        probe_cmd, capture_output=True, text=True, timeout=30
-                    )
-                    if probe_result.returncode == 0:
-                        probe_data = json.loads(probe_result.stdout or "{}")
-                        audio_streams = probe_data.get("streams", [])
-                        if not audio_streams:
-                            logger.warning(
-                                f"⚠ NO AUDIO TRACK in {os.path.basename(mp4_file)} — "
-                                f"stream delivered video-only segments (silent recording)"
-                            )
-                        else:
-                            codec = audio_streams[0].get("codec_name", "?")
-                            channels = audio_streams[0].get("channels", "?")
-                            if platform == "fishtank":
-                                logger.info(
-                                    f"Audio OK: {codec}, {channels}ch"
-                                )
-                except Exception as _probe_err:
-                    logger.debug(f"Audio check skipped: {_probe_err}")
-
-                # Move raw file to pending deletion.
-                # Kick/streamlink sometimes holds a file handle open for several
-                # seconds after the process exits.  Retry generously (up to ~60 s)
-                # so the file doesn't get stranded in Recorded until next startup.
-                # Skip if already_mp4 — the file was already moved to processed above.
-                if not already_mp4:
-                    pending_path = os.path.join(pending_dir, os.path.basename(raw_file))
-                    max_retries = 6
-                    _move_wait = [5, 10, 10, 15, 15, 15]  # seconds between attempts
-                    for attempt in range(max_retries):
-                        try:
-                            shutil.move(raw_file, pending_path)
-                            logger.info(f"Moved raw to: {pending_path}")
-                            break
-                        except PermissionError as e:
-                            if attempt < max_retries - 1:
-                                wait = _move_wait[attempt]
-                                logger.warning(f"File locked, retrying in {wait}s… (attempt {attempt + 1}/{max_retries})")
-                                time.sleep(wait)
-                            else:
-                                logger.error(f"Move failed after {max_retries} attempts: {e}")
-                                logger.info(f"File will be cleaned up on next run: {raw_file}")
-                        except Exception as e:
-                            logger.error(f"Move failed: {e}")
-                            break
 
                 # Track this segment as part of the current continuity group so
                 # it can be stitched together with any sibling reconnect
@@ -2295,9 +2708,9 @@ def record_worker(args):
             time.sleep(_crash_backoff)
             _crash_backoff = min(_crash_backoff * 2, CRASH_BACKOFF_MAX)
 
-    # Stitch together any reconnect segments still pending when the worker
-    # stops (manual stop, app shutdown, or KeyboardInterrupt) so nothing is
-    # left behind as unmerged clips.
+    # Finish any size-split remux still running, then stitch reconnect
+    # segments from the current session.
+    _join_background_remuxes()
     _finalize_pending_group()
 
     logger.info("Worker STOPPED")

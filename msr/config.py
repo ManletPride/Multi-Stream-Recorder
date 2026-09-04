@@ -87,7 +87,9 @@ class Config:
         'Recording': {
             'quality': 'best',
             'max_record_hours': '12.0',
-            'max_file_size_gb': '8.0',   # split recording when file exceeds this size (0 = disabled)
+            'max_file_size_gb': '8.0',   # split when file exceeds this size (0 = off); next capture
+                                         # starts first (overlap), then the closed file remuxes in
+                                         # the background. Resolution-change splits still stop first.
             'split_on_resolution_change': 'true',  # end + start a fresh segment if the live video's
                                                     # resolution changes mid-stream (e.g. TikTok multi-
                                                     # guest battles), instead of muxing two resolutions

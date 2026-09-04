@@ -7,5 +7,5 @@ Windows ``spawn`` does not re-execute the GUI.
 Conventions and clip/GUI gotchas for future sessions: see ``AGENTS.md``.
 """
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 

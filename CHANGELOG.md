@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v2.0.1
+
+User-facing summary: [RELEASE_NOTES_v2.0.1.md](RELEASE_NOTES_v2.0.1.md).
+
+- Size splits are **make-before-break**: when a file hits `max_file_size_gb`, the next capture starts while the current one is still writing. The old file is closed only after the new `.ts` has data, so the seam overlaps instead of dropping live seconds. Remux of the closed file still runs in a background thread; status stays Recording with a `remuxing N%` suffix (row uses the remux color). Clip Now / Screenshot keep working. If the next file does not appear in time, it falls back to a short gap. Resolution-change splits still stop the old file first (mixed resolutions in one file corrupt playback). Stream-end remux is still on the worker. Previously an 8 GB Kick split paused capture for ~90s of remux (kimmee 2026-09-03: 21:11:51–21:13:32).
 - TikTok: when yt-dlp reports offline, confirm via `/api-live/user/room`, `roomId` on the profile **and** `/live` page, then both Webcast hosts. Misses log at info (24/7 news LIVEs such as `@aljazeeraenglish` often omit `roomId` on the profile, so the old fallback stayed silent).
 
 ## v2.0.0

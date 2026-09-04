@@ -2,7 +2,7 @@
 
 Read this before changing code. The project is **not** a single-file script anymore. Several clip and GUI bugs were already fixed; reintroducing the old approaches will regress them.
 
-**Ship status (2026-09-02):** local tree is **v2.0.0 unreleased** (was tracked as 1.8.1 while the package split landed). `origin/main` is still the v1.8.0 single-file app. Do **not** push until the user asks. More features are planned before GitHub.
+**Ship status (2026-09-04):** local tree is **v2.0.1**. `origin/main` has v2.0.0. Size-split overlap + background remux are in this tag. Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 
 Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 
@@ -19,7 +19,7 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 | `msr/config.py` | `Config` / `config.ini` defaults (`default_streams_dir()`, coerce invalid numbers) |
 | `msr/deps.py` | `HAS_*` flags, tool versions, optional `psutil` / tray / plyer imports |
 | `msr/iometer.py` | Status-header disk write / NIC download rates (`IoSampler`) |
-| `msr/__init__.py` | `__version__` (currently `2.0.0`) |
+| `msr/__init__.py` | `__version__` (currently `2.0.1`) |
 | `SECURITY.md` | Vulnerability reporting; what is stored on disk |
 | `.github/workflows/tests.yml` | unittest on Windows + Ubuntu, Python 3.10 and 3.12 |
 | `tests/` | unittest (`python -m unittest discover -s tests -t .`) |
@@ -56,6 +56,7 @@ Related UI:
 - Clip/screenshot **filenames** use `channel_file_stem(username_dir)` (last folder only). Do not interpolate a nested `username_dir` (`chaturbate\\mode_bad`) into the filename — Windows treats the `\\` as another directory.
 - Status rows store the real channel key in a hidden `_key` column — never map selection by display name (`kick foo` vs `twitch:foo`).
 - One clip ffmpeg at a time per channel; ignore repeat clicks until it finishes.
+- **Size-split is make-before-break.** Hitting `max_file_size_gb` starts the next capture *while the current process is still writing*. Monitor calls `on_size_limit`, which spawns the next file and waits until it has ≥64 KiB, then the old process is killed. The two files overlap by a few seconds — no hole. Remux of the closed file is a worker thread; status stays `Recording` with `remuxing N%`. Do not kill-then-restart on size limit (kimmee lost ~90s of remux, then still a live-check gap). If the next file never appears, fall back to kill + restart (short gap). **Resolution-change splits still kill first** so one file does not mix two frame sizes. Stream-end remux stays synchronous. `find_active_recording_file` is newest `.ts` by mtime. `channel_status_allows_clip` is Recording or Remuxing. `wait_until_file_has_data` is the overlap wait.
 - Roster right-click also has **Open Clips Folder** (uses the left-list selection, not the status row).
 - **Open in Browser** uses `channel_watch_url()` in `msr/util.py` — rumble/tiktok/fishtank are not Kick. YouTube `@handle` must not become `@@handle`.
 

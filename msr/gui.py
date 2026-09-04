@@ -28,8 +28,8 @@ from msr.iometer import (
     IoSampler, format_header, format_tooltip, meter_severity, sum_stream_mbps,
 )
 from msr.worker import (
-    create_clip, create_screenshot, find_active_recording_file,
-    screenshot_extension,
+    channel_status_allows_clip, create_clip, create_screenshot,
+    find_active_recording_file, screenshot_extension,
 )
 
 # ────────────────────────────────────────────────
@@ -1350,7 +1350,7 @@ def main_gui(config):
             logging.info("Clip Now: recording is not running")
             return
         st = recorder.status_dict.get(ch_name, {})
-        if st.get("status", "").lower() != "recording":
+        if not channel_status_allows_clip(st.get("status", "")):
             logging.info(f"Clip Now: {_get_display_name(ch_name)} is not currently recording")
             return
         clip_seconds = config.getint('Clipping', 'clip_length_seconds', fallback=30)
@@ -1368,7 +1368,7 @@ def main_gui(config):
             logging.info("Screenshot Now: recording is not running")
             return
         st = recorder.status_dict.get(ch_name, {})
-        if st.get("status", "").lower() != "recording":
+        if not channel_status_allows_clip(st.get("status", "")):
             logging.info(f"Screenshot Now: {_get_display_name(ch_name)} is not currently recording")
             return
         _start_media_job(
@@ -1499,7 +1499,7 @@ def main_gui(config):
                 status_ctx_menu.add_command(label="Stop Channel", command=_stop_selected_channel)
                 if status_lower.startswith(("offline", "error")):
                     status_ctx_menu.add_command(label="Check Now", command=_check_now_selected_channel)
-                if status_lower == "recording":
+                if channel_status_allows_clip(status_lower):
                     clip_seconds = config.getint('Clipping', 'clip_length_seconds', fallback=30)
                     status_ctx_menu.add_command(
                         label=f"Clip Now ({clip_seconds}s)", command=_clip_selected_channel)
@@ -1840,6 +1840,10 @@ def main_gui(config):
 
                 if "recording" in curr:
                     tag = "recording"
+                    # Size-split remux of the previous file: keep status as
+                    # Recording (clips still work) but color the row as remuxing.
+                    if "remuxing" in (st.get("detail") or "").lower():
+                        tag = "remuxing"
                     # A new recording may complete later — allow one complete toast again.
                     _notified_complete.discard(ch_name)
                     if notifications_enabled and ch_name not in _notified_live and "starting" not in st.get("detail", ""):
