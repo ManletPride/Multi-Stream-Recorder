@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v2.0.2
+
+User-facing summary: [RELEASE_NOTES_v2.0.2.md](RELEASE_NOTES_v2.0.2.md).
+
 - Fishtank As Seen On mini-season (catalog 2026-09-07): stream ids are slugs (`director-as-seen-on`) rather than `name-5`. Raw hyphenated catalog ids are accepted; `fishtank:director` records the current Director cam (S5 `dirc-5` still works as a raw id). `channels_fishtank.json` is the new house roster. Grid mosaic (`grid-as-seen-on`) is treated as live when it appears only in `liveStreamStatus`.
 
 ## v2.0.1

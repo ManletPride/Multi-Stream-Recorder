@@ -2,7 +2,7 @@
 
 Read this before changing code. The project is **not** a single-file script anymore. Several clip and GUI bugs were already fixed; reintroducing the old approaches will regress them.
 
-**Ship status (2026-09-04):** local tree is **v2.0.1**. `origin/main` has v2.0.0. Size-split overlap + background remux are in this tag. Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
+**Ship status (2026-09-07):** local tree is **v2.0.2**. `origin/main` has this tag. As Seen On Fishtank aliases + slug catalog ids are in this tag. Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 
 Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 
@@ -19,7 +19,7 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 | `msr/config.py` | `Config` / `config.ini` defaults (`default_streams_dir()`, coerce invalid numbers) |
 | `msr/deps.py` | `HAS_*` flags, tool versions, optional `psutil` / tray / plyer imports |
 | `msr/iometer.py` | Status-header disk write / NIC download rates (`IoSampler`) |
-| `msr/__init__.py` | `__version__` (currently `2.0.1`) |
+| `msr/__init__.py` | `__version__` (currently `2.0.2`) |
 | `SECURITY.md` | Vulnerability reporting; what is stored on disk |
 | `.github/workflows/tests.yml` | unittest on Windows + Ubuntu, Python 3.10 and 3.12 |
 | `tests/` | unittest (`python -m unittest discover -s tests -t .`) |

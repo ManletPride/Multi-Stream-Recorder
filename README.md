@@ -2,7 +2,7 @@
 
 A desktop application for simultaneously recording live streams from **Kick**, **Twitch**, **YouTube**, **Rumble**, **TikTok**, **Fishtank.live**, and any site supported by yt-dlp. Set it up, press record, and walk away — it monitors channels, auto-records when they go live, and produces clean MP4 files.
 
-This is **v2.0.1**. Upgrading from the v1.8.0 single-file app: copy `Multi-Stream-Recorder.py` **and** the `msr\` folder, then fully quit and relaunch. Details: [RELEASE_NOTES_v2.0.0.md](RELEASE_NOTES_v2.0.0.md). Size-split overlap: [RELEASE_NOTES_v2.0.1.md](RELEASE_NOTES_v2.0.1.md).
+This is **v2.0.2**. Upgrading from the v1.8.0 single-file app: copy `Multi-Stream-Recorder.py` **and** the `msr\` folder, then fully quit and relaunch. Details: [RELEASE_NOTES_v2.0.0.md](RELEASE_NOTES_v2.0.0.md). Size-split overlap: [RELEASE_NOTES_v2.0.1.md](RELEASE_NOTES_v2.0.1.md). Fishtank As Seen On cameras: [RELEASE_NOTES_v2.0.2.md](RELEASE_NOTES_v2.0.2.md).
 
 ![Dark Mode Screenshot](screenshots/dark-mode.png)
 
