@@ -351,25 +351,47 @@ Select **fishtank** from the platform dropdown and enter either a friendly alias
 
 ```
 fishtank:director
-fishtank:kitchen
+fishtank:mirror
+fishtank:director-as-seen-on
 fishtank:dirc-5
-fishtank:bar-5
 ```
 
-New-season and off-season cameras that are not in the alias table are still valid if you paste the catalog id (`something-6`, `ben-5`, `computer-lab2-5`, …).
+New-season and off-season cameras that are not in the alias table are still valid if you paste the catalog id (`director-as-seen-on`, `ben-5`, `computer-lab2-5`, …). Numeric seasons look like `name-5`; slug seasons look like `name-as-seen-on`.
 
 ### Finding stream IDs
 
-The site loads cameras from `GET https://api.fishtank.live/v1/live-streams` (needs to be logged in in the browser). Each entry in `liveStreams` has:
+The site loads cameras from `GET https://api.fishtank.live/v1/live-streams` (the camera list itself does not need a login; HLS still does). Each entry in `liveStreams` has:
 
 | Field | Meaning |
 | --- | --- |
-| `id` | Stream id to paste into MSR (`dirc-5`, `bar-5`, …) |
-| `name` | Display name this season (Director Mode, Bar, Bedroom 3, …) |
+| `id` | Stream id to paste into MSR (`director-as-seen-on`, `dirc-5`, …) |
+| `name` | Display name this season (Director, Mirror, Bar, …) |
 | `access` | `public`, `normal`, or `season_pass` |
-| `season` | Season number in the id suffix |
+| `season` | Season number (`5`) or slug (`as-seen-on`) used in the id |
 
-Off-season, `liveStreamStatus` and `loadBalancer` are often empty (nothing is live) while `liveStreams` still lists every id. That list is what to copy from — not the page source.
+`liveStreamStatus` and `loadBalancer` can list extra ids that are not in `liveStreams` (the grid mosaic is one). Copy ids from those maps too — not from the page source (Next.js CSR).
+
+### As Seen On aliases (current, 2026-09)
+
+Mini-season catalog confirmed 2026-09-07. `fishtank:director` now records `director-as-seen-on` (Season 5 `dirc-5` still works if you paste that id). Mirror is `dressing-room-as-seen-on`. FX and Vault need a season pass.
+
+| Camera name | Room | Stream id | Access |
+|---|---|---|---|
+| `director` | Director | `director-as-seen-on` | Normal |
+| `fx` | FX | `fx-as-seen-on` | Season Pass |
+| `firstfloor` | First Floor | `first-floor-as-seen-on` | Public |
+| `firstflooralt`, `firstalt` | First Floor Alt | `first-floor-alt-as-seen-on` | Public |
+| `counter` | Counter | `counter-as-seen-on` | Public |
+| `mirror`, `dressingroom` | Mirror | `dressing-room-as-seen-on` | Public |
+| `breakroom` | Break Room | `break-room-as-seen-on` | Public |
+| `secondfloor` | Second Floor | `second-floor-as-seen-on` | Public |
+| `basement` | Basement | `basement-as-seen-on` | Public |
+| `vault` | Vault | `vault-as-seen-on` | Season Pass |
+| `inventory` | Inventory | `inventory-as-seen-on` | Public |
+| `secondfloorptz`, `secondptz` | Second Floor PTZ | `second-floor-ptz-as-seen-on` | Normal |
+| `grid` | Grid mosaic | `grid-as-seen-on` | (status only) |
+
+`channels_fishtank.json` is this roster. Rename it to `channels.json` only if you want that house and nothing else.
 
 ### Stable endpoints
 
@@ -383,11 +405,11 @@ The stream host (`streams-c`, `streams-f`, …) is discovered from the API, not 
 
 ### Season 5 aliases (snapshot)
 
-Friendly names MSR still recognises from the Season 5 house. Several of these **already do not match the off-season catalog** (Bar is `bar-5` not `brrr-5`; Arena/Goo Factory/Jungle/Computer Lab were renamed to bedrooms; contestant cams `ben-5` / `jet-5` appeared). Old aliases are kept so existing rosters keep resolving. Prefer a raw id once Season 6 ships.
+Friendly names MSR still recognises from the Season 5 house. `director` now points at the As Seen On cam; use `dirc` or `dirc-5` for the old Director Mode id. Other S5 names still resolve to their old ids.
 
 | Camera name | Room (Season 5) | Access (Season 5) |
 |---|---|---|
-| `director` | Director Mode | Free |
+| `dirc` | Director Mode (`dirc-5`) | Free |
 | `dorm` | Dorm | Normal |
 | `dormalt`, `dorm2`, `dmrm2` | Dorm Alternate | Normal |
 | `closet` | Closet | Normal |
@@ -415,7 +437,7 @@ Friendly names MSR still recognises from the Season 5 house. Several of these **
 
 Short aliases also work — `cam` for Cameraman, `dirc` for Director, `dmrm` for Dorm. Season 5 renames (`balcony` → `eastwing`, `hallwayup` → `westwing`, `jacuzzi` → `laundry`) still resolve.
 
-`channels_fishtank.json` is the same Season 5 snapshot. Rename it to `channels.json` only if you want that house roster; it will not track Season 6 by itself.
+`channels_fishtank.json` is the As Seen On roster above, not Season 5. Season 5 friendly names other than `director` still resolve to their old ids.
 
 ### How It Works
 

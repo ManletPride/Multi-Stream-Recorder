@@ -1,102 +1,54 @@
 [
   {
-    "name": "fishtank:director",
+    "name": "fishtank:director-as-seen-on",
     "enabled": true
   },
   {
-    "name": "fishtank:dorm",
-    "enabled": false
+    "name": "fishtank:fx-as-seen-on",
+    "enabled": true
   },
   {
-    "name": "fishtank:dormalt",
-    "enabled": false
+    "name": "fishtank:first-floor-as-seen-on",
+    "enabled": true
   },
   {
-    "name": "fishtank:closet",
-    "enabled": false
+    "name": "fishtank:first-floor-alt-as-seen-on",
+    "enabled": true
   },
   {
-    "name": "fishtank:bar",
-    "enabled": false
+    "name": "fishtank:counter-as-seen-on",
+    "enabled": true
   },
   {
-    "name": "fishtank:barptz",
-    "enabled": false
+    "name": "fishtank:dressing-room-as-seen-on",
+    "enabled": true
   },
   {
-    "name": "fishtank:baralt",
-    "enabled": false
+    "name": "fishtank:break-room-as-seen-on",
+    "enabled": true
   },
   {
-    "name": "fishtank:kitchen",
-    "enabled": false
+    "name": "fishtank:second-floor-as-seen-on",
+    "enabled": true
   },
   {
-    "name": "fishtank:cameraman",
-    "enabled": false
+    "name": "fishtank:basement-as-seen-on",
+    "enabled": true
   },
   {
-    "name": "fishtank:hallway",
-    "enabled": false
+    "name": "fishtank:vault-as-seen-on",
+    "enabled": true
   },
   {
-    "name": "fishtank:laundryroom",
-    "enabled": false
+    "name": "fishtank:inventory-as-seen-on",
+    "enabled": true
   },
   {
-    "name": "fishtank:dining",
-    "enabled": false
+    "name": "fishtank:second-floor-ptz-as-seen-on",
+    "enabled": true
   },
   {
-    "name": "fishtank:market",
-    "enabled": false
-  },
-  {
-    "name": "fishtank:marketalt",
-    "enabled": false
-  },
-  {
-    "name": "fishtank:foyer",
-    "enabled": false
-  },
-  {
-    "name": "fishtank:glassroom",
-    "enabled": false
-  },
-  {
-    "name": "fishtank:computerlab",
-    "enabled": false
-  },
-  {
-    "name": "fishtank:arena",
-    "enabled": false
-  },
-  {
-    "name": "fishtank:confessional",
-    "enabled": false
-  },
-  {
-    "name": "fishtank:corridor",
-    "enabled": false
-  },
-  {
-    "name": "fishtank:eastwing",
-    "enabled": false
-  },
-  {
-    "name": "fishtank:westwing",
-    "enabled": false
-  },
-  {
-    "name": "fishtank:jungleroom",
-    "enabled": false
-  },
-  {
-    "name": "fishtank:jobboard",
-    "enabled": false
-  },
-  {
-    "name": "fishtank:goofactory",
+    "name": "fishtank:grid-as-seen-on",
     "enabled": false
   }
 ]

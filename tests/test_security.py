@@ -122,6 +122,8 @@ class ValidateChannelNameTests(unittest.TestCase):
         self.assertTrue(ok, msg)
         ok, msg = validate_channel_name("computer-lab2-5", "fishtank", [])
         self.assertTrue(ok, msg)
+        ok, msg = validate_channel_name("director-as-seen-on", "fishtank", [])
+        self.assertTrue(ok, msg)
 
     def test_fishtank_garbage_rejected(self):
         ok, msg = validate_channel_name("notacamera", "fishtank", [])

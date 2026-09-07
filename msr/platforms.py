@@ -785,7 +785,30 @@ class FishtankAuth:
     # is_fishtank_stream_id). Do not scrape fishtank.live HTML — the grid
     # is client-rendered; the catalog is GET /v1/live-streams.
     CAMERA_ALIASES = {
-        "director":   "dirc-5",
+        # As Seen On mini-season (catalog 2026-09-07). Friendly names that
+        # collided with Season 5 (director) point at the current house;
+        # old short codes (dirc, dmrm, …) still resolve to S5 ids.
+        "director":        "director-as-seen-on",
+        "fx":              "fx-as-seen-on",
+        "firstfloor":      "first-floor-as-seen-on",
+        "firstflooralt":   "first-floor-alt-as-seen-on",
+        "firstflooralternate": "first-floor-alt-as-seen-on",
+        "firstalt":        "first-floor-alt-as-seen-on",
+        "counter":         "counter-as-seen-on",
+        "mirror":          "dressing-room-as-seen-on",
+        "dressingroom":    "dressing-room-as-seen-on",
+        "dressing":        "dressing-room-as-seen-on",
+        "breakroom":       "break-room-as-seen-on",
+        "break":           "break-room-as-seen-on",
+        "secondfloor":     "second-floor-as-seen-on",
+        "second":          "second-floor-as-seen-on",
+        "basement":        "basement-as-seen-on",
+        "vault":           "vault-as-seen-on",
+        "inventory":       "inventory-as-seen-on",
+        "secondfloorptz":  "second-floor-ptz-as-seen-on",
+        "secondptz":       "second-floor-ptz-as-seen-on",
+        "grid":            "grid-as-seen-on",
+        # Season 5 short codes (do not delete).
         "dirc":       "dirc-5",
         "dorm":       "dmrm-5",
         "dmrm":       "dmrm-5",
@@ -1004,6 +1027,11 @@ class FishtankAuth:
                 all_stream_names[sid] = s["name"]
                 if status.get(sid) == "online":
                     streams[sid] = s["name"]
+            # Grid mosaic (and similar) can be online in liveStreamStatus
+            # without a liveStreams row (As Seen On: grid-as-seen-on).
+            for sid, st in status.items():
+                if st == "online" and sid not in streams:
+                    streams[sid] = all_stream_names.get(sid, sid)
 
             self._all_stream_names = all_stream_names
 
@@ -1366,9 +1394,10 @@ class FishtankAuth:
 
 
 # Catalog ids look like dirc-5, cameraman2-5, computer-lab2-5 (trailing -N is
-# the season). Names in CAMERA_ALIASES go stale; a matching raw id is enough.
+# a numeric season) or slug seasons such as director-as-seen-on. Names in
+# CAMERA_ALIASES go stale; a matching raw id is enough.
 _FISHTANK_STREAM_ID_RE = re.compile(
-    r"^[a-z0-9]+(?:-[a-z0-9]+)*-\d+$", re.IGNORECASE
+    r"^[a-z0-9]+(?:-[a-z0-9]+)+$", re.IGNORECASE
 )
 
 

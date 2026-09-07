@@ -1,12 +1,15 @@
 """Channel key helpers: watch URLs, cookie domains, on-disk folders."""
+import json
+import logging
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from msr.gui import move_list_items
-from msr.platforms import is_fishtank_stream_id, is_known_fishtank_camera
+from msr.platforms import FishtankAuth, is_fishtank_stream_id, is_known_fishtank_camera
 from msr.util import (
     channel_file_stem,
     channel_key_to_dirs,
@@ -23,14 +26,41 @@ class FishtankIdTests(unittest.TestCase):
         self.assertTrue(is_fishtank_stream_id("dirc-5"))
         self.assertTrue(is_fishtank_stream_id("computer-lab2-5"))
         self.assertTrue(is_fishtank_stream_id("cameraman2-5"))
+        self.assertTrue(is_fishtank_stream_id("director-as-seen-on"))
+        self.assertTrue(is_fishtank_stream_id("first-floor-alt-as-seen-on"))
         self.assertFalse(is_fishtank_stream_id("director"))
         self.assertFalse(is_fishtank_stream_id("notacamera"))
         self.assertFalse(is_fishtank_stream_id("foo-"))
 
     def test_known_alias_or_raw(self):
         self.assertTrue(is_known_fishtank_camera("director"))
+        self.assertTrue(is_known_fishtank_camera("mirror"))
         self.assertTrue(is_known_fishtank_camera("ben-5"))
+        self.assertTrue(is_known_fishtank_camera("director-as-seen-on"))
         self.assertFalse(is_known_fishtank_camera("notacamera"))
+
+    def test_as_seen_on_aliases_remap_director(self):
+        aliases = FishtankAuth.CAMERA_ALIASES
+        self.assertEqual(aliases["director"], "director-as-seen-on")
+        self.assertEqual(aliases["dirc"], "dirc-5")
+        self.assertEqual(aliases["mirror"], "dressing-room-as-seen-on")
+        self.assertEqual(aliases["grid"], "grid-as-seen-on")
+
+    def test_status_online_without_livestreams_row(self):
+        auth = FishtankAuth("", logging.getLogger("test"))
+        payload = {
+            "liveStreams": [{"id": "director-as-seen-on", "name": "Director"}],
+            "liveStreamStatus": {
+                "director-as-seen-on": "online",
+                "grid-as-seen-on": "online",
+            },
+            "loadBalancer": {},
+        }
+        auth._fetch_json = lambda url: json.dumps(payload)
+        with patch("urllib.request.urlopen", side_effect=OSError("offline")):
+            live = auth.get_live_streams()
+        self.assertEqual(live.get("director-as-seen-on"), "Director")
+        self.assertEqual(live.get("grid-as-seen-on"), "grid-as-seen-on")
 
 
 class ChannelWatchUrlTests(unittest.TestCase):

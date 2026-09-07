@@ -321,7 +321,7 @@ def validate_channel_name(name, platform, existing_channels):
                 f"Unknown fishtank camera '{name}'.\n"
                 f"  Known names: {known}, …\n"
                 f"  Or paste the raw stream id from GET /v1/live-streams "
-                f"(e.g. dirc-5, bar-5). Room names change every season."
+                f"(e.g. director-as-seen-on, dirc-5). Room names change every season."
             )
         ch_key = f"fishtank:{name}"
         if ch_key in existing_channels:
