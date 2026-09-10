@@ -373,7 +373,7 @@ The site loads cameras from `GET https://api.fishtank.live/v1/live-streams` (the
 
 ### As Seen On aliases (current, 2026-09)
 
-Mini-season catalog confirmed 2026-09-07. `fishtank:director` now records `director-as-seen-on` (Season 5 `dirc-5` still works if you paste that id). Mirror is `dressing-room-as-seen-on`. FX and Vault need a season pass.
+Mini-season catalog confirmed 2026-09-10. `fishtank:director` now records `director-as-seen-on` (Season 5 `dirc-5` still works if you paste that id). Mirror is `dressing-room-as-seen-on`. FX and Vault need a season pass.
 
 | Camera name | Room | Stream id | Access |
 |---|---|---|---|
@@ -381,6 +381,7 @@ Mini-season catalog confirmed 2026-09-07. `fishtank:director` now records `direc
 | `fx` | FX | `fx-as-seen-on` | Season Pass |
 | `firstfloor` | First Floor | `first-floor-as-seen-on` | Public |
 | `firstflooralt`, `firstalt` | First Floor Alt | `first-floor-alt-as-seen-on` | Public |
+| `firstfloorptz`, `firstptz` | First Floor PTZ | `first-floor-ptz-as-seen-on` | Normal |
 | `counter` | Counter | `counter-as-seen-on` | Public |
 | `mirror`, `dressingroom` | Mirror | `dressing-room-as-seen-on` | Public |
 | `breakroom` | Break Room | `break-room-as-seen-on` | Public |
@@ -389,6 +390,7 @@ Mini-season catalog confirmed 2026-09-07. `fishtank:director` now records `direc
 | `vault` | Vault | `vault-as-seen-on` | Season Pass |
 | `inventory` | Inventory | `inventory-as-seen-on` | Public |
 | `secondfloorptz`, `secondptz` | Second Floor PTZ | `second-floor-ptz-as-seen-on` | Normal |
+| `rathew` | Rathew | `rathew-as-seen-on` | Normal |
 | `grid` | Grid mosaic | `grid-as-seen-on` | (status only) |
 
 `channels_fishtank.json` is this roster. Rename it to `channels.json` only if you want that house and nothing else.

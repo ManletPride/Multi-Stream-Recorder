@@ -28,6 +28,7 @@ class FishtankIdTests(unittest.TestCase):
         self.assertTrue(is_fishtank_stream_id("cameraman2-5"))
         self.assertTrue(is_fishtank_stream_id("director-as-seen-on"))
         self.assertTrue(is_fishtank_stream_id("first-floor-alt-as-seen-on"))
+        self.assertTrue(is_fishtank_stream_id("first-floor-ptz-as-seen-on"))
         self.assertFalse(is_fishtank_stream_id("director"))
         self.assertFalse(is_fishtank_stream_id("notacamera"))
         self.assertFalse(is_fishtank_stream_id("foo-"))
@@ -45,6 +46,10 @@ class FishtankIdTests(unittest.TestCase):
         self.assertEqual(aliases["dirc"], "dirc-5")
         self.assertEqual(aliases["mirror"], "dressing-room-as-seen-on")
         self.assertEqual(aliases["grid"], "grid-as-seen-on")
+        self.assertEqual(aliases["firstfloorptz"], "first-floor-ptz-as-seen-on")
+        self.assertEqual(aliases["firstptz"], "first-floor-ptz-as-seen-on")
+        self.assertEqual(aliases["secondfloorptz"], "second-floor-ptz-as-seen-on")
+        self.assertEqual(aliases["rathew"], "rathew-as-seen-on")
 
     def test_status_online_without_livestreams_row(self):
         auth = FishtankAuth("", logging.getLogger("test"))

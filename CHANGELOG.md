@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fishtank As Seen On (catalog 2026-09-10): `firstfloorptz` / `firstptz` → `first-floor-ptz-as-seen-on`; `rathew` → `rathew-as-seen-on`.
+
 ## v2.0.2
 
 User-facing summary: [RELEASE_NOTES_v2.0.2.md](RELEASE_NOTES_v2.0.2.md).

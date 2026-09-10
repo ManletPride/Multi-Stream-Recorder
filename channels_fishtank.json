@@ -16,6 +16,10 @@
     "enabled": true
   },
   {
+    "name": "fishtank:first-floor-ptz-as-seen-on",
+    "enabled": true
+  },
+  {
     "name": "fishtank:counter-as-seen-on",
     "enabled": true
   },
@@ -45,6 +49,10 @@
   },
   {
     "name": "fishtank:second-floor-ptz-as-seen-on",
+    "enabled": true
+  },
+  {
+    "name": "fishtank:rathew-as-seen-on",
     "enabled": true
   },
   {
