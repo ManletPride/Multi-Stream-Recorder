@@ -4,6 +4,8 @@ A desktop application for simultaneously recording live streams from **Kick**, *
 
 This is **v2.0.2**. Upgrading from the v1.8.0 single-file app: copy `Multi-Stream-Recorder.py` **and** the `msr\` folder, then fully quit and relaunch. Details: [RELEASE_NOTES_v2.0.0.md](RELEASE_NOTES_v2.0.0.md). Size-split overlap: [RELEASE_NOTES_v2.0.1.md](RELEASE_NOTES_v2.0.1.md). Fishtank As Seen On cameras: [RELEASE_NOTES_v2.0.2.md](RELEASE_NOTES_v2.0.2.md).
 
+Git branch **`experiment/status-previews`** (this tree, if you are on it) adds experimental live frame previews on the Status tab. It is not a numbered release; `main` remains the stable recorder.
+
 ![Dark Mode Screenshot](screenshots/dark-mode.png)
 
 ## Features
@@ -23,6 +25,7 @@ This is **v2.0.2**. Upgrading from the v1.8.0 single-file app: copy `Multi-Strea
 * **Cloudflare bypass** — Kick streams use streamlink's built-in JS challenge solver; Rumble records the HLS playlist from the channel page (ffmpeg) so yt-dlp does not have to open Cloudflare-gated video pages
 * **Dark mode GUI** — Full dark/light theme with system tray support and desktop notifications
 * **Live stream info** — Status table shows resolution, frame rate, and bitrate for all active recordings
+* **Live frame previews** *(branch `experiment/status-previews`)* — Status tab shows 160×90 stills from each recording’s `.ts`, refreshed every few seconds. Click a tile to select that channel; double-click pins a 480×270 copy above the strip. Roster **Filter** / **Enabled**, and **Recording first** on the status table, keep a long list usable
 * **Disk & network meters** — Status header shows whole-disk write rate and NIC download rate (`psutil`). Hover for this app’s recording totals; the text colors if the recordings disk is write-busy
 * **Cookie support** — Use browser cookies for authenticated access (subscriber-only streams, age-gated content), with an indicator showing whether yours are valid or expiring
 * **Per-channel control** — Start or stop individual channels mid-session via right-click; removing a channel from the roster also stops its worker
@@ -200,9 +203,13 @@ Videos/Multi-Stream Recorder/   # default streams_dir (or the path you set)
 | `Ctrl+Q` | Quit application |
 | `F1` | About dialog |
 | Double-click on channel | Toggle channel on/off |
+| Click a live preview tile | Select that channel in the roster and the status table |
+| Double-click a live preview tile | Pin a 480×270 preview above the strip (Close or double-click again to dismiss) |
 | Right-click on channel | Context menu (Start/Stop Recording, Check Now, Open in Browser, Open Clips Folder, Copy, Sort, Move to Top/Bottom, Remove) |
 | Right-click on status | Context menu (Restart/Stop Channel, Check Now, Clip Now, Screenshot Now, Open in Browser, Open Clips Folder) |
 | **Clip Now** / **Screenshot** / **Clips** buttons | Cut a clip, grab a still, or open the clips folder for the row selected in Live Recording Status (same as the context-menu actions) |
+| Roster **Filter** / **Enabled** | Hide roster rows by name substring, or show only checked channels |
+| **Recording first** | Keep Recording / Remuxing status rows at the top, in roster order |
 
 ## How It Works
 

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from msr.gui import move_list_items
+from msr.gui import channel_matches_filter, move_list_items, ordered_status_keys
 from msr.platforms import FishtankAuth, is_fishtank_stream_id, is_known_fishtank_camera
 from msr.util import (
     channel_file_stem,
@@ -273,6 +273,47 @@ class MoveListItemsTests(unittest.TestCase):
         seq = ["a", "b"]
         self.assertEqual(move_list_items(seq, [-1, 9, "x"], to="top"), [])
         self.assertEqual(seq, ["a", "b"])
+
+
+class RosterFilterTests(unittest.TestCase):
+    def test_query_matches_substring(self):
+        self.assertTrue(channel_matches_filter("fishtank:firstfloor", True, "first"))
+        self.assertFalse(channel_matches_filter("twitch:pyka", True, "first"))
+
+    def test_enabled_only_hides_disabled(self):
+        self.assertFalse(channel_matches_filter("kick:foo", False, "", enabled_only=True))
+        self.assertTrue(channel_matches_filter("kick:foo", True, "", enabled_only=True))
+
+    def test_empty_query_shows_all(self):
+        self.assertTrue(channel_matches_filter("anything", True, "  "))
+
+
+class StatusOrderTests(unittest.TestCase):
+    def test_follows_roster_when_not_recording_first(self):
+        roster = ["twitch:b", "fishtank:a", "kick"]
+        status = {
+            "kick": {"status": "Recording"},
+            "twitch:b": {"status": "Offline"},
+            "fishtank:a": {"status": "Recording"},
+        }
+        keys = ["kick", "fishtank:a", "twitch:b"]
+        self.assertEqual(
+            ordered_status_keys(keys, status, roster, recording_first=False),
+            ["twitch:b", "fishtank:a", "kick"],
+        )
+
+    def test_recording_first_keeps_roster_order_inside_groups(self):
+        roster = ["twitch:b", "fishtank:a", "kick", "offline"]
+        status = {
+            "twitch:b": {"status": "Offline"},
+            "fishtank:a": {"status": "Recording"},
+            "kick": {"status": "Remuxing"},
+            "offline": {"status": "Offline"},
+        }
+        self.assertEqual(
+            ordered_status_keys(list(status), status, roster, recording_first=True),
+            ["fishtank:a", "kick", "twitch:b", "offline"],
+        )
 
 
 if __name__ == "__main__":

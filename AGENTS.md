@@ -2,7 +2,7 @@
 
 Read this before changing code. The project is **not** a single-file script anymore. Several clip and GUI bugs were already fixed; reintroducing the old approaches will regress them.
 
-**Ship status (2026-09-07):** local tree is **v2.0.2**. `origin/main` has this tag. As Seen On Fishtank aliases + slug catalog ids are in this tag. Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
+**Ship status (2026-09-10):** `main` is **v2.0.2** plus First Floor PTZ / Rathew aliases (`22d9283`). `origin/main` still has the v2.0.2 tag (aliases not pushed). Branch **`experiment/status-previews`** is this live-preview GUI experiment — do not merge to `main` until asked. Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 
 Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 
@@ -59,6 +59,18 @@ Related UI:
 - **Size-split is make-before-break.** Hitting `max_file_size_gb` starts the next capture *while the current process is still writing*. Monitor calls `on_size_limit`, which spawns the next file and waits until it has ≥64 KiB, then the old process is killed. The two files overlap by a few seconds — no hole. Remux of the closed file is a worker thread; status stays `Recording` with `remuxing N%`. Do not kill-then-restart on size limit (kimmee lost ~90s of remux, then still a live-check gap). If the next file never appears, fall back to kill + restart (short gap). **Resolution-change splits still kill first** so one file does not mix two frame sizes. Stream-end remux stays synchronous. `find_active_recording_file` is newest `.ts` by mtime. `channel_status_allows_clip` is Recording or Remuxing. `wait_until_file_has_data` is the overlap wait.
 - Roster right-click also has **Open Clips Folder** (uses the left-list selection, not the status row).
 - **Open in Browser** uses `channel_watch_url()` in `msr/util.py` — rumble/tiktok/fishtank are not Kick. YouTube `@handle` must not become `@@handle`.
+
+## Experimental live previews (`experiment/status-previews`)
+
+Status-tab stills from the live `.ts`. Constants in `msr/gui.py`: `PREVIEW_W`/`PREVIEW_H` (160×90), `PREVIEW_BIG_W`/`PREVIEW_BIG_H` (480×270), `PREVIEW_MS` (4000).
+
+- `create_preview_frame` in `msr/worker.py` — seek-before-EOF like screenshots (`-sseof` first, elapsed `-ss` fallback), scale+pad, PNG (tk.PhotoImage has no JPEG), `CREATE_NO_WINDOW`. Failures are quiet.
+- Worker **Recording** status includes **`raw_file`**. The GUI preview loop must use that path. Do **not** `listdir` recording folders on the 1s IO tick. Fallback `find_active_recording_file` is OK on the 4s preview pass if `raw_file` is missing.
+- Grab on a daemon thread, one ffmpeg at a time; skip a channel if Clip/Screenshot is in flight on it. Keep `PhotoImage` refs (`_preview_photos`, `_preview_big_photo`) or Tk drops the picture.
+- Click tile / status row / roster stay on the same channel (`_sync_nav`). **Never** call `update()` or `update_idletasks` from `<<TreeviewSelect>>` or `_sync_nav` — that nested the Tk loop and froze the GUI on Windows. `see()` / canvas scroll only in `after_idle`. Hold `_nav_lock` around `tree.move` in `_reorder_status_rows`.
+- Roster **Filter** + **Enabled**: resolve rows by **channel name**, never `ch_tree.index` (a filtered tree’s row index is not `channels[]`).
+- **Recording first** uses `ordered_status_keys` then `tree.move`. Do not delete-and-rebuild the status tree.
+- Double-click a tile pins a 480×270 copy above the strip (extra ffmpeg only for that channel). Close / double-click the same tile / double-click the large image dismisses it. Drop the pin if that channel stops recording.
 
 ## Other behavior that must not regress
 

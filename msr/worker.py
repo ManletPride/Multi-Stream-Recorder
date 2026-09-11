@@ -638,6 +638,97 @@ def create_screenshot(raw_file, output_file, ffmpeg_path, logger, offset_seconds
     return False, last_error
 
 
+def _hidden_run(cmd, timeout):
+    """subprocess.run with no console window on Windows."""
+    kwargs = {"capture_output": True, "text": True, "timeout": timeout}
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        kwargs["startupinfo"] = startupinfo
+    return subprocess.run(cmd, **kwargs)
+
+
+def preview_scale_filter(width=160, height=90):
+    """ffmpeg -vf to fit a frame in *width* x *height* with letterbox."""
+    w, h = int(width), int(height)
+    return (
+        f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black"
+    )
+
+
+def create_preview_frame(raw_file, output_file, ffmpeg_path, logger,
+                         width=160, height=90, offset_seconds=3.0, timeout=12):
+    """Grab a small still from near the live edge of *raw_file* for the GUI.
+
+    Same seek-before-EOF idea as ``create_screenshot`` (incomplete last GOP),
+    but scales to a thumbnail, writes PNG (tk.PhotoImage), and hides the
+    ffmpeg console. Failures are quiet — previews are best-effort.
+    """
+    if not raw_file or not os.path.exists(raw_file):
+        return False, "recording file not found"
+    try:
+        if os.path.getsize(raw_file) < 64 * 1024:
+            return False, "file too small"
+    except OSError as e:
+        return False, str(e)
+
+    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
+    vf = preview_scale_filter(width, height)
+    # Prefer -sseof so a 4s GUI tick does not ffprobe every channel first.
+    # Fall back to elapsed -ss (same as screenshots) if the live tail is junk.
+    duration = None
+    attempts = [
+        ("sseof", offset_seconds),
+        ("sseof", offset_seconds * 2),
+        ("ss", offset_seconds),
+    ]
+    last_error = "no frame"
+
+    for mode, offset in attempts:
+        if mode == "ss":
+            if duration is None:
+                duration = _probe_duration(ffmpeg_path, raw_file)
+            if duration is None or duration <= 0:
+                continue
+            seek_args = ["-ss", f"{max(0.0, duration - offset):.2f}"]
+        else:
+            seek_args = ["-sseof", f"-{offset:.2f}"]
+        cmd = [
+            ffmpeg_path, "-hide_banner", "-y",
+            *seek_args,
+            "-i", raw_file,
+            "-map", "0:v:0", "-an",
+            "-frames:v", "1",
+            "-vf", vf,
+            "-f", "image2",
+            "-loglevel", "error",
+            output_file,
+        ]
+        try:
+            result = _hidden_run(cmd, timeout)
+        except subprocess.TimeoutExpired:
+            return False, "ffmpeg timed out"
+        except FileNotFoundError:
+            return False, "ffmpeg not found"
+        except Exception as e:
+            return False, str(e)
+
+        wrote = os.path.exists(output_file) and os.path.getsize(output_file) > 200
+        if result.returncode == 0 and wrote:
+            return True, "ok"
+        if os.path.exists(output_file) and not wrote:
+            try:
+                os.remove(output_file)
+            except Exception:
+                pass
+        err_lines = (result.stderr or "").strip().splitlines()
+        last_error = err_lines[-1] if err_lines else f"ffmpeg exited {result.returncode}"
+
+    return False, last_error
+
+
 def _stderr_reader_thread(proc, logger, tool_name, verbose=False):
     """Background thread that reads and logs stderr from the recording process.
 
@@ -1071,6 +1162,7 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                     "size_bytes": int(size),
                     "time": format_elapsed(elapsed),
                     "progress": progress_pct,
+                    "raw_file": raw_file,
                 }
                 if new_status != last_status:
                     status_queue.put((channel_key, new_status))
@@ -1127,11 +1219,11 @@ def _probe_duration(ffmpeg_path, raw_file):
     _big = ["-probesize", "50M", "-analyzeduration", "20M"]
     start_time = 0.0
     try:
-        fmt = subprocess.run(
+        fmt = _hidden_run(
             [ffprobe_path, "-v", "error", *_big,
              "-show_entries", "format=duration,start_time",
              "-of", "default=noprint_wrappers=1", raw_file],
-            capture_output=True, text=True, timeout=20,
+            timeout=20,
         )
         parsed = {}
         for line in (fmt.stdout or "").splitlines():
@@ -1154,12 +1246,12 @@ def _probe_duration(ffmpeg_path, raw_file):
         pass
 
     try:
-        result = subprocess.run(
+        result = _hidden_run(
             [ffprobe_path, "-v", "error", *_big,
              "-select_streams", "v:0",
              "-show_entries", "stream=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", raw_file],
-            capture_output=True, text=True, timeout=20,
+            timeout=20,
         )
         for val in (result.stdout or "").split():
             val = val.strip()
@@ -1176,9 +1268,9 @@ def _probe_duration(ffmpeg_path, raw_file):
 
     # Fallback: parse "Duration: HH:MM:SS.ss" from ffmpeg -i stderr
     try:
-        result = subprocess.run(
+        result = _hidden_run(
             [ffmpeg_path, "-i", raw_file, "-hide_banner"],
-            capture_output=True, text=True, timeout=20,
+            timeout=20,
         )
         import re as _re
         m = _re.search(r"Duration:\s*(\d+):(\d{2}):(\d{2})\.(\d+)", result.stderr)
@@ -2308,6 +2400,7 @@ def record_worker(args):
                     "size_bytes": (last_status or {}).get("size_bytes", 0),
                     "time": (last_status or {}).get("time", ""),
                     "progress": (last_status or {}).get("progress", 50),
+                    "raw_file": raw_file,
                 }
                 status_queue.put((channel_key, new_status))
                 last_status = new_status.copy()

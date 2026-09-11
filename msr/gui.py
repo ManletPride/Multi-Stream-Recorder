@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import queue
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -28,8 +29,8 @@ from msr.iometer import (
     IoSampler, format_header, format_tooltip, meter_severity, sum_stream_mbps,
 )
 from msr.worker import (
-    channel_status_allows_clip, create_clip, create_screenshot,
-    find_active_recording_file, screenshot_extension,
+    channel_status_allows_clip, create_clip, create_preview_frame,
+    create_screenshot, find_active_recording_file, screenshot_extension,
 )
 
 # ────────────────────────────────────────────────
@@ -154,6 +155,28 @@ def move_list_items(seq, indices, to="top"):
         seq[:] = moving + rest
         start = 0
     return list(range(start, start + len(moving)))
+
+
+def channel_matches_filter(name, enabled=True, query="", enabled_only=False):
+    """True if a roster row should stay visible for *query* / Enabled only."""
+    if enabled_only and not enabled:
+        return False
+    q = (query or "").strip().lower()
+    if not q:
+        return True
+    return q in (name or "").lower()
+
+
+def ordered_status_keys(keys, status_lookup, roster_names, recording_first=True):
+    """Status-table order: roster sequence, optionally recording/remuxing first."""
+    index = {name: i for i, name in enumerate(roster_names)}
+    def sort_key(ch):
+        rec = status_lookup.get(ch) if status_lookup else None
+        st = rec.get("status", "") if isinstance(rec, dict) else (rec or "")
+        live = 0 if channel_status_allows_clip(st) else 1
+        group = live if recording_first else 0
+        return (group, index.get(ch, 10 ** 9), ch or "")
+    return sorted(keys, key=sort_key)
 
 
 # ────────────────────────────────────────────────
@@ -421,6 +444,12 @@ def main_gui(config):
                         lightcolor=border_color, darkcolor=border_color)
         style.map('Vertical.TScrollbar',
                   background=[('active', t['accent']), ('pressed', t['accent'])])
+        style.configure('Horizontal.TScrollbar', background=t['btn_bg'],
+                        bordercolor=border_color, arrowcolor=t['fg'],
+                        troughcolor=t['tree_field'],
+                        lightcolor=border_color, darkcolor=border_color)
+        style.map('Horizontal.TScrollbar',
+                  background=[('active', t['accent']), ('pressed', t['accent'])])
 
         # Tag colors for treeview
         tree.tag_configure("recording", foreground=t['rec_fg'], font=("Segoe UI", 10, "bold"))
@@ -436,6 +465,16 @@ def main_gui(config):
         for w in [frame_left, ch_tree_frame, platform_frame, btn_small_frame, move_btn_frame,
                   frame_right, bottom_bar, btn_frame, toggle_frame, status_header]:
             w.configure(bg=t['bg'])
+        try:
+            filter_frame.configure(bg=t['bg'])
+            filter_label.configure(bg=t['bg'], fg=t['fg'])
+            filter_entry.configure(bg=t['entry_bg'], fg=t['entry_fg'],
+                                   insertbackground=t['fg'],
+                                   highlightbackground=border_color,
+                                   highlightcolor=t['accent'],
+                                   highlightthickness=1, relief='flat')
+        except NameError:
+            pass
         ch_tree.tag_configure("enabled", foreground=t['fg'])
         ch_tree.tag_configure("disabled", foreground="#777777")
         try:
@@ -456,6 +495,10 @@ def main_gui(config):
         try:
             io_meter_label.configure(bg=t['bg'])
             _paint_io_meter()
+        except NameError:
+            pass
+        try:
+            _theme_preview_strip(t)
         except NameError:
             pass
 
@@ -646,6 +689,14 @@ def main_gui(config):
     CHECK_ON = "☑"
     CHECK_OFF = "☐"
 
+    roster_filter_var = tk.StringVar(value=win_state.get("roster_filter", ""))
+    enabled_only_var = tk.BooleanVar(value=bool(win_state.get("roster_enabled_only", False)))
+    recording_first_var = tk.BooleanVar(
+        value=bool(win_state.get("status_recording_first", True))
+    )
+    _nav_lock = [False]
+    _preview_selected = [None]
+
     # Pre-fill the cookie cache immediately — before the first tree draw —
     # so dots have real colours from the start rather than going grey first.
     # This is just the data parse; widget updates happen later in update_cookie_status().
@@ -665,13 +716,63 @@ def main_gui(config):
     ch_tree.tag_configure("enabled", foreground="")   # themed by apply_theme
     ch_tree.tag_configure("disabled", foreground="#777777")
 
+    def _channel_name_from_item(item):
+        try:
+            vals = ch_tree.item(item, "values")
+        except tk.TclError:
+            return None
+        if vals and len(vals) > 1:
+            return vals[1]
+        return None
+
+    def _index_for_name(name):
+        for i, ch in enumerate(channels):
+            if ch["name"] == name:
+                return i
+        return -1
+
+    def _item_for_name(name):
+        for item in ch_tree.get_children():
+            if _channel_name_from_item(item) == name:
+                return item
+        return None
+
+    def _selected_roster_names():
+        names = []
+        for item in ch_tree.selection():
+            name = _channel_name_from_item(item)
+            if name:
+                names.append(name)
+        return names
+
+    def _select_roster_names(names, see_first=True):
+        items = []
+        for name in names:
+            item = _item_for_name(name)
+            if item:
+                items.append(item)
+        if not items:
+            return
+        ch_tree.selection_set(items)
+        if see_first:
+            ch_tree.see(items[0])
+
     def _populate_channel_tree():
         """Rebuild the channel treeview from the channels list."""
+        selected = _selected_roster_names()
+        query = roster_filter_var.get()
+        only_on = bool(enabled_only_var.get())
         ch_tree.delete(*ch_tree.get_children())
         for ch in channels:
+            if not channel_matches_filter(
+                ch["name"], ch.get("enabled", True), query, only_on
+            ):
+                continue
             check = CHECK_ON if ch.get("enabled", True) else CHECK_OFF
             tag = "enabled" if ch.get("enabled", True) else "disabled"
             ch_tree.insert("", tk.END, values=(check, ch["name"]), tags=(tag,))
+        if selected:
+            _select_roster_names(selected)
         dot_canvas.after(20, _redraw_dot_canvas)
 
     _populate_channel_tree()
@@ -685,13 +786,16 @@ def main_gui(config):
             return
         # Only toggle if clicking the check column (#1)
         if col == "#1":
-            idx = ch_tree.index(item)
+            name = _channel_name_from_item(item)
+            idx = _index_for_name(name)
             if 0 <= idx < len(channels):
                 channels[idx]["enabled"] = not channels[idx].get("enabled", True)
                 enabled = channels[idx]["enabled"]
                 check = CHECK_ON if enabled else CHECK_OFF
                 tag = "enabled" if enabled else "disabled"
                 ch_tree.item(item, values=(check, channels[idx]["name"]), tags=(tag,))
+                if enabled_only_var.get() and not enabled:
+                    _populate_channel_tree()
                 dot_canvas.after(20, _redraw_dot_canvas)
                 save_channels()
 
@@ -702,17 +806,40 @@ def main_gui(config):
         item = ch_tree.identify_row(event.y)
         if not item:
             return
-        idx = ch_tree.index(item)
+        name = _channel_name_from_item(item)
+        idx = _index_for_name(name)
         if 0 <= idx < len(channels):
             channels[idx]["enabled"] = not channels[idx].get("enabled", True)
             enabled = channels[idx]["enabled"]
             check = CHECK_ON if enabled else CHECK_OFF
             tag = "enabled" if enabled else "disabled"
             ch_tree.item(item, values=(check, channels[idx]["name"]), tags=(tag,))
+            if enabled_only_var.get() and not enabled:
+                _populate_channel_tree()
             dot_canvas.after(20, _redraw_dot_canvas)
             save_channels()
 
     ch_tree.bind("<Double-ButtonRelease-1>", _double_click_toggle)
+
+    filter_frame = tk.Frame(frame_left)
+    filter_frame.pack(fill=tk.X, pady=(6, 0))
+    filter_label = tk.Label(filter_frame, text="Filter:", font=("Segoe UI", 9))
+    filter_label.pack(side=tk.LEFT)
+    filter_entry = tk.Entry(
+        filter_frame, textvariable=roster_filter_var, width=16,
+        font=("Segoe UI", 9), borderwidth=0, relief="flat",
+    )
+    filter_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 6))
+    enabled_only_cb = ttk.Checkbutton(
+        filter_frame, text="Enabled", variable=enabled_only_var,
+        command=_populate_channel_tree,
+    )
+    enabled_only_cb.pack(side=tk.LEFT)
+    roster_filter_var.trace_add("write", lambda *_: _populate_channel_tree())
+    _Tooltip(filter_entry,
+             "Type to hide roster rows whose names\n"
+             "do not contain this text. Enabled limits\n"
+             "the list to checked channels.")
 
     platform_frame = tk.Frame(frame_left)
     platform_frame.pack(fill=tk.X, pady=(10, 5))
@@ -752,8 +879,8 @@ def main_gui(config):
 
         ch = {"name": ch_name, "enabled": True}
         channels.append(ch)
-        ch_tree.insert("", tk.END, values=(CHECK_ON, ch_name), tags=("enabled",))
-        dot_canvas.after(20, _redraw_dot_canvas)
+        _populate_channel_tree()
+        _select_roster_names([ch_name])
         save_channels()
         if recorder and recorder.is_running:
             recorder.start_channel(ch_name)
@@ -762,66 +889,54 @@ def main_gui(config):
         entry.delete(0, tk.END)
 
     def remove_selected():
-        selected_items = ch_tree.selection()
-        # Get indices in reverse order to avoid shifting
-        indices = sorted([ch_tree.index(item) for item in selected_items], reverse=True)
-        for idx in indices:
-            if 0 <= idx < len(channels):
-                ch_name = channels[idx]["name"]
-                if recorder:
-                    recorder.remove_channel(ch_name)
-                del channels[idx]
+        names = _selected_roster_names()
+        drop = set(names)
+        for ch_name in names:
+            if recorder:
+                recorder.remove_channel(ch_name)
+        channels[:] = [ch for ch in channels if ch["name"] not in drop]
         _populate_channel_tree()
         save_channels()
 
     def _move_channel_up():
         """Move selected channel up in the list."""
-        selected = ch_tree.selection()
-        if not selected:
+        names = _selected_roster_names()
+        if not names:
             return
-        idx = ch_tree.index(selected[0])
+        idx = _index_for_name(names[0])
         if idx <= 0 or idx >= len(channels):
             return
         channels[idx], channels[idx - 1] = channels[idx - 1], channels[idx]
         _populate_channel_tree()
         save_channels()
-        # Re-select the moved item
-        new_item = ch_tree.get_children()[idx - 1]
-        ch_tree.selection_set(new_item)
-        ch_tree.see(new_item)
+        _select_roster_names([channels[idx - 1]["name"]])
 
     def _move_channel_down():
         """Move selected channel down in the list."""
-        selected = ch_tree.selection()
-        if not selected:
+        names = _selected_roster_names()
+        if not names:
             return
-        idx = ch_tree.index(selected[0])
+        idx = _index_for_name(names[0])
         if idx < 0 or idx >= len(channels) - 1:
             return
         channels[idx], channels[idx + 1] = channels[idx + 1], channels[idx]
         _populate_channel_tree()
         save_channels()
-        # Re-select the moved item
-        new_item = ch_tree.get_children()[idx + 1]
-        ch_tree.selection_set(new_item)
-        ch_tree.see(new_item)
+        _select_roster_names([channels[idx + 1]["name"]])
 
     def _move_selected_channels(to):
         """Jump selected roster rows to the top or bottom as a stable block."""
-        selected = ch_tree.selection()
-        if not selected:
+        names = _selected_roster_names()
+        if not names:
             return
-        indices = [ch_tree.index(item) for item in selected]
+        indices = [_index_for_name(n) for n in names]
         new_idx = move_list_items(channels, indices, to=to)
         if not new_idx:
             return
         _populate_channel_tree()
         save_channels()
-        items = ch_tree.get_children()
-        to_select = [items[i] for i in new_idx if i < len(items)]
-        if to_select:
-            ch_tree.selection_set(to_select)
-            ch_tree.see(to_select[0] if to == "top" else to_select[-1])
+        moved = [channels[i]["name"] for i in new_idx]
+        _select_roster_names(moved, see_first=(to == "top"))
 
     def _move_channels_to_top():
         _move_selected_channels("top")
@@ -875,11 +990,7 @@ def main_gui(config):
         if len(channels) < 2:
             return
         # Remember selection by name so it survives the reshuffle
-        selected_names = set()
-        for item in ch_tree.selection():
-            idx = ch_tree.index(item)
-            if 0 <= idx < len(channels):
-                selected_names.add(channels[idx]["name"])
+        selected_names = set(_selected_roster_names())
 
         if mode == "enabled":
             channels.sort(key=lambda ch: not ch.get("enabled", True))
@@ -893,12 +1004,7 @@ def main_gui(config):
 
         # Restore selection on the moved rows
         if selected_names:
-            items = ch_tree.get_children()
-            to_select = [items[i] for i, ch in enumerate(channels)
-                         if ch["name"] in selected_names and i < len(items)]
-            if to_select:
-                ch_tree.selection_set(to_select)
-                ch_tree.see(to_select[0])
+            _select_roster_names(list(selected_names))
         logging.info(f"Channel list sorted ({mode})")
 
     sort_menu = tk.Menu(root, tearoff=0)
@@ -983,28 +1089,22 @@ def main_gui(config):
         selected_items = ch_tree.selection()
         if not selected_items or not recorder or not recorder.is_running:
             return
-        for item in selected_items:
-            idx = ch_tree.index(item)
-            if 0 <= idx < len(channels):
-                ch_name = channels[idx]["name"]
-                # Enable the channel if it's not already
-                if not channels[idx].get("enabled", True):
-                    channels[idx]["enabled"] = True
-                    _populate_channel_tree()
-                    save_channels()
-                # Start it in the running session
-                recorder.start_channel(ch_name)
+        for ch_name in _selected_roster_names():
+            idx = _index_for_name(ch_name)
+            if idx < 0:
+                continue
+            if not channels[idx].get("enabled", True):
+                channels[idx]["enabled"] = True
+                _populate_channel_tree()
+                save_channels()
+            recorder.start_channel(ch_name)
 
     def _stop_selected_channel_from_list():
         """Stop recording a channel from the channel list."""
         selected_items = ch_tree.selection()
         if not selected_items or not recorder or not recorder.is_running:
             return
-        names = []
-        for item in selected_items:
-            idx = ch_tree.index(item)
-            if 0 <= idx < len(channels):
-                names.append(channels[idx]["name"])
+        names = _selected_roster_names()
         if not names:
             return
         rec = recorder
@@ -1021,10 +1121,8 @@ def main_gui(config):
         selected_items = ch_tree.selection()
         if not selected_items or not recorder or not recorder.is_running:
             return
-        for item in selected_items:
-            idx = ch_tree.index(item)
-            if 0 <= idx < len(channels):
-                recorder.check_now(channels[idx]["name"])
+        for ch_name in _selected_roster_names():
+            recorder.check_now(ch_name)
 
     def show_context_menu(event):
         # Select the item under cursor if not already selected
@@ -1038,9 +1136,9 @@ def main_gui(config):
 
         # If a recording session is active, show Start/Stop Recording option
         if recorder and recorder.is_running and ch_tree.selection():
-            idx = ch_tree.index(ch_tree.selection()[0])
-            if 0 <= idx < len(channels):
-                ch_name = channels[idx]["name"]
+            ch_name = _channel_name_from_item(ch_tree.selection()[0])
+            idx = _index_for_name(ch_name)
+            if ch_name and 0 <= idx < len(channels):
                 st = recorder.status_dict.get(ch_name, {})
                 status_lower = st.get("status", "").lower()
                 if status_lower in ("stopped",) or ch_name not in recorder.status_dict:
@@ -1076,25 +1174,20 @@ def main_gui(config):
     def copy_channel_name():
         selected_items = ch_tree.selection()
         if selected_items:
-            names = []
-            for item in selected_items:
-                idx = ch_tree.index(item)
-                if 0 <= idx < len(channels):
-                    names.append(channels[idx]["name"])
+            names = _selected_roster_names()
             root.clipboard_clear()
             root.clipboard_append("\n".join(names))
 
     def open_channel_url():
         selected_items = ch_tree.selection()
-        if selected_items:
-            idx = ch_tree.index(selected_items[0])
-            if 0 <= idx < len(channels):
-                _open_channel_in_browser(channels[idx]["name"])
+        names = _selected_roster_names()
+        if names:
+            _open_channel_in_browser(names[0])
 
     def _toggle_selected_channels():
         """Toggle enabled state for all selected channels."""
-        for item in ch_tree.selection():
-            idx = ch_tree.index(item)
+        for ch_name in _selected_roster_names():
+            idx = _index_for_name(ch_name)
             if 0 <= idx < len(channels):
                 channels[idx]["enabled"] = not channels[idx].get("enabled", True)
         _populate_channel_tree()
@@ -1173,6 +1266,92 @@ def main_gui(config):
     status_label = tk.Label(status_header, text="Live Recording Status",
                             font=("Segoe UI", 13, "bold"), anchor="w")
     status_label.pack(side=tk.LEFT)
+    recording_first_cb = ttk.Checkbutton(
+        status_header, text="Recording first",
+        variable=recording_first_var,
+        command=lambda: _reorder_status_rows() if recorder else None,
+    )
+    recording_first_cb.pack(side=tk.LEFT, padx=(12, 0))
+    _Tooltip(recording_first_cb,
+             "Keep Recording / Remuxing rows at the\n"
+             "top of the status table, in roster order.")
+
+    # Experimental live-frame strip. ffmpeg grabs a scaled still from each
+    # recording's .ts on a worker thread every PREVIEW_MS. Sizes/rate are
+    # starting points to tweak. PNG because tk.PhotoImage has no JPEG.
+    PREVIEW_W, PREVIEW_H = 160, 90
+    PREVIEW_BIG_W, PREVIEW_BIG_H = 480, 270  # 3× the strip tiles
+    PREVIEW_MS = 4000
+    _preview_photos = {}
+    _preview_tiles = {}
+    _preview_busy = [False]
+    _preview_big = [None]
+    _preview_big_photo = [None]
+
+    preview_wrap = tk.Frame(status_tab)
+    preview_wrap.pack(fill=tk.X, padx=10, pady=(0, 6))
+    preview_big_frame = tk.Frame(preview_wrap, padx=6, pady=6, highlightthickness=1)
+    preview_big_header = tk.Frame(preview_big_frame)
+    preview_big_header.pack(fill=tk.X, pady=(0, 4))
+    preview_big_name = tk.Label(
+        preview_big_header, text="", font=("Segoe UI", 10, "bold"), anchor="w",
+    )
+    preview_big_name.pack(side=tk.LEFT)
+    preview_big_close = ttk.Button(preview_big_header, text="Close", width=7)
+    preview_big_close.pack(side=tk.RIGHT)
+    preview_big_hint = tk.Label(
+        preview_big_header, text="Double-click a tile to pin · Close to dismiss",
+        font=("Segoe UI", 8), anchor="e",
+    )
+    preview_big_hint.pack(side=tk.RIGHT, padx=(8, 6))
+    preview_big_img = tk.Label(preview_big_frame, bd=0)
+    preview_big_img.pack()
+    preview_canvas = tk.Canvas(
+        preview_wrap, height=28, highlightthickness=1, bd=0,
+    )
+    preview_hsb = ttk.Scrollbar(preview_wrap, orient="horizontal",
+                                command=preview_canvas.xview)
+    preview_canvas.configure(xscrollcommand=preview_hsb.set)
+    preview_canvas.pack(fill=tk.X, side=tk.TOP)
+    preview_hsb.pack(fill=tk.X, side=tk.TOP)
+    preview_inner = tk.Frame(preview_canvas)
+    _preview_canvas_win = preview_canvas.create_window((0, 0), window=preview_inner, anchor="nw")
+    preview_empty = tk.Label(
+        preview_inner,
+        text="Live previews appear here while channels are recording",
+        font=("Segoe UI", 9), anchor="w", padx=8, pady=4,
+    )
+    preview_empty.pack(side=tk.LEFT)
+
+    def _preview_inner_configured(_event=None):
+        preview_canvas.configure(scrollregion=preview_canvas.bbox("all"))
+
+    preview_inner.bind("<Configure>", _preview_inner_configured)
+
+    def _theme_preview_strip(t):
+        preview_wrap.configure(bg=t["bg"])
+        preview_canvas.configure(
+            bg=t["tree_field"], highlightbackground=t["border"],
+            highlightcolor=t["border"],
+        )
+        preview_inner.configure(bg=t["tree_field"])
+        preview_empty.configure(bg=t["tree_field"], fg=t["offline_fg"])
+        preview_big_frame.configure(
+            bg=t["tree_field"], highlightbackground=t["accent"],
+            highlightcolor=t["accent"],
+        )
+        preview_big_header.configure(bg=t["tree_field"])
+        preview_big_name.configure(bg=t["tree_field"], fg=t["fg"])
+        preview_big_hint.configure(bg=t["tree_field"], fg=t["offline_fg"])
+        preview_big_img.configure(bg=t["tree_field"])
+        for tile in _preview_tiles.values():
+            tile["frame"].configure(bg=t["tree_field"], highlightbackground=t["border"])
+            tile["img"].configure(bg=t["tree_field"])
+            tile["name"].configure(bg=t["tree_field"], fg=t["fg"])
+        try:
+            _paint_preview_selection(_preview_selected[0])
+        except NameError:
+            pass
 
     # _key is a hidden column holding the internal channel id (e.g. "twitch:foo"
     # vs Kick "foo") so Clip Now / Stop / Restart never pick the wrong row when
@@ -1401,9 +1580,9 @@ def main_gui(config):
         if not selected_items:
             logging.info("Open Clips Folder: select a channel in the list first")
             return
-        idx = ch_tree.index(selected_items[0])
-        if 0 <= idx < len(channels):
-            _open_clips_dir_for_channel(channels[idx]["name"])
+        names = _selected_roster_names()
+        if names:
+            _open_clips_dir_for_channel(names[0])
 
     # pack(side=RIGHT) first = rightmost. Clip Now is the primary action.
     clip_now_btn = ttk.Button(status_header, text="Clip Now",
@@ -1799,6 +1978,342 @@ def main_gui(config):
             return ch_name.split(":", 1)[1]
         return ch_name
 
+    def _preview_cache_file(ch_name, suffix=""):
+        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in ch_name)[:80]
+        folder = os.path.join(tempfile.gettempdir(), "msr-previews")
+        return os.path.join(folder, f"{safe}{suffix}.png")
+
+    def _set_big_preview_image(png_path=None, from_small=None):
+        """Show *png_path*, or a 3× zoom of an existing strip PhotoImage."""
+        photo = None
+        if png_path and os.path.isfile(png_path):
+            try:
+                photo = tk.PhotoImage(file=png_path)
+            except tk.TclError:
+                photo = None
+        if photo is None and from_small is not None:
+            try:
+                photo = from_small.zoom(3, 3)
+            except tk.TclError:
+                photo = None
+        if photo is None:
+            return
+        preview_big_img.configure(image=photo)
+        _preview_big_photo[0] = photo
+
+    def _hide_big_preview():
+        _preview_big[0] = None
+        _preview_big_photo[0] = None
+        try:
+            preview_big_frame.pack_forget()
+            preview_big_img.configure(image="")
+        except tk.TclError:
+            pass
+
+    def _show_big_preview(ch_name):
+        if not ch_name:
+            return
+        if _preview_big[0] == ch_name:
+            _hide_big_preview()
+            return
+        _preview_big[0] = ch_name
+        preview_big_name.configure(text=_get_display_name(ch_name))
+        try:
+            packed = bool(preview_big_frame.pack_info())
+        except tk.TclError:
+            packed = False
+        if not packed:
+            preview_big_frame.pack(
+                fill=tk.X, side=tk.TOP, before=preview_canvas, pady=(0, 6),
+            )
+        _set_big_preview_image(
+            png_path=_preview_cache_file(ch_name, "_big"),
+            from_small=_preview_photos.get(ch_name),
+        )
+        _sync_nav(ch_name, "preview")
+
+    preview_big_close.configure(command=_hide_big_preview)
+    preview_big_img.bind("<Button-1>", lambda _e: (
+        _sync_nav(_preview_big[0], "preview") if _preview_big[0] else None
+    ))
+    preview_big_img.bind("<Double-Button-1>", lambda _e: _hide_big_preview())
+
+    def _recording_preview_jobs():
+        """(channel_key, raw_file) for channels that can currently clip.
+
+        Order follows the roster so the strip matches the left list.
+        """
+        if not recorder or not recorder.is_running:
+            return []
+        jobs = []
+        seen = set()
+        roster = [ch["name"] for ch in channels]
+        extra = [k for k in recorder.status_dict if k not in roster]
+        for ch_name in roster + extra:
+            if ch_name in seen:
+                continue
+            seen.add(ch_name)
+            st = recorder.status_dict.get(ch_name) or {}
+            if not channel_status_allows_clip(st.get("status", "")):
+                continue
+            path = st.get("raw_file") or ""
+            if not path or not os.path.isfile(path):
+                path = find_active_recording_file(recorder, ch_name) or ""
+            if not path:
+                continue
+            size = st.get("size_bytes") or 0
+            if size and size < 64 * 1024:
+                continue
+            jobs.append((ch_name, path))
+        return jobs
+
+    def _select_status_row(ch_name, see=False):
+        for iid in tree.get_children():
+            try:
+                if tree.set(iid, "_key") == ch_name:
+                    tree.selection_set(iid)
+                    if see:
+                        tree.see(iid)
+                    return
+            except tk.TclError:
+                continue
+
+    def _paint_preview_selection(ch_name):
+        """Accent the active tile. No update_idletasks — that nested the Tk loop."""
+        t = DARK if dark_mode.get() else LIGHT
+        _preview_selected[0] = ch_name
+        for name, tile in _preview_tiles.items():
+            on = name == ch_name
+            tile["frame"].configure(
+                highlightbackground=t["accent"] if on else t["border"],
+                highlightthickness=2 if on else 1,
+            )
+
+    def _scroll_nav_into_view(ch_name):
+        if not ch_name:
+            return
+        try:
+            item = _item_for_name(ch_name)
+            if item:
+                ch_tree.see(item)
+            for iid in tree.get_children():
+                if tree.set(iid, "_key") == ch_name:
+                    tree.see(iid)
+                    break
+            tile = _preview_tiles.get(ch_name)
+            if tile:
+                inner_w = preview_inner.winfo_reqwidth()
+                canvas_w = preview_canvas.winfo_width()
+                if inner_w > canvas_w > 1:
+                    x = tile["frame"].winfo_x()
+                    preview_canvas.xview_moveto(max(0.0, min(1.0, x / inner_w)))
+        except tk.TclError:
+            pass
+
+    def _sync_nav(ch_name, origin):
+        """Keep roster, status row, and preview tile on the same channel.
+
+        Must not call update()/see() while handling <<TreeviewSelect>> —
+        that nested the Tk event loop and froze the GUI.
+        """
+        if _nav_lock[0] or not ch_name:
+            return
+        if ch_name == _preview_selected[0] and origin != "preview":
+            _paint_preview_selection(ch_name)
+            return
+        _nav_lock[0] = True
+        try:
+            _preview_selected[0] = ch_name
+            if origin != "status":
+                _select_status_row(ch_name, see=False)
+            if origin != "roster":
+                _select_roster_names([ch_name], see_first=False)
+            _paint_preview_selection(ch_name)
+        finally:
+            _nav_lock[0] = False
+        root.after_idle(lambda n=ch_name: _scroll_nav_into_view(n))
+
+    def _on_roster_select(_event=None):
+        _schedule_dot_redraw()
+        if _nav_lock[0]:
+            return
+        names = _selected_roster_names()
+        if names and names[0] != _preview_selected[0]:
+            _sync_nav(names[0], "roster")
+
+    def _on_status_select(_event=None):
+        if _nav_lock[0]:
+            return
+        ch_name = _get_selected_status_channel()
+        if ch_name and ch_name != _preview_selected[0]:
+            _sync_nav(ch_name, "status")
+
+    ch_tree.bind("<<TreeviewSelect>>", _on_roster_select)
+    tree.bind("<<TreeviewSelect>>", _on_status_select)
+
+    def _sync_preview_tiles(keys):
+        t = DARK if dark_mode.get() else LIGHT
+        for ch_name in list(_preview_tiles):
+            if ch_name not in keys:
+                _preview_tiles[ch_name]["frame"].destroy()
+                _preview_tiles.pop(ch_name, None)
+                _preview_photos.pop(ch_name, None)
+        if not keys:
+            preview_empty.pack(side=tk.LEFT)
+            preview_canvas.configure(height=28)
+            _hide_big_preview()
+            return
+        if _preview_big[0] and _preview_big[0] not in keys:
+            _hide_big_preview()
+        preview_empty.pack_forget()
+        preview_canvas.configure(height=PREVIEW_H + 28)
+        for ch_name in keys:
+            if ch_name in _preview_tiles:
+                continue
+            tile = tk.Frame(preview_inner, padx=4, pady=4,
+                            highlightthickness=1, highlightbackground=t["border"],
+                            bg=t["tree_field"])
+            blank = tk.PhotoImage(width=PREVIEW_W, height=PREVIEW_H)
+            img_lbl = tk.Label(tile, image=blank, bg=t["tree_field"], bd=0)
+            _preview_photos[ch_name] = blank
+            img_lbl.pack()
+            name_lbl = tk.Label(
+                tile, text=_get_display_name(ch_name),
+                font=("Segoe UI", 8), bg=t["tree_field"], fg=t["fg"],
+                wraplength=PREVIEW_W, justify=tk.CENTER,
+            )
+            name_lbl.pack()
+            tile.bind("<Button-1>", lambda _e, k=ch_name: _sync_nav(k, "preview"))
+            img_lbl.bind("<Button-1>", lambda _e, k=ch_name: _sync_nav(k, "preview"))
+            name_lbl.bind("<Button-1>", lambda _e, k=ch_name: _sync_nav(k, "preview"))
+            tile.bind("<Double-Button-1>", lambda _e, k=ch_name: _show_big_preview(k))
+            img_lbl.bind("<Double-Button-1>", lambda _e, k=ch_name: _show_big_preview(k))
+            name_lbl.bind("<Double-Button-1>", lambda _e, k=ch_name: _show_big_preview(k))
+            _preview_tiles[ch_name] = {"frame": tile, "img": img_lbl, "name": name_lbl}
+        packed = []
+        for child in preview_inner.pack_slaves():
+            for name, tile in _preview_tiles.items():
+                if tile["frame"] is child:
+                    packed.append(name)
+                    break
+        if packed != list(keys):
+            for ch_name in keys:
+                _preview_tiles[ch_name]["frame"].pack_forget()
+            for ch_name in keys:
+                _preview_tiles[ch_name]["frame"].pack(side=tk.LEFT, padx=(0, 6))
+        _paint_preview_selection(_preview_selected[0])
+
+    def _set_preview_image(ch_name, png_path):
+        tile = _preview_tiles.get(ch_name)
+        if not tile or not png_path or not os.path.isfile(png_path):
+            return
+        try:
+            photo = tk.PhotoImage(file=png_path)
+        except tk.TclError:
+            return
+        tile["img"].configure(image=photo, width=PREVIEW_W, height=PREVIEW_H)
+        _preview_photos[ch_name] = photo
+
+    def _finish_preview_batch(results, keys):
+        _preview_busy[0] = False
+        try:
+            if not root.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        _sync_preview_tiles(keys)
+        for row in results:
+            ch_name = row[0]
+            png_path = row[1] if len(row) > 1 else None
+            big_path = row[2] if len(row) > 2 else None
+            if png_path:
+                _set_preview_image(ch_name, png_path)
+            if _preview_big[0] == ch_name:
+                _set_big_preview_image(
+                    png_path=big_path,
+                    from_small=_preview_photos.get(ch_name),
+                )
+
+    def _tick_previews():
+        try:
+            if not root.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        root.after(PREVIEW_MS, _tick_previews)
+        if _preview_busy[0]:
+            return
+        jobs = _recording_preview_jobs()
+        keys = [ch for ch, _path in jobs]
+        if not jobs:
+            _sync_preview_tiles([])
+            return
+        _preview_busy[0] = True
+        ffmpeg_path = config.get("Advanced", "ffmpeg_path", fallback="ffmpeg")
+
+        def _work():
+            grabbed = []
+            try:
+                for ch_name, raw_file in jobs:
+                    if (ch_name, "clip") in _media_jobs_in_flight or (
+                        ch_name, "screenshot"
+                    ) in _media_jobs_in_flight:
+                        continue
+                    out = _preview_cache_file(ch_name)
+                    ok, _msg = create_preview_frame(
+                        raw_file, out, ffmpeg_path, logging,
+                        width=PREVIEW_W, height=PREVIEW_H,
+                    )
+                    big_out = None
+                    if ok and _preview_big[0] == ch_name:
+                        big_path = _preview_cache_file(ch_name, "_big")
+                        ok_big, _msg = create_preview_frame(
+                            raw_file, big_path, ffmpeg_path, logging,
+                            width=PREVIEW_BIG_W, height=PREVIEW_BIG_H,
+                        )
+                        if ok_big:
+                            big_out = big_path
+                    grabbed.append((ch_name, out if ok else None, big_out))
+            except Exception:
+                logging.debug("Preview grab failed", exc_info=True)
+            try:
+                root.after(0, lambda: _finish_preview_batch(grabbed, keys))
+            except Exception:
+                _preview_busy[0] = False
+
+        threading.Thread(target=_work, daemon=True, name="preview-grab").start()
+
+    def _reorder_status_rows():
+        """Apply roster order, with Recording/Remuxing first when enabled."""
+        if not recorder:
+            return
+        roster = [ch["name"] for ch in channels]
+        keys = []
+        iid_by_key = {}
+        for iid in tree.get_children():
+            try:
+                key = tree.set(iid, "_key")
+            except tk.TclError:
+                continue
+            if not key:
+                continue
+            keys.append(key)
+            iid_by_key[key] = iid
+        ordered = ordered_status_keys(
+            keys, recorder.status_dict, roster,
+            recording_first=bool(recording_first_var.get()),
+        )
+        # tree.move can fire <<TreeviewSelect>>; hold the nav lock so that
+        # does not re-enter _sync_nav (which used to freeze the GUI).
+        _nav_lock[0] = True
+        try:
+            for i, ch_name in enumerate(ordered):
+                iid = iid_by_key.get(ch_name)
+                if iid:
+                    tree.move(iid, "", i)
+        finally:
+            _nav_lock[0] = False
+
     def refresh_status():
         if recorder and recorder.is_running:
             recorder.update_status_from_queue()
@@ -1895,6 +2410,8 @@ def main_gui(config):
             for key, iid in existing.items():
                 if key not in seen:
                     tree.delete(iid)
+
+            _reorder_status_rows()
 
             # Update tray icon tooltip if tray exists
             if tray_icon is not None:
@@ -2106,6 +2623,9 @@ def main_gui(config):
                 'geometry': root.geometry(),
                 'dark_mode': dark_mode.get(),
                 'column_widths': col_widths,
+                'roster_filter': roster_filter_var.get(),
+                'roster_enabled_only': bool(enabled_only_var.get()),
+                'status_recording_first': bool(recording_first_var.get()),
             }
             save_window_state(state_file, state)
         except Exception:
@@ -2168,6 +2688,7 @@ def main_gui(config):
     root.after(100, lambda: set_title_bar_dark(dark_mode.get()))
     root.after(500, lambda: set_title_bar_dark(dark_mode.get()))
     root.after(1500, refresh_status)
+    root.after(2000, _tick_previews)
     root.after(500, refresh_logs)
     if HAS_PSUTIL:
         root.after(1000, _refresh_io_meter)

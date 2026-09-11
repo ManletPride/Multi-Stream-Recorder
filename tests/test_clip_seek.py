@@ -1,4 +1,5 @@
 """Clip keyframe alignment: elapsed file time, not MPEG-TS PCR."""
+import logging
 import os
 import sys
 import unittest
@@ -9,6 +10,8 @@ from msr.worker import (
     _clip_seek_from_packets,
     _elapsed_media_duration,
     _parse_ffprobe_packet_csv,
+    create_preview_frame,
+    preview_scale_filter,
 )
 
 
@@ -135,6 +138,23 @@ class TwitchPcrClipSeekTests(unittest.TestCase):
         ss = float(result[2][1])
         elapsed = raw_duration - start_time
         self.assertGreater(ss, elapsed - 5)
+
+
+class PreviewFrameTests(unittest.TestCase):
+    def test_scale_filter_letterboxes(self):
+        vf = preview_scale_filter(160, 90)
+        self.assertIn("scale=160:90:force_original_aspect_ratio=decrease", vf)
+        self.assertIn("pad=160:90:(ow-iw)/2:(oh-ih)/2:black", vf)
+
+    def test_missing_file_fails_closed(self):
+        ok, msg = create_preview_frame(
+            os.path.join("no", "such", "file.ts"),
+            os.path.join("no", "out.png"),
+            "ffmpeg",
+            logging.getLogger("test"),
+        )
+        self.assertFalse(ok)
+        self.assertIn("not found", msg)
 
 
 if __name__ == "__main__":

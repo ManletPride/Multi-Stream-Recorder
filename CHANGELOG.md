@@ -2,7 +2,11 @@
 
 ## Unreleased
 
-- Fishtank As Seen On (catalog 2026-09-10): `firstfloorptz` / `firstptz` → `first-floor-ptz-as-seen-on`; `rathew` → `rathew-as-seen-on`.
+Experimental branch `experiment/status-previews` (still v2.0.2 — not a numbered release).
+
+- Status tab live-frame strip for Recording/Remuxing channels: ffmpeg writes a 160×90 PNG every 4s on a worker thread. Worker status includes `raw_file` so the GUI does not `listdir` the recordings folder on the 1s tick.
+- Roster **Filter** + **Enabled** only; status **Recording first**; preview / roster / status share roster order and selection. Do not nest `update()` / `update_idletasks` inside `<<TreeviewSelect>>` (that froze the GUI on Windows).
+- Double-click a strip tile to pin a 480×270 preview above the others (Close, double-click the same tile, or double-click the large image to dismiss).
 
 ## v2.0.2
 
