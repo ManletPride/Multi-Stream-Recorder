@@ -15,7 +15,7 @@ from msr.util import (
     find_cookies_file,
     human_size,
     iter_channel_record_dirs,
-    kill_orphan_ffmpeg_processes,
+    kill_orphan_recording_processes,
     kill_process_tree,
 )
 from msr.worker import record_worker, remux_to_mp4, save_metadata
@@ -1015,8 +1015,8 @@ class StreamRecorder:
 
         self.processes = {}
 
-        logging.info("Checking for orphaned ffmpeg processes...")
-        kill_orphan_ffmpeg_processes(logging.getLogger(), streams_dir=self.root_path)
+        logging.info("Checking for orphaned recording processes...")
+        kill_orphan_recording_processes(logging.getLogger(), streams_dir=self.root_path)
 
         # All workers are dead now — normalize any stale 'Recording'/'Remuxing'
         # statuses so the busy-directory guard in BackgroundCleaner doesn't
@@ -1049,6 +1049,10 @@ class StreamRecorder:
     def run(self):
         if self.is_running:
             return
+        # Ghost workers from a dead instance reconnect if we only kill ffmpeg.
+        kill_orphan_recording_processes(
+            logging.getLogger(), streams_dir=self.root_path,
+        )
         self.is_running = True
         self.should_stop.clear()
 

@@ -33,7 +33,8 @@ Git branch **`experiment/status-previews`** (this tree, if you are on it) adds e
 * **Recording metadata** — JSON sidecar files with channel info, stream title, duration, and timestamps
 * **Micro-fragment throttle** — Detects CDN reset storms (repeated sub-30s recordings) and backs off rather than accumulating dozens of tiny files
 * **Auto-cleanup** — Configurable retention period for processed files
-* **Robust shutdown** — No orphaned processes, no zombie ffmpeg instances
+* **In-app updates** — When a newer GitHub release exists, the status bar shows **vX available**. Click it to download that tag’s zip, replace `Multi-Stream-Recorder.py` and `msr\`, and restart. `config.ini`, cookies, channels, and recordings stay. Fully quit if you copy files by hand — the GUI does not reload `msr/`
+* **Robust shutdown** — Stop / quit kill leftover workers and ffmpeg from a crashed copy (not only ffmpeg — a surviving worker reconnects). One instance per recordings folder; a second launch focuses the existing window
 
 ## Quick Start
 

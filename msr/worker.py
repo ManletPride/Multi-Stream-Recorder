@@ -240,6 +240,44 @@ def _elapsed_media_duration(raw_duration, start_time=0.0):
     return raw_duration
 
 
+def _file_wall_age_seconds(path):
+    """Seconds since *path* was created, or None if the FS has no birth time.
+
+    Used to catch MPEG-TS PCR resets (Kick HLS ads): ffprobe elapsed can be
+    33 min on a file that has existed for 99 min. Windows ``st_ctime`` is
+    creation; POSIX uses ``st_birthtime`` when the FS provides it.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    created = getattr(st, "st_birthtime", None)
+    if created is None and os.name == "nt":
+        created = st.st_ctime
+    if created is None:
+        return None
+    age = time.time() - float(created)
+    if age < 0:
+        return None
+    return age
+
+
+def _elapsed_matches_file_age(elapsed, path, slack=30.0):
+    """False when container elapsed is far behind how long the file has existed.
+
+    Kick mid-roll ads splice a new PCR into the same ``.ts``. ffprobe then
+    reports lastPTS−start as the duration (e.g. 2024s) while the capture is
+    ~5990s long. ``-ss`` from the start hits the *first* occurrence of that
+    clock — minutes behind live. ``-sseof`` still reads the last bytes.
+    """
+    if elapsed is None or elapsed <= 0:
+        return False
+    age = _file_wall_age_seconds(path)
+    if age is None:
+        return True
+    return not (age >= elapsed + slack and age > 45.0)
+
+
 def _clip_seek_from_packets(times, keys, clip_seconds, duration, start_time,
                             window_to_eof, past_cut=2.0):
     """Pick the clip start keyframe and ffmpeg seek args from a packet window.
@@ -410,13 +448,20 @@ def create_clip(raw_file, output_file, clip_seconds, ffmpeg_path, logger, timeou
         return False, "recording file not found"
 
     duration = _probe_duration(ffmpeg_path, raw_file)
+    if duration is not None and not _elapsed_matches_file_age(duration, raw_file):
+        age = _file_wall_age_seconds(raw_file)
+        age_s = f"{age:.0f}s" if age is not None else "unknown"
+        logger.info(
+            f"Clip: elapsed {duration:.1f}s disagrees with file age {age_s} "
+            "(likely a PCR reset / Kick ad splice) — seeking from EOF"
+        )
+        duration = None
 
     # Duration is a nice-to-have, not a requirement.  Some live MPEG-TS
     # captures never report one (see _probe_duration for why), and refusing
     # to clip in that case is wrong: ffmpeg can seek relative to the END of
-    # the file with -sseof without knowing the total length at all.  That's
-    # the same fallback create_screenshot uses, which is exactly why
-    # screenshots kept working on files where clipping bailed out.
+    # the file with -sseof without knowing the total length at all.  After a
+    # PCR reset, duration is *wrong* rather than missing — same EOF path.
     aligned = _find_clip_keyframe(ffmpeg_path, raw_file, clip_seconds, duration, logger)
     output_time_args = None
     if aligned is not None:
@@ -544,10 +589,9 @@ def create_screenshot(raw_file, output_file, ffmpeg_path, logger, offset_seconds
     So instead of grabbing the literal last frame, seek to a few seconds
     *before* the end, where the data is complete, and retry with a
     progressively larger backoff if the first attempt still lands in a
-    damaged region. Seeking is done from the start (-ss on the input)
-    using the duration ffprobe reports, since ffprobe only counts complete
-    data — this is the same reason create_clip's stream copy never hit
-    the problem.
+    damaged region. Prefer ``-sseof`` (same as live previews) so a Kick
+    PCR reset / ad splice cannot send ``-ss duration-N`` into the middle
+    of the file. Elapsed ``-ss`` is only the fallback.
 
     fmt selects the output codec (see SCREENSHOT_FORMATS); the extension of
     output_file should already match it — use screenshot_extension().
@@ -575,20 +619,26 @@ def create_screenshot(raw_file, output_file, ffmpeg_path, logger, offset_seconds
 
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
-    duration = _probe_duration(ffmpeg_path, raw_file)
-
-    # Back off further from the live edge on each retry. The first offset is
-    # normally enough; the later ones cover streams with long GOPs or a
-    # recorder that buffers more before flushing.
-    attempts = [offset_seconds, offset_seconds * 2, offset_seconds * 4]
+    duration = None
+    # Same order as create_preview_frame: end-relative first, elapsed -ss last.
+    attempts = [
+        ("sseof", offset_seconds),
+        ("sseof", offset_seconds * 2),
+        ("sseof", offset_seconds * 4),
+        ("ss", offset_seconds),
+    ]
     last_error = "no frame could be decoded"
 
-    for attempt_num, offset in enumerate(attempts, start=1):
-        if duration is not None and duration > 0:
+    for attempt_num, (mode, offset) in enumerate(attempts, start=1):
+        if mode == "ss":
+            if duration is None:
+                duration = _probe_duration(ffmpeg_path, raw_file)
+            if duration is None or duration <= 0:
+                continue
+            if not _elapsed_matches_file_age(duration, raw_file):
+                continue
             seek_args = ["-ss", f"{max(0.0, duration - offset):.2f}"]
         else:
-            # ffprobe couldn't read a duration (very new file) — fall back to
-            # end-relative seeking and hope there's enough complete data.
             seek_args = ["-sseof", f"-{offset:.2f}"]
 
         cmd = [

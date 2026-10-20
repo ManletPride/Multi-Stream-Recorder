@@ -20,9 +20,10 @@ from msr.deps import (
 from msr.recorder import StreamRecorder
 from msr.util import (
     COOKIE_DOT_COLORS, COOKIE_STATUS_UNKNOWN,
-    channel_file_stem, channel_key_to_dirs, channel_watch_url, check_for_updates,
-    coerce_channel_records, find_cookies_file,
-    get_cookie_status_for_channel, open_local_path, parse_custom_url,
+    application_dir, channel_file_stem, channel_key_to_dirs, channel_watch_url,
+    check_for_updates, coerce_channel_records, find_cookies_file,
+    get_cookie_status_for_channel, kill_orphan_recording_processes,
+    open_local_path, parse_custom_url,
     redact_for_log, validate_channel_name, validate_cookies,
 )
 from msr.iometer import (
@@ -1928,27 +1929,134 @@ def main_gui(config):
     update_label.grid(row=2, column=1, sticky="e")
     update_label.grid_remove()  # hidden until an update is found
 
-    _update_url = [None]  # mutable container for the release URL
+    _update_url = [None]
+    _update_zipball = [None]
+    _update_tag = [None]
+    _update_busy = [False]
 
-    def _on_update_found(latest_tag, release_url):
+    def _on_update_found(latest_tag, release_url, zipball_url=None):
         """Called from version check thread — schedules GUI update on main thread."""
         _update_url[0] = release_url
+        _update_zipball[0] = zipball_url or None
+        _update_tag[0] = latest_tag
         def _show():
-            update_label.configure(text=f"  v{latest_tag} available ↗")
+            update_label.configure(text=f"  v{latest_tag} available — click to install")
             update_label.grid()
         root.after(0, _show)
 
-    def _open_release(event=None):
-        if _update_url[0]:
-            import webbrowser
-            webbrowser.open(_update_url[0])
+    def _restore_update_banner():
+        tag = _update_tag[0]
+        if tag:
+            update_label.configure(
+                text=f"  v{tag} available — click to install", cursor="hand2",
+            )
+            update_label.grid()
+        _update_busy[0] = False
 
-    update_label.bind("<Button-1>", _open_release)
+    def _begin_in_app_update(event=None):
+        if _update_busy[0] or not _update_tag[0]:
+            return
+        from msr.update import (
+            prepare_update, spawn_updater, zipball_url_for_tag, zipball_url_is_allowed,
+        )
+        tag = _update_tag[0]
+        zip_url = _update_zipball[0]
+        if not zipball_url_is_allowed(zip_url or ""):
+            zip_url = zipball_url_for_tag(tag)
+        target = application_dir()
+        if not os.access(target, os.W_OK):
+            messagebox.showerror(
+                "Cannot update",
+                f"The install folder is not writable:\n{target}",
+            )
+            return
+        recording = bool(recorder and recorder.is_running)
+        extra = (
+            "Active recordings will be stopped first.\n\n"
+            if recording else ""
+        )
+        if not messagebox.askyesno(
+            "Install update",
+            f"Download v{tag} from GitHub and restart Multi-Stream Recorder?\n\n"
+            f"{extra}"
+            "config.ini, channels.json, cookies.txt, and recordings stay.\n"
+            "The app will quit and reopen on the new version.",
+        ):
+            return
+        _update_busy[0] = True
+        update_label.configure(text=f"  Downloading v{tag}…", cursor="arrow")
+
+        def _fail(msg):
+            logging.warning("In-app update failed: %s", msg)
+            messagebox.showerror(
+                "Update failed",
+                f"{msg}\n\nYou can still open the release page from GitHub.",
+            )
+            if _update_url[0]:
+                import webbrowser
+                webbrowser.open(_update_url[0])
+            _restore_update_banner()
+
+        def _spawn_then_quit(staging):
+            def _after_children():
+                spawn_updater(staging, target_dir=target)
+            _full_quit(after_children=_after_children)
+
+        def _stop_then_quit(staging):
+            rec = recorder
+            if rec and rec.is_running:
+                update_label.configure(text="  Stopping recordings…")
+
+                def _bg_stop():
+                    try:
+                        rec.stop()
+                    except Exception:
+                        logging.exception("Stop before update failed")
+                        root.after(0, lambda: _fail(
+                            "Could not stop recordings. Try Stop Recording, then click the banner again."
+                        ))
+                        return
+                    root.after(0, lambda: _spawn_then_quit(staging))
+
+                threading.Thread(target=_bg_stop, daemon=True, name="update-stop").start()
+                return
+            _spawn_then_quit(staging)
+
+        def _bg_download():
+            try:
+                staging = prepare_update(zip_url)
+            except Exception as e:
+                err = str(e) or "Download failed"
+                root.after(0, lambda m=err: _fail(m))
+                return
+            root.after(0, lambda: _stop_then_quit(staging))
+
+        threading.Thread(target=_bg_download, daemon=True, name="update-download").start()
+
+    update_label.bind("<Button-1>", _begin_in_app_update)
 
     # Delay the check by 10 seconds so it doesn't slow startup
     def _delayed_version_check():
         check_for_updates(__version__, callback=_on_update_found)
     root.after(10_000, _delayed_version_check)
+
+    def _warn_if_last_update_failed():
+        from msr.update import update_error_path
+        path = update_error_path()
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path, encoding="utf-8") as fh:
+                msg = fh.read().strip() or "The previous in-app update failed."
+        except Exception:
+            msg = "The previous in-app update failed."
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        messagebox.showerror("Update failed", msg)
+
+    root.after(400, _warn_if_last_update_failed)
 
     # ── Refresh functions ──
     def _get_platform_label(ch_name):
@@ -2633,11 +2741,13 @@ def main_gui(config):
 
         _full_quit()
 
-    def _full_quit():
+    def _full_quit(after_children=None):
         """Fully terminate the application — stop recorder, tray, and exit.
         
         Kills ALL child processes by walking the process tree, then calls
         os._exit(0) as a final backstop.  This prevents orphaned workers.
+        *after_children* runs after that kill (used to spawn the update helper
+        so it is not torn down with the workers).
         """
         # 1. Try graceful recorder shutdown
         try:
@@ -2665,6 +2775,23 @@ def main_gui(config):
             psutil.wait_procs(children, timeout=3)
         except Exception:
             pass
+
+        # 2b. Workers from a crashed *other* instance are not our children.
+        try:
+            kill_orphan_recording_processes(
+                logging.getLogger(),
+                streams_dir=config.get("Paths", "streams_dir"),
+            )
+        except Exception:
+            pass
+
+        # 2c. Start the update helper only after workers are gone so
+        # psutil.children() cannot kill it.
+        if after_children is not None:
+            try:
+                after_children()
+            except Exception:
+                logging.exception("Failed to start update helper")
 
         # 3. Stop tray and destroy window
         try:

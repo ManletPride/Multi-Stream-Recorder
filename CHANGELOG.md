@@ -7,6 +7,9 @@ Experimental branch `experiment/status-previews` (still v2.0.2 — not a numbere
 - Status tab live-frame strip for Recording/Remuxing channels: ffmpeg writes a 160×90 PNG every 4s on a worker thread. Worker status includes `raw_file` so the GUI does not `listdir` the recordings folder on the 1s tick.
 - Roster **Filter** + **Enabled** only; status **Recording first**; preview / roster / status share roster order and selection. Do not nest `update()` / `update_idletasks` inside `<<TreeviewSelect>>` (that froze the GUI on Windows).
 - Double-click a strip tile to pin a 480×270 preview above the others (Close, double-click the same tile, or double-click the large image to dismiss).
+- **One instance per recordings folder.** A second launch focuses the existing window (or tells you a `--headless` copy is running) instead of starting another worker set. Stop / quit / relaunch also kill leftover `record_worker` processes, not only ffmpeg — killing ffmpeg alone left ghost workers that treated SIGTERM as a drop and reconnected.
+- Status-bar **vX available** installs the GitHub release zipball (launcher + `msr/`, optional `requirements.txt` / `channels_fishtank.json`). Confirm → download → stop recordings → quit → helper copies files → relaunch. `config.ini`, `channels.json`, cookies, and recordings are not touched. `--headless` still only logs; it does not auto-update.
+- Clip Now / Screenshot follow the live edge after a Kick HLS ad splice (PCR reset). Previews already used `-sseof`; screenshots had preferred `-ss duration-N`, and clips used lastPTS−start (nicklee 16:40: elapsed 2024s on a 5990s file → ~66 min behind). Screenshots try `-sseof` first. Clips distrust elapsed when it is far behind the file’s age and cut from EOF.
 
 ## v2.0.2
 

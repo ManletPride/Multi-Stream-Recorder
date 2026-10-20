@@ -60,7 +60,15 @@ from msr.deps import (
 )
 from msr.gui import main_gui
 from msr.recorder import StreamRecorder, purge_old_pending_files
-from msr.util import coerce_channel_records, redact_for_log, setup_logging, validate_startup
+from msr.util import (
+    activate_existing_instance,
+    coerce_channel_records,
+    kill_orphan_recording_processes,
+    redact_for_log,
+    setup_logging,
+    try_acquire_single_instance,
+    validate_startup,
+)
 
 
 def main_headless(config):
@@ -159,6 +167,44 @@ examples:
     logging.info(f"System tray available: {HAS_TRAY}")
     logging.info(f"Notifications available: {HAS_NOTIFICATIONS}")
     logging.info(f"Streams directory: {config.get('Paths', 'streams_dir')}")
+
+    streams_dir = config.get('Paths', 'streams_dir')
+    if not try_acquire_single_instance(streams_dir, logging.getLogger()):
+        logging.warning(
+            "Another Multi-Stream Recorder is already running for this "
+            "recordings folder — exiting"
+        )
+        if args.headless:
+            print(
+                "Multi-Stream Recorder is already running for this "
+                "recordings folder. Stop that copy first."
+            )
+            sys.exit(1)
+        activated = activate_existing_instance()
+        if not activated:
+            try:
+                import tkinter as tk
+                from tkinter import messagebox
+                _root = tk.Tk()
+                _root.withdraw()
+                messagebox.showinfo(
+                    "Multi-Stream Recorder",
+                    "Multi-Stream Recorder is already running for this "
+                    "recordings folder.\n\n"
+                    "If you do not see the window, check the system tray "
+                    "or a --headless copy.",
+                )
+                _root.destroy()
+            except Exception:
+                print(
+                    "Multi-Stream Recorder is already running for this "
+                    "recordings folder."
+                )
+        sys.exit(0)
+
+    # Ghost workers from a crashed previous copy treat ffmpeg SIGTERM as a
+    # reconnect. Reap them before this instance records anything.
+    kill_orphan_recording_processes(logging.getLogger(), streams_dir=streams_dir)
 
     errors, warnings = validate_startup(config)
 

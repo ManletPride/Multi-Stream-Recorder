@@ -1,6 +1,7 @@
 """Shared helpers: paths, cookies, logging, process control, validation."""
 import configparser
 import datetime
+import hashlib
 import json
 import logging
 import os
@@ -459,8 +460,9 @@ def check_for_updates(current_version, callback=None):
 
     Args:
         current_version: The running version string (e.g. "3.2b")
-        callback: Optional function(latest_tag, release_url) called on the
-                  main thread (via root.after) if a newer version is found.
+        callback: Optional function(latest_tag, release_url, zipball_url)
+                  called if a newer version is found. A 2-arg callback is
+                  still accepted. The GUI schedules work with root.after.
     """
     def _check():
         try:
@@ -478,6 +480,7 @@ def check_for_updates(current_version, callback=None):
 
             latest_tag = data.get('tag_name', '').lstrip('vV')
             release_url = data.get('html_url', '')
+            zipball_url = data.get('zipball_url', '') or ''
 
             if not latest_tag or not release_url:
                 return
@@ -493,7 +496,10 @@ def check_for_updates(current_version, callback=None):
             latest_t = _version_tuple(latest_tag)
 
             if latest_t > current_t and callback:
-                callback(latest_tag, release_url)
+                try:
+                    callback(latest_tag, release_url, zipball_url)
+                except TypeError:
+                    callback(latest_tag, release_url)
 
         except Exception:
             pass  # silently ignore ALL failures
@@ -1102,80 +1108,447 @@ def _kill_process_tree_fallback(pid, logger=None):
                 pass
 
 
-def _ffmpeg_is_msr_network_orphan(cmdline, streams_dir):
-    """True if this ffmpeg cmdline is an MSR network capture under *streams_dir*.
+# Title of the main Tk window is ``Multi-Stream Recorder v{version}``.
+# Second-instance activation matches this prefix so About/error dialogs
+# titled ``Multi-Stream Recorder — …`` are not brought to the front.
+WINDOW_TITLE_PREFIX = "Multi-Stream Recorder v"
 
-    Requires both an http(s) input (live download, not a local remux/clip)
-    and the streams directory in the argv so a user's unrelated encode of
-    some other URL is left alone.
-    """
-    if not cmdline or not streams_dir:
-        return False
+_SPAWN_PARENT_RE = re.compile(r"parent_pid=(\d+)")
+_CAPTURE_NAME_MARKERS = ("ffmpeg", "streamlink", "yt-dlp", "yt_dlp")
+
+# Held for the process lifetime so the OS releases it on crash too.
+_instance_lock = None
+
+
+def _cmdline_text(cmdline):
+    if not cmdline:
+        return ""
     if isinstance(cmdline, (list, tuple)):
-        text = " ".join(str(p) for p in cmdline)
-    else:
-        text = str(cmdline)
-    lower = text.lower()
-    if "http://" not in lower and "https://" not in lower:
+        return " ".join(str(p) for p in cmdline)
+    return str(cmdline)
+
+
+def _argv_includes_streams_dir(text, streams_dir):
+    if not text or not streams_dir:
         return False
     marker = os.path.normcase(os.path.abspath(streams_dir))
-    haystack = os.path.normcase(text)
+    haystack = os.path.normcase(str(text))
     if marker in haystack:
         return True
     return marker.replace("\\", "/") in haystack.replace("\\", "/")
 
 
-def kill_orphan_ffmpeg_processes(logger=None, streams_dir=None):
-    """Safety net: kill leftover MSR network-ffmpeg after workers are gone.
+def _ffmpeg_is_msr_network_orphan(cmdline, streams_dir):
+    """True if this argv is an MSR *network* capture under *streams_dir*.
 
-    Only called during shutdown. Local remux/clip ffmpeg (no http) is skipped.
-    Network ffmpeg is killed only when its command line includes *streams_dir*,
-    so a user encode/download running at the same time is not SIGKILL'd.
+    Requires both an http(s) input (live download, not a local remux/clip)
+    and the streams directory in the argv so a user's unrelated encode of
+    some other URL is left alone. Same rule is used for streamlink/yt-dlp.
+    """
+    if not cmdline or not streams_dir:
+        return False
+    text = _cmdline_text(cmdline)
+    lower = text.lower()
+    if "http://" not in lower and "https://" not in lower:
+        return False
+    return _argv_includes_streams_dir(text, streams_dir)
+
+
+def _is_multiprocessing_spawn(cmdline):
+    """True for a Windows/spawn ``record_worker`` (or Manager) child."""
+    text = _cmdline_text(cmdline)
+    return "spawn_main" in text or "multiprocessing.spawn" in text
+
+
+def _spawn_parent_pid(cmdline):
+    m = _SPAWN_PARENT_RE.search(_cmdline_text(cmdline))
+    return int(m.group(1)) if m else None
+
+
+def _is_capture_process_name(name):
+    n = (name or "").lower()
+    return any(m in n for m in _CAPTURE_NAME_MARKERS)
+
+
+def window_title_is_msr(title):
+    """True if *title* is the main MSR window (not an error/About dialog)."""
+    return (title or "").startswith(WINDOW_TITLE_PREFIX)
+
+
+def single_instance_mutex_name(streams_dir):
+    """Windows mutex name, unique per recordings folder."""
+    key = os.path.normcase(os.path.abspath(streams_dir or "default"))
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+    return f"Local\\MultiStreamRecorder-{digest}"
+
+
+def single_instance_lock_path(streams_dir):
+    """POSIX lock file sitting in the recordings folder."""
+    return os.path.join(streams_dir or ".", ".msr_instance.lock")
+
+
+def try_acquire_single_instance(streams_dir, logger=None):
+    """Claim the per-``streams_dir`` instance lock. True if we own it.
+
+    Fail-open: if the lock cannot be created, this process continues so a
+    mutex/flock error never prevents recording.
+    """
+    global _instance_lock
+    if _instance_lock is not None:
+        return True
+    if os.name == "nt":
+        return _acquire_instance_mutex(streams_dir, logger)
+    return _acquire_instance_flock(streams_dir, logger)
+
+
+def release_single_instance():
+    """Drop the instance lock (tests; production holds it until exit)."""
+    global _instance_lock
+    if _instance_lock is None:
+        return
+    kind, handle = _instance_lock[0], _instance_lock[1]
+    _instance_lock = None
+    try:
+        if kind == "mutex":
+            import ctypes
+            ctypes.windll.kernel32.CloseHandle(handle)
+        elif kind == "flock":
+            try:
+                handle.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _acquire_instance_mutex(streams_dir, logger):
+    global _instance_lock
+    import ctypes
+    ERROR_ALREADY_EXISTS = 183
+    kernel32 = ctypes.windll.kernel32
+    name = single_instance_mutex_name(streams_dir)
+    kernel32.SetLastError(0)
+    handle = kernel32.CreateMutexW(None, False, name)
+    if not handle:
+        if logger:
+            logger.warning("Single-instance mutex could not be created; continuing")
+        return True
+    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(handle)
+        if logger:
+            logger.warning(
+                "Another Multi-Stream Recorder is already using %s", streams_dir
+            )
+        return False
+    _instance_lock = ("mutex", handle)
+    return True
+
+
+def _acquire_instance_flock(streams_dir, logger):
+    global _instance_lock
+    path = single_instance_lock_path(streams_dir)
+    try:
+        os.makedirs(streams_dir or ".", exist_ok=True)
+        fh = open(path, "a+")
+    except Exception as e:
+        if logger:
+            logger.warning("Single-instance lock file could not be created (%s); continuing", e)
+        return True
+    try:
+        import fcntl
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        if logger:
+            logger.warning(
+                "Another Multi-Stream Recorder is already using %s", streams_dir
+            )
+        return False
+    except Exception as e:
+        fh.close()
+        if logger:
+            logger.warning("Single-instance flock failed (%s); continuing", e)
+        return True
+    _instance_lock = ("flock", fh)
+    return True
+
+
+def activate_existing_instance():
+    """Restore and focus an already-running MSR window. Windows-only."""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        found = []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def _enum(hwnd, _lparam):
+            buf = ctypes.create_unicode_buffer(512)
+            if user32.GetWindowTextW(hwnd, buf, 512) and window_title_is_msr(buf.value):
+                found.append(hwnd)
+                return False
+            return True
+
+        user32.EnumWindows(_enum, 0)
+        if not found:
+            return False
+        _bring_hwnd_to_front(found[0])
+        return True
+    except Exception:
+        return False
+
+
+def _bring_hwnd_to_front(hwnd):
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    SW_RESTORE = 9
+    SW_SHOW = 5
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, SW_RESTORE)
+    else:
+        user32.ShowWindow(hwnd, SW_SHOW)
+    user32.BringWindowToTop(hwnd)
+    fg = user32.GetForegroundWindow()
+    if fg:
+        pid = wintypes.DWORD()
+        fg_tid = user32.GetWindowThreadProcessId(fg, ctypes.byref(pid))
+        this_tid = kernel32.GetCurrentThreadId()
+        user32.AttachThreadInput(this_tid, fg_tid, True)
+        try:
+            user32.SetForegroundWindow(hwnd)
+        finally:
+            user32.AttachThreadInput(this_tid, fg_tid, False)
+    else:
+        user32.SetForegroundWindow(hwnd)
+
+
+def _plan_orphan_kills(procs, streams_dir, keep_pids, spawn_open_paths=None):
+    """Decide which leftover workers / captures to kill.
+
+    *procs* is a list of dicts ``{pid, name, cmdline, parent_pid}``.
+    *keep_pids* is this instance (GUI + its descendants) — never killed.
+    *spawn_open_paths* maps spawn-worker pid → open file paths so a worker
+    in reconnect-grace (no ffmpeg child) is still found via the log/.ts.
+
+    Returns ``(worker_pids, leftover_capture_pids)``. Kill each worker with
+    ``kill_process_tree`` first; then SIGKILL leftover captures.
+    """
+    keep = set(keep_pids or ())
+    spawn_open_paths = spawn_open_paths or {}
+    by_pid = {p["pid"]: p for p in procs}
+    children = {}
+    for p in procs:
+        children.setdefault(p.get("parent_pid") or 0, []).append(p["pid"])
+
+    def _descendants(pid):
+        out = []
+        stack = list(children.get(pid, []))
+        seen = set()
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            out.append(cur)
+            stack.extend(children.get(cur, []))
+        return out
+
+    def _spawn_ancestor(pid):
+        seen = set()
+        row = by_pid.get(pid)
+        cur = by_pid.get((row or {}).get("parent_pid"))
+        while cur is not None and cur["pid"] not in seen:
+            seen.add(cur["pid"])
+            if _is_multiprocessing_spawn(cur.get("cmdline")):
+                return cur["pid"]
+            cur = by_pid.get(cur.get("parent_pid"))
+        return None
+
+    workers = set()
+    leftover_captures = set()
+
+    for p in procs:
+        pid = p["pid"]
+        if pid in keep:
+            continue
+        if not _is_capture_process_name(p.get("name")):
+            continue
+        if not _ffmpeg_is_msr_network_orphan(p.get("cmdline"), streams_dir):
+            continue
+        anc = _spawn_ancestor(pid)
+        if anc is not None and anc not in keep:
+            workers.add(anc)
+        else:
+            leftover_captures.add(pid)
+
+    for p in procs:
+        pid = p["pid"]
+        if pid in keep or pid in workers:
+            continue
+        if not _is_multiprocessing_spawn(p.get("cmdline")):
+            continue
+        paths = spawn_open_paths.get(pid) or []
+        if any(_argv_includes_streams_dir(path, streams_dir) for path in paths):
+            workers.add(pid)
+            continue
+        # Descendant local remux/clip ffmpeg does not count; network
+        # captures were already walked above. Also treat a spawn worker
+        # with a capture descendant as ours even if the capture's parent
+        # chain was incomplete.
+        for desc in _descendants(pid):
+            drow = by_pid.get(desc)
+            if not drow or desc in keep:
+                continue
+            if _is_capture_process_name(drow.get("name")) and _ffmpeg_is_msr_network_orphan(
+                drow.get("cmdline"), streams_dir
+            ):
+                workers.add(pid)
+                leftover_captures.discard(desc)
+                break
+
+    foreign_parents = set()
+    for wid in list(workers):
+        row = by_pid.get(wid)
+        pp = _spawn_parent_pid((row or {}).get("cmdline"))
+        if pp is None or pp in keep:
+            continue
+        foreign_parents.add(pp)
+
+    if foreign_parents:
+        for p in procs:
+            pid = p["pid"]
+            if pid in keep or pid in workers:
+                continue
+            if not _is_multiprocessing_spawn(p.get("cmdline")):
+                continue
+            if _spawn_parent_pid(p.get("cmdline")) in foreign_parents:
+                workers.add(pid)
+
+    worker_descendants = set()
+    for wid in workers:
+        worker_descendants.update(_descendants(wid))
+    leftover_captures -= workers
+    leftover_captures -= worker_descendants
+    leftover_captures -= keep
+
+    return sorted(workers), sorted(leftover_captures)
+
+
+def _descendant_pids(pid):
+    if not HAS_PSUTIL:
+        return set()
+    try:
+        return {c.pid for c in psutil.Process(pid).children(recursive=True)}
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return set()
+
+
+def kill_orphan_recording_processes(logger=None, streams_dir=None, keep_pid=None):
+    """Kill leftover MSR workers *and* their network captures.
+
+    Killing only ffmpeg leaves the spawn ``record_worker`` alive; it treats
+    SIGTERM as a stream drop and reconnects. Workers are identified as
+    ``spawn_main`` processes that either parent an MSR network capture
+    under *streams_dir* or have an open file there (log / .ts during
+    reconnect grace). This instance's PID tree (*keep_pid*) is never killed.
+
+    Local remux/clip ffmpeg (no http) and unrelated encodes are skipped.
     """
     if not streams_dir:
         if logger:
-            logger.info("Orphan ffmpeg check skipped — no streams directory given")
+            logger.info("Orphan recording check skipped — no streams directory given")
         return
+
+    keep_pid = os.getpid() if keep_pid is None else keep_pid
 
     if HAS_PSUTIL:
         try:
-            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            rows = []
+            for proc in psutil.process_iter(["pid", "name", "cmdline", "ppid"]):
                 try:
-                    if not (proc.info['name'] and 'ffmpeg' in proc.info['name'].lower()):
+                    info = proc.info
+                    pid = info.get("pid")
+                    if not pid:
                         continue
-                    cmdline = proc.info.get('cmdline') or []
-                    if _ffmpeg_is_msr_network_orphan(cmdline, streams_dir):
-                        if logger:
-                            logger.info(
-                                f"Killing orphaned ffmpeg (PID {proc.pid}) — "
-                                f"MSR network capture under {streams_dir}"
-                            )
-                        proc.kill()
-                    elif logger:
+                    rows.append({
+                        "pid": pid,
+                        "name": info.get("name") or "",
+                        "cmdline": info.get("cmdline") or [],
+                        "parent_pid": info.get("ppid") or 0,
+                    })
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+
+            keep = {keep_pid} | _descendant_pids(keep_pid)
+            spawn_open = {}
+            for row in rows:
+                pid = row["pid"]
+                if pid in keep or not _is_multiprocessing_spawn(row["cmdline"]):
+                    continue
+                try:
+                    spawn_open[pid] = [
+                        f.path for f in psutil.Process(pid).open_files()
+                    ]
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    spawn_open[pid] = []
+
+            workers, captures = _plan_orphan_kills(
+                rows, streams_dir, keep, spawn_open
+            )
+            for pid in workers:
+                if logger:
+                    logger.info(
+                        f"Killing orphaned record worker (PID {pid}) — "
+                        f"leftover spawn process under {streams_dir}"
+                    )
+                kill_process_tree(pid, logger)
+            for pid in captures:
+                if pid in keep:
+                    continue
+                try:
+                    if logger:
                         logger.info(
-                            f"Skipping ffmpeg PID {proc.pid} — not an MSR network capture"
+                            f"Killing orphaned capture (PID {pid}) — "
+                            f"MSR network capture under {streams_dir}"
                         )
+                    psutil.Process(pid).kill()
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
         except Exception as e:
             if logger:
-                logger.warning(f"Orphan ffmpeg check failed: {e}")
+                logger.warning(f"Orphan recording check failed: {e}")
         return
 
     # Fallback for Windows without psutil: cannot inspect command lines safely.
-    if os.name != 'nt':
+    if os.name != "nt":
         return
     try:
         result = subprocess.run(
-            ['tasklist', '/FI', 'IMAGENAME eq ffmpeg.exe', '/FO', 'CSV', '/NH'],
-            capture_output=True, text=True, timeout=10
+            ["tasklist", "/FI", "IMAGENAME eq ffmpeg.exe", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=10,
         )
-        if result.returncode != 0 or 'ffmpeg' not in result.stdout.lower():
+        if result.returncode != 0 or "ffmpeg" not in result.stdout.lower():
             return
         if logger:
-            logger.info("Found ffmpeg processes — cannot inspect command lines without psutil, skipping orphan kill")
+            logger.info(
+                "Found ffmpeg processes — cannot inspect command lines "
+                "without psutil, skipping orphan kill"
+            )
     except Exception:
         pass
+
+
+def kill_orphan_ffmpeg_processes(logger=None, streams_dir=None, keep_pid=None):
+    """Backward-compatible name; also kills leftover ``record_worker`` processes."""
+    kill_orphan_recording_processes(
+        logger=logger, streams_dir=streams_dir, keep_pid=keep_pid
+    )
 
 
 # ────────────────────────────────────────────────

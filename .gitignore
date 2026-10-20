@@ -26,6 +26,8 @@ venv/
 
 # Disk-space write probe (only appears if streams_dir is the repo folder)
 .msr_write_probe
+.msr_instance.lock
+msr_update_error.txt
 
 # IDE
 .vscode/
