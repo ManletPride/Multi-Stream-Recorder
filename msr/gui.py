@@ -17,6 +17,7 @@ from msr.deps import (
     HAS_YTDLP, STREAMLINK_VERSION, YTDLP_VERSION,
     Image, ImageDraw, plyer_notification, pystray,
 )
+from msr import channel_panel as cp
 from msr.recorder import StreamRecorder
 from msr.util import (
     COOKIE_DOT_COLORS, COOKIE_STATUS_UNKNOWN,
@@ -463,36 +464,15 @@ def main_gui(config):
         tree.tag_configure("unknown", foreground=t['offline_fg'])
 
         # Tk widgets (non-ttk) — set all frame backgrounds
-        for w in [frame_left, ch_tree_frame, platform_frame, btn_small_frame, move_btn_frame,
-                  frame_right, bottom_bar, btn_frame, toggle_frame, status_header]:
+        for w in [frame_right, bottom_bar, btn_frame, toggle_frame, status_header]:
             w.configure(bg=t['bg'])
         try:
-            filter_frame.configure(bg=t['bg'])
-            filter_label.configure(bg=t['bg'], fg=t['fg'])
-            filter_entry.configure(bg=t['entry_bg'], fg=t['entry_fg'],
-                                   insertbackground=t['fg'],
-                                   highlightbackground=border_color,
-                                   highlightcolor=t['accent'],
-                                   highlightthickness=1, relief='flat')
-        except NameError:
-            pass
-        ch_tree.tag_configure("enabled", foreground=t['fg'])
-        ch_tree.tag_configure("disabled", foreground="#777777")
-        try:
-            dot_canvas.configure(bg=t['bg'])
-            _redraw_dot_canvas()
+            _theme_roster(t)
         except NameError:
             pass  # not yet defined on first apply_theme call during startup
-        entry.configure(bg=t['entry_bg'], fg=t['entry_fg'], insertbackground=t['fg'],
-                        highlightbackground=border_color, highlightcolor=t['accent'],
-                        highlightthickness=1, relief='flat')
-        platform_label.configure(bg=t['bg'], fg=t['fg'])
         status_label.configure(bg=t['bg'], fg=t['fg'])
         poll_label.configure(bg=t['bg'], fg=t['fg'])
         clip_label.configure(bg=t['bg'], fg=t['fg'])
-        cookie_frame.configure(bg=t['bg'])
-        cookie_label.configure(bg=t['bg'], fg=t['fg'])
-        cookie_indicator.configure(bg=t['bg'])
         try:
             io_meter_label.configure(bg=t['bg'])
             _paint_io_meter()
@@ -503,12 +483,6 @@ def main_gui(config):
         except NameError:
             pass
 
-        for btn, bg_key in [(add_btn, 'btn_bg'), (remove_btn, 'btn_bg'),
-                            (up_btn, 'btn_bg'), (down_btn, 'btn_bg'),
-                            (top_btn, 'btn_bg'), (sort_btn, 'btn_bg')]:
-            btn.configure(bg=t[bg_key], fg=t['btn_fg'], activebackground=t['accent'],
-                          activeforeground='#ffffff',
-                          highlightbackground=border_color, relief='flat', bd=1)
         start_button.configure(bg=t['start_bg'], activebackground=t['start_bg'],
                                fg='#ffffff', activeforeground='#ffffff',
                                relief='flat', bd=0)
@@ -583,78 +557,14 @@ def main_gui(config):
         """Return list of all channel name strings."""
         return [ch["name"] for ch in channels]
 
-    # ── Left panel — Channel list with checkboxes ──
+    # ── Left panel — Channel roster (see msr/channel_panel.py) ──
+    # Layout: search + All/Enabled/Live toggle, a grouped Treeview
+    # (Recording / Channels / Disabled), a narrow canvas strip for the
+    # amber cookie badge, then "+ Add channel" and the cookies.txt line.
     frame_left = tk.Frame(root, padx=12, pady=12)
     frame_left.grid(row=0, column=0, sticky="ns", padx=(10, 5), pady=10)
 
-    # Container so ch_tree and the dot canvas sit side by side
-    ch_tree_frame = tk.Frame(frame_left)
-    ch_tree_frame.pack(fill=tk.BOTH, expand=True)
-
-    # Treeview — no cookie column; dots are drawn on a Canvas overlay instead
-    ch_tree = ttk.Treeview(ch_tree_frame, columns=("check", "name"), show="tree",
-                           height=22, selectmode="extended")
-    ch_tree.column("#0", width=0, stretch=False)  # hidden tree column
-    ch_tree.column("check", width=28, anchor="center", stretch=False)
-    ch_tree.column("name", width=270, anchor="w")
-    ch_tree.heading("check", text="")
-    ch_tree.heading("name", text="")
-    ch_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-    # Narrow Canvas strip for cookie dots — drawn independently of row tags
-    DOT_CANVAS_W = 18
-    dot_canvas = tk.Canvas(ch_tree_frame, width=DOT_CANVAS_W, highlightthickness=0,
-                           borderwidth=0)
-    dot_canvas.pack(side=tk.LEFT, fill=tk.Y)
-
-    def _redraw_dot_canvas():
-        """Repaint the dot canvas to match current treeview row positions."""
-        t = DARK if dark_mode.get() else LIGHT
-        dot_canvas.configure(bg=t['bg'])
-        dot_canvas.delete("all")
-        for item in ch_tree.get_children():
-            bbox = ch_tree.bbox(item)
-            if not bbox:
-                continue  # row is scrolled out of view
-            x, y, w, h = bbox
-            ch_name = ch_tree.item(item, "values")[1]  # col 0=check, 1=name
-            _, color = _cookie_dot_for_channel(ch_name)
-            cx = DOT_CANVAS_W // 2
-            cy = y + h // 2
-            r = 4
-            dot_canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
-                                   fill=color, outline="")
-
-    _dot_redraw_after_id = [None]
-
-    def _schedule_dot_redraw(_event=None):
-        """Coalesce scroll/select/theme redraws onto the next idle tick."""
-        if _dot_redraw_after_id[0] is not None:
-            return
-        def _run():
-            _dot_redraw_after_id[0] = None
-            _redraw_dot_canvas()
-        _dot_redraw_after_id[0] = dot_canvas.after(16, _run)
-
-    # Redraw on content, selection, size, and wheel/keyboard scroll — not a
-    # 500ms idle loop. yview is wrapped so arrow-key scrolling is caught too.
-    ch_tree.bind("<<TreeviewSelect>>", _schedule_dot_redraw)
-    ch_tree.bind("<Configure>", _schedule_dot_redraw)
-    ch_tree.bind("<MouseWheel>", _schedule_dot_redraw)
-    ch_tree.bind("<Button-4>", _schedule_dot_redraw)  # Linux scroll up
-    ch_tree.bind("<Button-5>", _schedule_dot_redraw)  # Linux scroll down
-    _orig_yview = ch_tree.yview
-
-    def _yview(*args):
-        result = _orig_yview(*args)
-        if args:
-            _schedule_dot_redraw()
-        return result
-
-    ch_tree.yview = _yview
-    dot_canvas.after(100, _redraw_dot_canvas)
-
-    # ── Tooltip explaining the cookie dot column ──
+    # ── Tooltip helper (also used by the right panel) ──
     class _Tooltip:
         def __init__(self, widget, text):
             self._widget = widget
@@ -683,47 +593,234 @@ def main_gui(config):
                 self._tip.destroy()
                 self._tip = None
 
-    _TOOLTIP_TEXT = "● Green  = cookie present\n● Orange = auth cookie expired\n● Red    = no cookie for this site\n○ Grey   = unknown / no cookies.txt"
-    _Tooltip(ch_tree, _TOOLTIP_TEXT)
-    _Tooltip(dot_canvas, _TOOLTIP_TEXT)
-
     CHECK_ON = "☑"
     CHECK_OFF = "☐"
 
     roster_filter_var = tk.StringVar(value=win_state.get("roster_filter", ""))
-    enabled_only_var = tk.BooleanVar(value=bool(win_state.get("roster_enabled_only", False)))
+    roster_view_var = tk.StringVar(value=cp.coerce_view(
+        win_state.get("roster_view"), bool(win_state.get("roster_enabled_only", False))))
+    disabled_collapsed = [bool(win_state.get("roster_disabled_collapsed", False))]
     recording_first_var = tk.BooleanVar(
         value=bool(win_state.get("status_recording_first", True))
     )
     _nav_lock = [False]
     _preview_selected = [None]
 
-    # Pre-fill the cookie cache immediately — before the first tree draw —
-    # so dots have real colours from the start rather than going grey first.
-    # This is just the data parse; widget updates happen later in update_cookie_status().
+    def _persist_roster_state():
+        try:
+            st = load_window_state(state_file)
+            st['roster_filter'] = roster_filter_var.get()
+            st['roster_view'] = roster_view_var.get()
+            st['roster_enabled_only'] = roster_view_var.get() == cp.VIEW_ENABLED
+            st['roster_disabled_collapsed'] = bool(disabled_collapsed[0])
+            save_window_state(state_file, st)
+        except Exception:
+            pass
+
+    # Pre-fill the cookie cache before the first draw (data parse only).
     _cookie_info_cache = [validate_cookies(find_cookies_file(config))]
+    _fishtank_login = bool(
+        str(config.get('Fishtank', 'email', fallback='') or '').strip()
+        and str(config.get('Fishtank', 'password', fallback='') or '').strip()
+    )
 
-    def _cookie_dot_for_channel(ch_name):
-        """Return (dot_char, fg_color) for the cookie indicator column."""
+    # ── Search + view toggle ──
+    search_frame = tk.Frame(frame_left)
+    search_frame.pack(fill=tk.X, pady=(0, 6))
+    filter_entry = tk.Entry(search_frame, textvariable=roster_filter_var,
+                            font=("Segoe UI", 10), borderwidth=0, relief="flat")
+    filter_entry.pack(fill=tk.X, ipady=4)
+    search_placeholder = tk.Label(search_frame, text="Search channels…",
+                                  font=("Segoe UI", 10), anchor="w", cursor="xterm")
+    search_placeholder.bind("<Button-1>", lambda e: filter_entry.focus_set())
+
+    def _update_search_placeholder(*_):
+        if roster_filter_var.get() or root.focus_get() is filter_entry:
+            search_placeholder.place_forget()
+        else:
+            search_placeholder.place(in_=filter_entry, x=4, rely=0.5, anchor="w")
+
+    filter_entry.bind("<FocusIn>", _update_search_placeholder, add="+")
+    filter_entry.bind("<FocusOut>", _update_search_placeholder, add="+")
+    filter_entry.bind("<Escape>", lambda e: roster_filter_var.set(""))
+
+    view_frame = tk.Frame(frame_left)
+    view_frame.pack(fill=tk.X, pady=(0, 6))
+    view_buttons = []
+    for _label, _val in (("All", cp.VIEW_ALL), ("Enabled", cp.VIEW_ENABLED), ("Live", cp.VIEW_LIVE)):
+        _b = tk.Radiobutton(view_frame, text=_label, value=_val, variable=roster_view_var,
+                            indicatoron=0, font=("Segoe UI", 9), relief="flat", bd=0,
+                            padx=10, pady=3, cursor="hand2")
+        _b.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 1))
+        view_buttons.append(_b)
+
+    # ── Tree + badge strip ──
+    ch_tree_frame = tk.Frame(frame_left)
+    ch_tree_frame.pack(fill=tk.BOTH, expand=True)
+
+    ch_tree = ttk.Treeview(ch_tree_frame, columns=("check", "name", "tag", "_key"),
+                           displaycolumns=("check", "name", "tag"), show="tree",
+                           height=10, selectmode="extended", style="Roster.Treeview")
+    ch_tree.column("#0", width=26, minwidth=26, stretch=False, anchor="center")
+    ch_tree.column("check", width=26, anchor="center", stretch=False)
+    ch_tree.column("name", width=200, anchor="w")
+    ch_tree.column("tag", width=66, anchor="e", stretch=False)
+    ch_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    DOT_CANVAS_W = 22
+    dot_canvas = tk.Canvas(ch_tree_frame, width=DOT_CANVAS_W, highlightthickness=0,
+                           borderwidth=0)
+    dot_canvas.pack(side=tk.LEFT, fill=tk.Y)
+
+    # Status dot images (transparent background works in both themes).
+    def _make_dot(color, size=12, r=4.5):
+        img = tk.PhotoImage(width=size, height=size)
+        c = (size - 1) / 2.0
+        for yy in range(size):
+            row = []
+            for xx in range(size):
+                if (xx - c) ** 2 + (yy - c) ** 2 <= r * r:
+                    row.append(xx)
+            for xx in row:
+                img.put(color, (xx, yy))
+        return img
+
+    _dot_images = {s: _make_dot(c) for s, c in cp.DOT_COLORS.items()}
+    _blank_image = tk.PhotoImage(width=12, height=12)
+    _DOT_TIPS = {
+        cp.STATE_RECORDING: "Recording",
+        cp.STATE_LIVE: "Live — not writing a file right now (starting / reconnecting)",
+        cp.STATE_OFFLINE: "Offline / not checked / disabled",
+    }
+
+    _row_state = {}     # iid -> STATE_* currently drawn
+    _row_group = {}     # iid -> group id
+    _badges = {}        # channel key -> tooltip text
+    _roster_sig = [None]
+
+    def _status_lookup():
+        if recorder and recorder.is_running:
+            try:
+                return recorder.status_dict
+            except Exception:
+                return {}
+        return {}
+
+    def _roster_states():
+        sd = _status_lookup()
+        return {ch["name"]: cp.channel_live_state(sd.get(ch["name"])) for ch in channels}
+
+    def _compute_badges():
+        sd = _status_lookup()
         info = _cookie_info_cache[0]
-        if info is None:
-            return ("○", COOKIE_DOT_COLORS[COOKIE_STATUS_UNKNOWN])
-        status = get_cookie_status_for_channel(ch_name, info)
-        dot = "●" if status != COOKIE_STATUS_UNKNOWN else "○"
-        return (dot, COOKIE_DOT_COLORS[status])
+        out = {}
+        for ch in channels:
+            key = ch["name"]
+            if not ch.get("enabled", True):
+                continue  # not monitored; no nagging on disabled rows
+            tip = cp.cookie_badge(key, info, sd.get(key),
+                                  get_status=get_cookie_status_for_channel,
+                                  fishtank_login=_fishtank_login)
+            if tip:
+                out[key] = tip
+        return out
 
-    # Simple row tags — just enabled/disabled for dimming.
-    # Cookie dot colours are drawn by the Canvas, not by row tags.
-    ch_tree.tag_configure("enabled", foreground="")   # themed by apply_theme
-    ch_tree.tag_configure("disabled", foreground="#777777")
+    def _redraw_dot_canvas():
+        """Paint amber cookie badges next to the rows that need one."""
+        t = DARK if dark_mode.get() else LIGHT
+        dot_canvas.configure(bg=t['tree_field'])
+        dot_canvas.delete("all")
+        for item in ch_tree.get_children():
+            key = _channel_name_from_item(item)
+            if not key or key not in _badges:
+                continue
+            bbox = ch_tree.bbox(item)
+            if not bbox:
+                continue
+            _x, y, _w, h = bbox
+            dot_canvas.create_text(DOT_CANVAS_W // 2, y + h // 2, text=cp.BADGE_GLYPH,
+                                   fill=cp.BADGE_COLOR, font=("Segoe UI Symbol", 10))
+
+    _dot_redraw_after_id = [None]
+
+    def _schedule_dot_redraw(_event=None):
+        if _dot_redraw_after_id[0] is not None:
+            return
+        def _run():
+            _dot_redraw_after_id[0] = None
+            _redraw_dot_canvas()
+        _dot_redraw_after_id[0] = dot_canvas.after(16, _run)
+
+    ch_tree.bind("<Configure>", _schedule_dot_redraw)
+    ch_tree.bind("<MouseWheel>", _schedule_dot_redraw)
+    ch_tree.bind("<Button-4>", _schedule_dot_redraw)
+    ch_tree.bind("<Button-5>", _schedule_dot_redraw)
+    dot_canvas.bind("<MouseWheel>", lambda e: (ch_tree.yview_scroll(int(-e.delta / 120), "units"), "break")[1])
+    _orig_yview = ch_tree.yview
+
+    def _yview(*args):
+        result = _orig_yview(*args)
+        if args:
+            _schedule_dot_redraw()
+        return result
+
+    ch_tree.yview = _yview
+
+    # ── Hover tooltip: badge reason, dot meaning, platform ──
+    _hover = {"tip": None, "text": None}
+
+    def _hover_hide(_e=None):
+        if _hover["tip"] is not None:
+            try:
+                _hover["tip"].destroy()
+            except tk.TclError:
+                pass
+        _hover["tip"] = None
+        _hover["text"] = None
+
+    def _hover_text(y, region_col):
+        item = ch_tree.identify_row(y)
+        key = _channel_name_from_item(item) if item else None
+        if not key:
+            return None
+        if region_col == "badge":
+            return _badges.get(key)
+        if region_col == "#0":
+            return _DOT_TIPS.get(_row_state.get(item, cp.STATE_OFFLINE))
+        if region_col == "#3":
+            tip = f"{key}"
+            if key in _badges:
+                tip += f"\n{_badges[key]}"
+            return tip
+        return _badges.get(key) if region_col == "#2" and key in _badges else None
+
+    def _hover_motion(event, col=None):
+        if col is None:
+            col = ch_tree.identify_column(event.x)
+        text = _hover_text(event.y, col)
+        if text == _hover["text"]:
+            return
+        _hover_hide()
+        if not text:
+            return
+        t = DARK if dark_mode.get() else LIGHT
+        tw = tk.Toplevel(ch_tree)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{event.x_root + 14}+{event.y_root + 16}")
+        tk.Label(tw, text=text, justify=tk.LEFT, background=t['entry_bg'],
+                 foreground=t['fg'], relief='solid', borderwidth=1,
+                 font=("Segoe UI", 9), padx=6, pady=4).pack()
+        _hover["tip"] = tw
+        _hover["text"] = text
+
+    ch_tree.bind("<Motion>", _hover_motion, add="+")
+    ch_tree.bind("<Leave>", _hover_hide, add="+")
+    dot_canvas.bind("<Motion>", lambda e: _hover_motion(e, "badge"), add="+")
+    dot_canvas.bind("<Leave>", _hover_hide, add="+")
 
     def _channel_name_from_item(item):
-        try:
-            vals = ch_tree.item(item, "values")
-        except tk.TclError:
-            return None
-        if vals and len(vals) > 1:
-            return vals[1]
+        if item and item.startswith("c:"):
+            return item[2:]
         return None
 
     def _index_for_name(name):
@@ -733,10 +830,11 @@ def main_gui(config):
         return -1
 
     def _item_for_name(name):
-        for item in ch_tree.get_children():
-            if _channel_name_from_item(item) == name:
-                return item
-        return None
+        iid = "c:" + name
+        try:
+            return iid if ch_tree.exists(iid) else None
+        except tk.TclError:
+            return None
 
     def _selected_roster_names():
         names = []
@@ -747,139 +845,173 @@ def main_gui(config):
         return names
 
     def _select_roster_names(names, see_first=True):
-        items = []
-        for name in names:
-            item = _item_for_name(name)
-            if item:
-                items.append(item)
+        items = [i for i in (_item_for_name(n) for n in names) if i]
         if not items:
             return
         ch_tree.selection_set(items)
         if see_first:
             ch_tree.see(items[0])
 
-    def _populate_channel_tree():
-        """Rebuild the channel treeview from the channels list."""
-        selected = _selected_roster_names()
-        query = roster_filter_var.get()
-        only_on = bool(enabled_only_var.get())
-        ch_tree.delete(*ch_tree.get_children())
-        for ch in channels:
-            if not channel_matches_filter(
-                ch["name"], ch.get("enabled", True), query, only_on
-            ):
-                continue
-            check = CHECK_ON if ch.get("enabled", True) else CHECK_OFF
-            tag = "enabled" if ch.get("enabled", True) else "disabled"
-            ch_tree.insert("", tk.END, values=(check, ch["name"]), tags=(tag,))
-        if selected:
-            _select_roster_names(selected)
-        dot_canvas.after(20, _redraw_dot_canvas)
+    _GROUP_TITLES = {
+        cp.GROUP_RECORDING: "Recording",
+        cp.GROUP_ENABLED: "Channels",
+        cp.GROUP_DISABLED: "Disabled",
+    }
 
-    _populate_channel_tree()
+    def _layout_signature(groups):
+        return (tuple((g, tuple(keys)) for g, keys in groups),
+                disabled_collapsed[0], bool(roster_filter_var.get().strip()),
+                tuple(ch.get("enabled", True) for ch in channels))
+
+    def _populate_channel_tree(states=None):
+        """Rebuild the roster from ``channels`` (filter, groups, dots)."""
+        if states is None:
+            states = _roster_states()
+        query = roster_filter_var.get()
+        view = roster_view_var.get()
+        groups = cp.group_channels(channels, states, query, view)
+        _roster_sig[0] = _layout_signature(groups)
+        enabled_by_key = {ch["name"]: ch.get("enabled", True) for ch in channels}
+
+        selected = _selected_roster_names()
+        try:
+            top = ch_tree.yview()[0]
+        except tk.TclError:
+            top = 0.0
+        ch_tree.delete(*ch_tree.get_children())
+        _row_state.clear()
+        _row_group.clear()
+        show_headers = sum(1 for _g, keys in groups if keys) > 1 or bool(groups[2][1])
+        for gid, keys in groups:
+            if not keys:
+                continue
+            collapsed = (gid == cp.GROUP_DISABLED and disabled_collapsed[0]
+                         and not query.strip())
+            if show_headers:
+                arrow = ("▸" if collapsed else "▾") if gid == cp.GROUP_DISABLED else ""
+                ch_tree.insert("", tk.END, iid="h:" + gid, image=_blank_image,
+                               values=(arrow, f"{_GROUP_TITLES[gid]} ({len(keys)})", "", ""),
+                               tags=("header",))
+            if collapsed:
+                continue
+            for key in keys:
+                enabled = enabled_by_key.get(key, True)
+                state = states.get(key, cp.STATE_OFFLINE)
+                if not enabled and state != cp.STATE_RECORDING:
+                    state = cp.STATE_OFFLINE
+                display, ptag = cp.channel_display(key)
+                iid = "c:" + key
+                ch_tree.insert("", tk.END, iid=iid, image=_dot_images[state],
+                               values=(CHECK_ON if enabled else CHECK_OFF, display, ptag, key),
+                               tags=("enabled" if enabled else "disabled",))
+                _row_state[iid] = state
+                _row_group[iid] = gid
+        if selected:
+            _select_roster_names(selected, see_first=False)
+        try:
+            ch_tree.yview_moveto(top)
+        except tk.TclError:
+            pass
+        _badges.clear()
+        _badges.update(_compute_badges())
+        _schedule_dot_redraw()
+
+    def _roster_live_tick():
+        """Called from refresh_status: move rows between groups / recolour dots."""
+        try:
+            states = _roster_states()
+            groups = cp.group_channels(channels, states, roster_filter_var.get(),
+                                       roster_view_var.get())
+            if _layout_signature(groups) != _roster_sig[0]:
+                _populate_channel_tree(states)
+                return
+            for iid, old in list(_row_state.items()):
+                key = _channel_name_from_item(iid)
+                new = states.get(key, cp.STATE_OFFLINE)
+                if _index_for_name(key) >= 0 and not channels[_index_for_name(key)].get("enabled", True) \
+                        and new != cp.STATE_RECORDING:
+                    new = cp.STATE_OFFLINE
+                if new != old:
+                    ch_tree.item(iid, image=_dot_images[new])
+                    _row_state[iid] = new
+            badges = _compute_badges()
+            if badges != _badges:
+                _badges.clear()
+                _badges.update(badges)
+                _schedule_dot_redraw()
+        except tk.TclError:
+            pass
+
+    def _toggle_disabled_group():
+        disabled_collapsed[0] = not disabled_collapsed[0]
+        _populate_channel_tree()
+        _persist_roster_state()
+
+    def _set_enabled(names, enabled):
+        changed = False
+        for name in names:
+            idx = _index_for_name(name)
+            if 0 <= idx < len(channels) and channels[idx].get("enabled", True) != enabled:
+                channels[idx]["enabled"] = enabled
+                changed = True
+        if changed:
+            _populate_channel_tree()
+            save_channels()
 
     def _toggle_channel_check(event):
-        """Toggle checkbox when user clicks in the check column."""
-        region = ch_tree.identify_region(event.x, event.y)
-        col = ch_tree.identify_column(event.x)
+        """Click the checkbox column to toggle; click a group header to fold it."""
         item = ch_tree.identify_row(event.y)
         if not item:
             return
-        # Only toggle if clicking the check column (#1)
-        if col == "#1":
+        if item.startswith("h:"):
+            if item == "h:" + cp.GROUP_DISABLED:
+                _toggle_disabled_group()
+            return
+        if ch_tree.identify_column(event.x) == "#1":
             name = _channel_name_from_item(item)
             idx = _index_for_name(name)
             if 0 <= idx < len(channels):
-                channels[idx]["enabled"] = not channels[idx].get("enabled", True)
-                enabled = channels[idx]["enabled"]
-                check = CHECK_ON if enabled else CHECK_OFF
-                tag = "enabled" if enabled else "disabled"
-                ch_tree.item(item, values=(check, channels[idx]["name"]), tags=(tag,))
-                if enabled_only_var.get() and not enabled:
-                    _populate_channel_tree()
-                dot_canvas.after(20, _redraw_dot_canvas)
-                save_channels()
+                _set_enabled([name], not channels[idx].get("enabled", True))
 
     ch_tree.bind("<ButtonRelease-1>", _toggle_channel_check)
 
     def _double_click_toggle(event):
-        """Double-clicking anywhere on a row toggles its enabled state."""
+        """Double-clicking anywhere on a channel row toggles its enabled state."""
         item = ch_tree.identify_row(event.y)
-        if not item:
-            return
         name = _channel_name_from_item(item)
+        if not name or ch_tree.identify_column(event.x) == "#1":
+            return  # the single-click handler already toggled the checkbox
         idx = _index_for_name(name)
         if 0 <= idx < len(channels):
-            channels[idx]["enabled"] = not channels[idx].get("enabled", True)
-            enabled = channels[idx]["enabled"]
-            check = CHECK_ON if enabled else CHECK_OFF
-            tag = "enabled" if enabled else "disabled"
-            ch_tree.item(item, values=(check, channels[idx]["name"]), tags=(tag,))
-            if enabled_only_var.get() and not enabled:
-                _populate_channel_tree()
-            dot_canvas.after(20, _redraw_dot_canvas)
-            save_channels()
+            _set_enabled([name], not channels[idx].get("enabled", True))
 
     ch_tree.bind("<Double-ButtonRelease-1>", _double_click_toggle)
 
-    filter_frame = tk.Frame(frame_left)
-    filter_frame.pack(fill=tk.X, pady=(6, 0))
-    filter_label = tk.Label(filter_frame, text="Filter:", font=("Segoe UI", 9))
-    filter_label.pack(side=tk.LEFT)
-    filter_entry = tk.Entry(
-        filter_frame, textvariable=roster_filter_var, width=16,
-        font=("Segoe UI", 9), borderwidth=0, relief="flat",
-    )
-    filter_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 6))
-    enabled_only_cb = ttk.Checkbutton(
-        filter_frame, text="Enabled", variable=enabled_only_var,
-        command=_populate_channel_tree,
-    )
-    enabled_only_cb.pack(side=tk.LEFT)
-    roster_filter_var.trace_add("write", lambda *_: _populate_channel_tree())
-    _Tooltip(filter_entry,
-             "Type to hide roster rows whose names\n"
-             "do not contain this text. Enabled limits\n"
-             "the list to checked channels.")
+    def _on_filter_change(*_):
+        _update_search_placeholder()
+        _populate_channel_tree()
 
-    platform_frame = tk.Frame(frame_left)
-    platform_frame.pack(fill=tk.X, pady=(10, 5))
-    platform_label = tk.Label(platform_frame, text="Platform:", font=("Segoe UI", 9))
-    platform_label.pack(side=tk.LEFT)
-    platform_var = tk.StringVar(value="kick")
-    ttk.Combobox(platform_frame, textvariable=platform_var,
-                 values=["kick", "twitch", "youtube", "rumble", "tiktok", "fishtank", "custom"], state="readonly", width=10).pack(side=tk.LEFT, padx=6)
-
-    entry = tk.Entry(frame_left, width=34, font=("Segoe UI", 10), borderwidth=0, relief="flat")
-    entry.pack(pady=6)
-
-    btn_small_frame = tk.Frame(frame_left)
-    btn_small_frame.pack(pady=4)
+    roster_filter_var.trace_add("write", _on_filter_change)
+    roster_view_var.trace_add("write", lambda *_: (_populate_channel_tree(), _persist_roster_state()))
 
     recorder = None
     _stop_in_progress = [False]
 
-    def add_channel():
-        platform = platform_var.get()
-        name = entry.get().strip()
-        if not name:
-            return
-
+    # ── Add / remove ──
+    def _add_channel_from_dialog(name, platform):
         existing_names = get_all_channel_names()
         is_valid, error_msg = validate_channel_name(name, platform, existing_names)
         if not is_valid:
-            messagebox.showwarning("Invalid Channel", error_msg)
-            return
-
-        if platform == "custom":
-            ch_name = f"custom:{name}"  # name is the full URL
-        elif platform != "kick":
-            ch_name = f"{platform}:{name}"
-        else:
-            ch_name = name
-
+            return False, error_msg
+        ch_name = cp.build_channel_key(name, platform)
+        if ch_name in existing_names:
+            return False, f"{ch_name} is already in the list."
         ch = {"name": ch_name, "enabled": True}
         channels.append(ch)
+        if roster_filter_var.get():
+            roster_filter_var.set("")  # make sure the new row is visible
+        if roster_view_var.get() == cp.VIEW_LIVE:
+            roster_view_var.set(cp.VIEW_ALL)
         _populate_channel_tree()
         _select_roster_names([ch_name])
         save_channels()
@@ -887,10 +1019,23 @@ def main_gui(config):
             recorder.start_channel(ch_name)
         elif recorder:
             recorder.status_dict[ch_name] = {"status": "Initializing", "detail": "", "size": "", "time": ""}
-        entry.delete(0, tk.END)
+        return True, ""
+
+    def add_channel(initial_text=""):
+        t = DARK if dark_mode.get() else LIGHT
+        cp.open_add_channel_dialog(root, t, _add_channel_from_dialog,
+                                   initial_text=initial_text)
 
     def remove_selected():
         names = _selected_roster_names()
+        if not names:
+            return
+        shown = "\n".join(names[:8]) + (f"\n… and {len(names) - 8} more" if len(names) > 8 else "")
+        if not messagebox.askyesno(
+                "Remove channel" + ("s" if len(names) > 1 else ""),
+                f"Remove from the list (recordings on disk are kept)?\n\n{shown}",
+                parent=root):
+            return
         drop = set(names)
         for ch_name in names:
             if recorder:
@@ -899,31 +1044,31 @@ def main_gui(config):
         _populate_channel_tree()
         save_channels()
 
-    def _move_channel_up():
-        """Move selected channel up in the list."""
+    # ── Reorder (context menu; replaces the ▲ ▼ Top buttons) ──
+    def _move_channel_step(direction):
+        """Swap with the visible neighbour in the same group (up or down)."""
         names = _selected_roster_names()
         if not names:
             return
-        idx = _index_for_name(names[0])
-        if idx <= 0 or idx >= len(channels):
+        iid = "c:" + names[0]
+        rows = [i for i in ch_tree.get_children() if i.startswith("c:")
+                and _row_group.get(i) == _row_group.get(iid)]
+        if iid not in rows:
             return
-        channels[idx], channels[idx - 1] = channels[idx - 1], channels[idx]
-        _populate_channel_tree()
-        save_channels()
-        _select_roster_names([channels[idx - 1]["name"]])
+        pos = rows.index(iid) + (-1 if direction == "up" else 1)
+        if pos < 0 or pos >= len(rows):
+            return
+        anchor = _channel_name_from_item(rows[pos])
+        if cp.move_relative(channels, names[0], anchor, after=(direction == "down")):
+            _populate_channel_tree()
+            save_channels()
+            _select_roster_names([names[0]])
+
+    def _move_channel_up():
+        _move_channel_step("up")
 
     def _move_channel_down():
-        """Move selected channel down in the list."""
-        names = _selected_roster_names()
-        if not names:
-            return
-        idx = _index_for_name(names[0])
-        if idx < 0 or idx >= len(channels) - 1:
-            return
-        channels[idx], channels[idx + 1] = channels[idx + 1], channels[idx]
-        _populate_channel_tree()
-        save_channels()
-        _select_roster_names([channels[idx + 1]["name"]])
+        _move_channel_step("down")
 
     def _move_selected_channels(to):
         """Jump selected roster rows to the top or bottom as a stable block."""
@@ -945,65 +1090,23 @@ def main_gui(config):
     def _move_channels_to_bottom():
         _move_selected_channels("bottom")
 
-    add_btn = tk.Button(btn_small_frame, text="Add", command=add_channel, width=10,
-                        font=("Segoe UI", 9))
-    add_btn.pack(side=tk.LEFT, padx=4)
-    remove_btn = tk.Button(btn_small_frame, text="Remove", command=remove_selected, width=10,
-                           font=("Segoe UI", 9))
-    remove_btn.pack(side=tk.LEFT, padx=4)
-
-    # Move Up/Down buttons for channel reordering
-    move_btn_frame = tk.Frame(frame_left)
-    move_btn_frame.pack(pady=2)
-    up_btn = tk.Button(move_btn_frame, text="▲", command=_move_channel_up, width=3,
-                       font=("Segoe UI", 8))
-    up_btn.pack(side=tk.LEFT, padx=2)
-    down_btn = tk.Button(move_btn_frame, text="▼", command=_move_channel_down, width=3,
-                         font=("Segoe UI", 8))
-    down_btn.pack(side=tk.LEFT, padx=2)
-    top_btn = tk.Button(move_btn_frame, text="Top", command=_move_channels_to_top, width=4,
-                        font=("Segoe UI", 8))
-    top_btn.pack(side=tk.LEFT, padx=2)
-    _Tooltip(top_btn,
-             "Move the selected channel(s) to the\n"
-             "top of the roster. Right-click for\n"
-             "Move to Top / Move to Bottom.")
-
-    # ── Channel list sorting ──
+    # ── Channel list sorting (one-shot, persisted; right-click → Sort) ──
     def _channel_sort_parts(ch):
-        """Return (platform, username) lowercased for sorting.
-        Bare names are Kick channels; custom entries sort by their URL."""
-        name = ch["name"]
-        if ":" in name:
-            platform, user = name.split(":", 1)
-        else:
-            platform, user = "kick", name
+        platform, user = cp.split_channel_key(ch["name"])
         return platform.lower(), user.lower()
 
     def _sort_channels(mode):
-        """One-shot re-order of the channel list, persisted like manual moves.
-
-        All sorts are stable (Python's list.sort), so 'Enabled First' keeps
-        the existing relative order within the enabled and disabled groups —
-        and sorts can be layered: By Platform then Enabled First gives
-        enabled-on-top, each group still ordered by platform.
-        """
         if len(channels) < 2:
             return
-        # Remember selection by name so it survives the reshuffle
         selected_names = set(_selected_roster_names())
-
         if mode == "enabled":
             channels.sort(key=lambda ch: not ch.get("enabled", True))
         elif mode == "platform":
             channels.sort(key=_channel_sort_parts)
         elif mode == "name":
             channels.sort(key=lambda ch: _channel_sort_parts(ch)[1])
-
         _populate_channel_tree()
         save_channels()
-
-        # Restore selection on the moved rows
         if selected_names:
             _select_roster_names(list(selected_names))
         logging.info(f"Channel list sorted ({mode})")
@@ -1013,18 +1116,25 @@ def main_gui(config):
     sort_menu.add_command(label="By Platform", command=lambda: _sort_channels("platform"))
     sort_menu.add_command(label="By Name (A–Z)", command=lambda: _sort_channels("name"))
 
-    def _show_sort_menu():
-        try:
-            sort_menu.tk_popup(sort_btn.winfo_rootx(),
-                               sort_btn.winfo_rooty() + sort_btn.winfo_height())
-        finally:
-            sort_menu.grab_release()
+    add_frame = tk.Frame(frame_left)
+    add_frame.pack(fill=tk.X, pady=(8, 0))
+    add_btn = tk.Button(add_frame, text="+  Add channel", command=add_channel,
+                        font=("Segoe UI", 9), cursor="hand2")
+    add_btn.pack(fill=tk.X, ipady=2)
+    _Tooltip(add_btn, "Add a Kick / Twitch / YouTube / Rumble / TikTok /\n"
+                      "Fishtank channel or a custom URL  (Ctrl+N or Insert).\n"
+                      "Right-click a channel to enable, remove, or reorder.")
 
-    sort_btn = tk.Button(move_btn_frame, text="Sort ▾", command=_show_sort_menu,
-                         width=7, font=("Segoe UI", 8))
-    sort_btn.pack(side=tk.LEFT, padx=2)
+    def _search_enter(_e=None):
+        text = roster_filter_var.get().strip()
+        add_channel(text)
+        return "break"
 
-    # ── Cookie status indicator ──
+    filter_entry.bind("<Return>", _search_enter)
+    _Tooltip(filter_entry, "Filter as you type (name or platform).\n"
+                           "Enter: add a channel with this name.  Esc: clear.")
+
+    # ── Cookie status line ──
     cookie_frame = tk.Frame(frame_left)
     cookie_frame.pack(fill=tk.X, pady=(8, 0))
 
@@ -1033,12 +1143,22 @@ def main_gui(config):
     cookie_label = tk.Label(cookie_frame, text="Cookies: checking...", font=("Segoe UI", 8))
     cookie_label.pack(side=tk.LEFT)
 
+    def _cookie_summary_tip():
+        summary = cp.platform_cookie_summary(
+            _cookie_info_cache[0], get_status=get_cookie_status_for_channel,
+            fishtank_login=_fishtank_login)
+        words = {"present": "ok", "missing": "no cookie", "expired": "EXPIRED",
+                 "unknown": "unknown", "login": "email/password login"}
+        lines = [f"{cp.PLATFORM_LABELS[p]}: {words.get(s, s)}" for p, s in summary.items()]
+        return ("Per-site cookies (cookies.txt):\n" + "\n".join(lines) +
+                f"\n\n{cp.BADGE_GLYPH} on a channel = its site needs attention.")
+
+    _Tooltip(cookie_frame, _cookie_summary_tip)
+
     def update_cookie_status():
-        """Check cookies.txt, update the global indicator, and refresh per-channel dots."""
+        """Check cookies.txt, update the global indicator, and refresh badges."""
         cookies_path = find_cookies_file(config)
         info = validate_cookies(cookies_path)
-
-        # Refresh the cache so per-channel dots update on the next tree redraw
         _cookie_info_cache[0] = info
 
         base_text = f"{info['total_cookies']} entries, {len(info['domains'])} domains"
@@ -1070,10 +1190,12 @@ def main_gui(config):
                 cookie_indicator.configure(text="●", fg="#4CAF50")
             cookie_label.configure(text=f"Cookies: {base_text}{expiry_note}")
 
-        # Refresh dots to reflect the updated cache
-        dot_canvas.after(20, _redraw_dot_canvas)
+        _badges.clear()
+        _badges.update(_compute_badges())
+        _schedule_dot_redraw()
 
-    # Run initial check, then re-check every 5 minutes
+    _populate_channel_tree()
+    _update_search_placeholder()
     update_cookie_status()
 
     def _periodic_cookie_check():
@@ -1082,13 +1204,59 @@ def main_gui(config):
 
     root.after(300_000, _periodic_cookie_check)
 
+    def _theme_roster(t):
+        """Left-panel colours; called from apply_theme."""
+        border_color = t['border']
+        style.configure('Roster.Treeview', background=t['tree_field'],
+                        fieldbackground=t['tree_field'], foreground=t['tree_fg'],
+                        rowheight=28, font=("Segoe UI", 10), borderwidth=0,
+                        bordercolor=border_color, lightcolor=t['tree_field'],
+                        darkcolor=t['tree_field'])
+        style.map('Roster.Treeview', background=[('selected', t['select_bg'])],
+                  foreground=[('selected', t['select_fg'])])
+        style.layout('Roster.Treeview', [('Treeview.treearea', {'sticky': 'nswe'})])
+        ch_tree.tag_configure("enabled", foreground=t['tree_fg'])
+        ch_tree.tag_configure("disabled", foreground="#777777")
+        ch_tree.tag_configure("header", foreground=t['offline_fg'],
+                              font=("Segoe UI", 9, "bold"))
+        for w in (frame_left, ch_tree_frame, search_frame, view_frame, add_frame,
+                  cookie_frame):
+            w.configure(bg=t['bg'])
+        ch_tree_frame.configure(bg=t['tree_field'], highlightthickness=1,
+                                highlightbackground=border_color)
+        filter_entry.configure(bg=t['entry_bg'], fg=t['entry_fg'],
+                               insertbackground=t['fg'],
+                               highlightbackground=border_color,
+                               highlightcolor=t['accent'],
+                               highlightthickness=1, relief='flat')
+        search_placeholder.configure(bg=t['entry_bg'], fg="#8a8a8a")
+        for b in view_buttons:
+            b.configure(bg=t['btn_bg'], fg=t['btn_fg'], selectcolor=t['accent'],
+                        activebackground=t['accent'], activeforeground='#ffffff',
+                        highlightthickness=0)
+        _paint_view_buttons()
+        add_btn.configure(bg=t['btn_bg'], fg=t['btn_fg'], activebackground=t['accent'],
+                          activeforeground='#ffffff', highlightbackground=border_color,
+                          relief='flat', bd=1)
+        cookie_label.configure(bg=t['bg'], fg=t['fg'])
+        cookie_indicator.configure(bg=t['bg'])
+        dot_canvas.configure(bg=t['tree_field'])
+        _schedule_dot_redraw()
+
+    def _paint_view_buttons(*_):
+        t = DARK if dark_mode.get() else LIGHT
+        for b in view_buttons:
+            on = b.cget("value") == roster_view_var.get()
+            b.configure(fg='#ffffff' if on else t['btn_fg'])
+
+    roster_view_var.trace_add("write", _paint_view_buttons)
+
     # ── Right-click context menu on channel list ──
     ctx_menu = tk.Menu(root, tearoff=0)
 
     def _start_selected_channel_from_list():
         """Start recording a channel from the channel list (mid-session)."""
-        selected_items = ch_tree.selection()
-        if not selected_items or not recorder or not recorder.is_running:
+        if not ch_tree.selection() or not recorder or not recorder.is_running:
             return
         for ch_name in _selected_roster_names():
             idx = _index_for_name(ch_name)
@@ -1102,8 +1270,7 @@ def main_gui(config):
 
     def _stop_selected_channel_from_list():
         """Stop recording a channel from the channel list."""
-        selected_items = ch_tree.selection()
-        if not selected_items or not recorder or not recorder.is_running:
+        if not ch_tree.selection() or not recorder or not recorder.is_running:
             return
         names = _selected_roster_names()
         if not names:
@@ -1119,27 +1286,33 @@ def main_gui(config):
 
     def _check_now_selected_from_list():
         """Skip the poll timer and check the selected channel(s) immediately."""
-        selected_items = ch_tree.selection()
-        if not selected_items or not recorder or not recorder.is_running:
+        if not ch_tree.selection() or not recorder or not recorder.is_running:
             return
         for ch_name in _selected_roster_names():
             recorder.check_now(ch_name)
 
     def show_context_menu(event):
-        # Select the item under cursor if not already selected
         item = ch_tree.identify_row(event.y)
-        if item:
-            if item not in ch_tree.selection():
-                ch_tree.selection_set(item)
+        if item and item.startswith("h:"):
+            return
+        if item and item not in ch_tree.selection():
+            ch_tree.selection_set(item)
+        names = _selected_roster_names()
 
-        # Rebuild menu dynamically
         ctx_menu.delete(0, tk.END)
 
-        # If a recording session is active, show Start/Stop Recording option
-        if recorder and recorder.is_running and ch_tree.selection():
-            ch_name = _channel_name_from_item(ch_tree.selection()[0])
+        if names:
+            all_on = all(channels[_index_for_name(n)].get("enabled", True)
+                         for n in names if _index_for_name(n) >= 0)
+            if all_on:
+                ctx_menu.add_command(label="Disable", command=lambda: _set_enabled(names, False))
+            else:
+                ctx_menu.add_command(label="Enable", command=lambda: _set_enabled(names, True))
+
+        if recorder and recorder.is_running and names:
+            ch_name = names[0]
             idx = _index_for_name(ch_name)
-            if ch_name and 0 <= idx < len(channels):
+            if 0 <= idx < len(channels):
                 st = recorder.status_dict.get(ch_name, {})
                 status_lower = st.get("status", "").lower()
                 if status_lower in ("stopped",) or ch_name not in recorder.status_dict:
@@ -1148,24 +1321,25 @@ def main_gui(config):
                     ctx_menu.add_command(label="Stop Recording", command=_stop_selected_channel_from_list)
                 else:
                     ctx_menu.add_command(label="Start Recording", command=_start_selected_channel_from_list)
-                # "Check Now" — skip the poll timer for channels that are
-                # waiting between checks (offline, error backoff, etc.)
                 if status_lower.startswith(("offline", "error")):
                     ctx_menu.add_command(label="Check Now", command=_check_now_selected_from_list)
-                ctx_menu.add_separator()
+        ctx_menu.add_separator()
 
-        ctx_menu.add_command(label="Open in Browser", command=open_channel_url)
+        ctx_menu.add_command(label="Open stream page", command=open_channel_url)
         ctx_menu.add_command(label="Open Clips Folder", command=_open_roster_clips_dir)
         ctx_menu.add_command(label="Copy Name", command=copy_channel_name)
         ctx_menu.add_separator()
-        ctx_menu.add_command(label="Toggle Selected", command=_toggle_selected_channels)
+        ctx_menu.add_command(label="Move to Top", command=_move_channels_to_top)
+        ctx_menu.add_command(label="Move Up", command=_move_channel_up)
+        ctx_menu.add_command(label="Move Down", command=_move_channel_down)
+        ctx_menu.add_command(label="Move to Bottom", command=_move_channels_to_bottom)
+        ctx_menu.add_cascade(label="Sort", menu=sort_menu)
+        ctx_menu.add_separator()
         ctx_menu.add_command(label="Enable All", command=_enable_all_channels)
         ctx_menu.add_command(label="Disable All", command=_disable_all_channels)
-        ctx_menu.add_cascade(label="Sort", menu=sort_menu)
-        ctx_menu.add_command(label="Move to Top", command=_move_channels_to_top)
-        ctx_menu.add_command(label="Move to Bottom", command=_move_channels_to_bottom)
+        ctx_menu.add_command(label="Add channel…", command=add_channel)
         ctx_menu.add_separator()
-        ctx_menu.add_command(label="Remove", command=remove_selected)
+        ctx_menu.add_command(label="Remove…", command=remove_selected)
 
         try:
             ctx_menu.tk_popup(event.x_root, event.y_root)
@@ -1173,14 +1347,12 @@ def main_gui(config):
             ctx_menu.grab_release()
 
     def copy_channel_name():
-        selected_items = ch_tree.selection()
-        if selected_items:
-            names = _selected_roster_names()
+        names = _selected_roster_names()
+        if names:
             root.clipboard_clear()
             root.clipboard_append("\n".join(names))
 
     def open_channel_url():
-        selected_items = ch_tree.selection()
         names = _selected_roster_names()
         if names:
             _open_channel_in_browser(names[0])
@@ -1209,8 +1381,12 @@ def main_gui(config):
     ch_tree.bind("<Button-3>", show_context_menu)
 
     # ── Keyboard shortcuts ──
-    entry.bind("<Return>", lambda e: add_channel())
     ch_tree.bind("<Delete>", lambda e: remove_selected())
+    ch_tree.bind("<space>", lambda e: (_toggle_selected_channels(), "break")[1])
+    ch_tree.bind("<Return>", lambda e: (add_channel(), "break")[1])
+    ch_tree.bind("<Insert>", lambda e: add_channel())
+    root.bind("<Control-n>", lambda e: add_channel())
+    root.bind("<Control-f>", lambda e: (filter_entry.focus_set(), "break")[1])
 
     def _about_dialog():
         deps = []
@@ -2242,6 +2418,10 @@ def main_gui(config):
         root.after_idle(lambda n=ch_name: _scroll_nav_into_view(n))
 
     def _on_roster_select(_event=None):
+        headers = [i for i in ch_tree.selection() if i.startswith("h:")]
+        if headers:
+            ch_tree.selection_remove(*headers)  # group headers are not channels
+            return
         _schedule_dot_redraw()
         if _nav_lock[0]:
             return
@@ -2527,6 +2707,7 @@ def main_gui(config):
                              if recorder.status_dict.get(ch_name, {}).get("status", "").lower().startswith("recording"))
                 tray_icon.title = f"Multi-Stream Recorder — {active} recording" if active else "Multi-Stream Recorder — idle"
 
+        _roster_live_tick()
         root.after(2500, refresh_status)
 
     def refresh_logs():
@@ -2732,7 +2913,9 @@ def main_gui(config):
                 'dark_mode': dark_mode.get(),
                 'column_widths': col_widths,
                 'roster_filter': roster_filter_var.get(),
-                'roster_enabled_only': bool(enabled_only_var.get()),
+                'roster_view': roster_view_var.get(),
+                'roster_enabled_only': roster_view_var.get() == cp.VIEW_ENABLED,
+                'roster_disabled_collapsed': bool(disabled_collapsed[0]),
                 'status_recording_first': bool(recording_first_var.get()),
             }
             save_window_state(state_file, state)
