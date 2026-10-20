@@ -42,6 +42,7 @@ keeps working; recording workers import ``msr.worker.record_worker`` directly
 so Windows spawn does not re-run the GUI.
 """
 
+import msr.nowindow  # noqa: F401  (must come first: hides child console windows)
 import argparse
 import json
 import logging
@@ -53,6 +54,7 @@ import threading
 
 from msr import __version__
 from msr.config import Config
+from msr.paths import ENV_VAR as DATA_DIR_ENV, activate_data_dir, resolve_data_dir
 from msr.deps import (
     DENO_VERSION, FFMPEG_VERSION, HAS_CURL_CFFI, HAS_DENO, HAS_FFMPEG,
     HAS_NOTIFICATIONS, HAS_PSUTIL, HAS_STREAMLINK, HAS_TRAY, HAS_YTDLP,
@@ -60,7 +62,15 @@ from msr.deps import (
 )
 from msr.gui import main_gui
 from msr.recorder import StreamRecorder, purge_old_pending_files
-from msr.util import coerce_channel_records, redact_for_log, setup_logging, validate_startup
+from msr.util import (
+    activate_existing_instance,
+    coerce_channel_records,
+    kill_orphan_recording_processes,
+    redact_for_log,
+    setup_logging,
+    try_acquire_single_instance,
+    validate_startup,
+)
 
 
 def main_headless(config):
@@ -132,12 +142,16 @@ examples:
   %(prog)s                     Launch GUI (default)
   %(prog)s --headless          Run without GUI (Ctrl+C to stop)
   %(prog)s --config my.ini     Use a custom config file
+  %(prog)s --data-dir D:\\msr-data   Code here; config, channels, cookies from D:\\msr-data
         """,
     )
     parser.add_argument('--headless', action='store_true',
                         help='Run without GUI (background mode)')
     parser.add_argument('--config', default='config.ini',
-                        help='Path to config file (default: config.ini)')
+                        help='Path to config file (default: config.ini, relative to the data dir)')
+    parser.add_argument('--data-dir', default=None,
+                        help=f'Folder holding config.ini, channels.json, window_state.json, '
+                             f'kick_channel_ids.json (default: ${DATA_DIR_ENV} or the current directory)')
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
 
     args = parser.parse_args()
@@ -145,7 +159,15 @@ examples:
     if os.name == 'nt':
         mp.set_start_method('spawn', force=True)
 
-    config = Config(args.config)
+    data_dir = resolve_data_dir(args.data_dir)
+    if data_dir:
+        try:
+            activate_data_dir(data_dir)
+        except FileNotFoundError as e:
+            print(f"ERROR: {e}")
+            sys.exit(2)
+
+    config = Config(os.path.abspath(args.config))
 
     setup_logging(config.get('Paths', 'streams_dir'), config)
 
@@ -159,6 +181,45 @@ examples:
     logging.info(f"System tray available: {HAS_TRAY}")
     logging.info(f"Notifications available: {HAS_NOTIFICATIONS}")
     logging.info(f"Streams directory: {config.get('Paths', 'streams_dir')}")
+    logging.info(f"Data directory: {os.getcwd()} (config: {config.config_file})")
+
+    streams_dir = config.get('Paths', 'streams_dir')
+    if not try_acquire_single_instance(streams_dir, logging.getLogger()):
+        logging.warning(
+            "Another Multi-Stream Recorder is already running for this "
+            "recordings folder — exiting"
+        )
+        if args.headless:
+            print(
+                "Multi-Stream Recorder is already running for this "
+                "recordings folder. Stop that copy first."
+            )
+            sys.exit(1)
+        activated = activate_existing_instance()
+        if not activated:
+            try:
+                import tkinter as tk
+                from tkinter import messagebox
+                _root = tk.Tk()
+                _root.withdraw()
+                messagebox.showinfo(
+                    "Multi-Stream Recorder",
+                    "Multi-Stream Recorder is already running for this "
+                    "recordings folder.\n\n"
+                    "If you do not see the window, check the system tray "
+                    "or a --headless copy.",
+                )
+                _root.destroy()
+            except Exception:
+                print(
+                    "Multi-Stream Recorder is already running for this "
+                    "recordings folder."
+                )
+        sys.exit(0)
+
+    # Ghost workers from a crashed previous copy treat ffmpeg SIGTERM as a
+    # reconnect. Reap them before this instance records anything.
+    kill_orphan_recording_processes(logging.getLogger(), streams_dir=streams_dir)
 
     errors, warnings = validate_startup(config)
 

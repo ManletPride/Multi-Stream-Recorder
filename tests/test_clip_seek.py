@@ -1,14 +1,22 @@
 """Clip keyframe alignment: elapsed file time, not MPEG-TS PCR."""
+import logging
 import os
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from msr.worker import (
     _clip_seek_from_packets,
+    _elapsed_matches_file_age,
     _elapsed_media_duration,
     _parse_ffprobe_packet_csv,
+    create_clip,
+    create_preview_frame,
+    create_screenshot,
+    preview_scale_filter,
 )
 
 
@@ -84,6 +92,75 @@ class ClipSeekFromPacketsTests(unittest.TestCase):
         self.assertEqual(seek_args[0], "-sseof")
 
 
+class ElapsedMatchesFileAgeTests(unittest.TestCase):
+    def test_nicklee_pcr_reset_is_untrusted(self):
+        # 16:40 clip: elapsed 2024s on a 5990s capture.
+        with mock.patch("msr.worker._file_wall_age_seconds", return_value=5990.0):
+            self.assertFalse(_elapsed_matches_file_age(2023.9, "nicklee.ts"))
+
+    def test_normal_live_file_is_trusted(self):
+        with mock.patch("msr.worker._file_wall_age_seconds", return_value=305.0):
+            self.assertTrue(_elapsed_matches_file_age(300.0, "ok.ts"))
+
+    def test_unknown_age_keeps_elapsed(self):
+        with mock.patch("msr.worker._file_wall_age_seconds", return_value=None):
+            self.assertTrue(_elapsed_matches_file_age(2024.0, "posix.ts"))
+
+    def test_young_file_slack(self):
+        with mock.patch("msr.worker._file_wall_age_seconds", return_value=40.0):
+            self.assertTrue(_elapsed_matches_file_age(20.0, "young.ts"))
+
+
+class ClipPcrResetTests(unittest.TestCase):
+    def test_untrusted_elapsed_probes_without_duration(self):
+        seen = {}
+
+        def fake_find(ffmpeg_path, raw_file, clip_seconds, duration, logger, timeout=15):
+            seen["duration"] = duration
+            return None
+
+        with tempfile.TemporaryDirectory() as td:
+            raw = os.path.join(td, "live.ts")
+            out = os.path.join(td, "clip.mp4")
+            with open(raw, "wb") as fh:
+                fh.write(b"\x00" * 2048)
+            with mock.patch("msr.worker._probe_duration", return_value=2023.9):
+                with mock.patch("msr.worker._elapsed_matches_file_age", return_value=False):
+                    with mock.patch("msr.worker._find_clip_keyframe", side_effect=fake_find):
+                        with mock.patch("msr.worker.subprocess.run") as run:
+                            run.return_value = mock.Mock(returncode=1, stderr="fail\n")
+                            create_clip(raw, out, 30, "ffmpeg", logging.getLogger("test"))
+        self.assertIn("duration", seen)
+        self.assertIsNone(seen["duration"])
+
+
+class ScreenshotSeekTests(unittest.TestCase):
+    def test_prefers_sseof_over_duration_ss(self):
+        cmds = []
+
+        def fake_run(cmd, **kwargs):
+            cmds.append(list(cmd))
+            outp = cmd[-1]
+            with open(outp, "wb") as fh:
+                fh.write(b"\xff" * 2048)
+            return mock.Mock(returncode=0, stderr="")
+
+        with tempfile.TemporaryDirectory() as td:
+            raw = os.path.join(td, "live.ts")
+            out = os.path.join(td, "shot.jpg")
+            with open(raw, "wb") as fh:
+                fh.write(b"\x00" * 2048)
+            with mock.patch("msr.worker.subprocess.run", side_effect=fake_run):
+                with mock.patch("msr.worker._probe_duration", return_value=2024.0):
+                    ok, _msg = create_screenshot(
+                        raw, out, "ffmpeg", logging.getLogger("test"),
+                    )
+        self.assertTrue(ok)
+        self.assertTrue(cmds)
+        self.assertIn("-sseof", cmds[0])
+        self.assertNotIn("-ss", cmds[0])
+
+
 class ElapsedMediaDurationTests(unittest.TestCase):
     def test_twitch_last_pts_is_converted_to_elapsed(self):
         # powdur: format.duration 12686, start_time 12621, file ~65s.
@@ -135,6 +212,23 @@ class TwitchPcrClipSeekTests(unittest.TestCase):
         ss = float(result[2][1])
         elapsed = raw_duration - start_time
         self.assertGreater(ss, elapsed - 5)
+
+
+class PreviewFrameTests(unittest.TestCase):
+    def test_scale_filter_letterboxes(self):
+        vf = preview_scale_filter(160, 90)
+        self.assertIn("scale=160:90:force_original_aspect_ratio=decrease", vf)
+        self.assertIn("pad=160:90:(ow-iw)/2:(oh-ih)/2:black", vf)
+
+    def test_missing_file_fails_closed(self):
+        ok, msg = create_preview_frame(
+            os.path.join("no", "such", "file.ts"),
+            os.path.join("no", "out.png"),
+            "ffmpeg",
+            logging.getLogger("test"),
+        )
+        self.assertFalse(ok)
+        self.assertIn("not found", msg)
 
 
 if __name__ == "__main__":

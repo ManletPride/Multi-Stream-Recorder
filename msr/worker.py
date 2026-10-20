@@ -79,6 +79,53 @@ from msr.util import (
 #      file takes a fraction of a second regardless of the recording's
 #      total length.
 
+RECONNECT_POLL_INTERVAL = 15           # seconds between checks in the fast phase
+RECONNECT_EXTENDED_POLL_INTERVAL = 30  # seconds between checks in the extended phase
+
+
+class ReconnectWindow:
+    """Post-drop polling schedule: fast phase, extended phase, then normal.
+
+    The window is armed lazily on the first ``next_poll()`` call, i.e. at the
+    first live check after the recording's final remux, not when the capture
+    process exits. A large remux can take minutes and used to consume the
+    whole grace period before a single fast poll ran.
+    """
+
+    def __init__(self, fast_seconds, extended_seconds,
+                 fast_interval=RECONNECT_POLL_INTERVAL,
+                 extended_interval=RECONNECT_EXTENDED_POLL_INTERVAL,
+                 clock=time.monotonic):
+        self.fast_seconds = max(0, fast_seconds)
+        self.extended_seconds = max(0, extended_seconds)
+        self.fast_interval = fast_interval
+        self.extended_interval = extended_interval
+        self._clock = clock
+        self._fast_end = None
+        self._extended_end = None
+
+    def reset(self):
+        """Disarm; the next next_poll() starts a fresh window."""
+        self._fast_end = None
+        self._extended_end = None
+
+    def next_poll(self):
+        """Return (phase, remaining_seconds, sleep_seconds).
+
+        phase is "fast", "extended" or "expired"; sleep_seconds is None when
+        expired (caller falls back to normal offline polling).
+        """
+        now = self._clock()
+        if self._fast_end is None:
+            self._fast_end = now + self.fast_seconds
+            self._extended_end = self._fast_end + self.extended_seconds
+        if now < self._fast_end:
+            return "fast", int(self._fast_end - now), self.fast_interval
+        if now < self._extended_end:
+            return "extended", int(self._extended_end - now), self.extended_interval
+        return "expired", 0, None
+
+
 def find_active_recording_file(recorder, channel_key):
     """Locate the .ts file currently being written for a channel.
 
@@ -238,6 +285,44 @@ def _elapsed_media_duration(raw_duration, start_time=0.0):
     if start_time >= 1000.0 and raw_duration > start_time:
         return raw_duration - start_time
     return raw_duration
+
+
+def _file_wall_age_seconds(path):
+    """Seconds since *path* was created, or None if the FS has no birth time.
+
+    Used to catch MPEG-TS PCR resets (Kick HLS ads): ffprobe elapsed can be
+    33 min on a file that has existed for 99 min. Windows ``st_ctime`` is
+    creation; POSIX uses ``st_birthtime`` when the FS provides it.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    created = getattr(st, "st_birthtime", None)
+    if created is None and os.name == "nt":
+        created = st.st_ctime
+    if created is None:
+        return None
+    age = time.time() - float(created)
+    if age < 0:
+        return None
+    return age
+
+
+def _elapsed_matches_file_age(elapsed, path, slack=30.0):
+    """False when container elapsed is far behind how long the file has existed.
+
+    Kick mid-roll ads splice a new PCR into the same ``.ts``. ffprobe then
+    reports lastPTS−start as the duration (e.g. 2024s) while the capture is
+    ~5990s long. ``-ss`` from the start hits the *first* occurrence of that
+    clock — minutes behind live. ``-sseof`` still reads the last bytes.
+    """
+    if elapsed is None or elapsed <= 0:
+        return False
+    age = _file_wall_age_seconds(path)
+    if age is None:
+        return True
+    return not (age >= elapsed + slack and age > 45.0)
 
 
 def _clip_seek_from_packets(times, keys, clip_seconds, duration, start_time,
@@ -410,13 +495,20 @@ def create_clip(raw_file, output_file, clip_seconds, ffmpeg_path, logger, timeou
         return False, "recording file not found"
 
     duration = _probe_duration(ffmpeg_path, raw_file)
+    if duration is not None and not _elapsed_matches_file_age(duration, raw_file):
+        age = _file_wall_age_seconds(raw_file)
+        age_s = f"{age:.0f}s" if age is not None else "unknown"
+        logger.info(
+            f"Clip: elapsed {duration:.1f}s disagrees with file age {age_s} "
+            "(likely a PCR reset / Kick ad splice) — seeking from EOF"
+        )
+        duration = None
 
     # Duration is a nice-to-have, not a requirement.  Some live MPEG-TS
     # captures never report one (see _probe_duration for why), and refusing
     # to clip in that case is wrong: ffmpeg can seek relative to the END of
-    # the file with -sseof without knowing the total length at all.  That's
-    # the same fallback create_screenshot uses, which is exactly why
-    # screenshots kept working on files where clipping bailed out.
+    # the file with -sseof without knowing the total length at all.  After a
+    # PCR reset, duration is *wrong* rather than missing — same EOF path.
     aligned = _find_clip_keyframe(ffmpeg_path, raw_file, clip_seconds, duration, logger)
     output_time_args = None
     if aligned is not None:
@@ -544,10 +636,9 @@ def create_screenshot(raw_file, output_file, ffmpeg_path, logger, offset_seconds
     So instead of grabbing the literal last frame, seek to a few seconds
     *before* the end, where the data is complete, and retry with a
     progressively larger backoff if the first attempt still lands in a
-    damaged region. Seeking is done from the start (-ss on the input)
-    using the duration ffprobe reports, since ffprobe only counts complete
-    data — this is the same reason create_clip's stream copy never hit
-    the problem.
+    damaged region. Prefer ``-sseof`` (same as live previews) so a Kick
+    PCR reset / ad splice cannot send ``-ss duration-N`` into the middle
+    of the file. Elapsed ``-ss`` is only the fallback.
 
     fmt selects the output codec (see SCREENSHOT_FORMATS); the extension of
     output_file should already match it — use screenshot_extension().
@@ -575,20 +666,26 @@ def create_screenshot(raw_file, output_file, ffmpeg_path, logger, offset_seconds
 
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
-    duration = _probe_duration(ffmpeg_path, raw_file)
-
-    # Back off further from the live edge on each retry. The first offset is
-    # normally enough; the later ones cover streams with long GOPs or a
-    # recorder that buffers more before flushing.
-    attempts = [offset_seconds, offset_seconds * 2, offset_seconds * 4]
+    duration = None
+    # Same order as create_preview_frame: end-relative first, elapsed -ss last.
+    attempts = [
+        ("sseof", offset_seconds),
+        ("sseof", offset_seconds * 2),
+        ("sseof", offset_seconds * 4),
+        ("ss", offset_seconds),
+    ]
     last_error = "no frame could be decoded"
 
-    for attempt_num, offset in enumerate(attempts, start=1):
-        if duration is not None and duration > 0:
+    for attempt_num, (mode, offset) in enumerate(attempts, start=1):
+        if mode == "ss":
+            if duration is None:
+                duration = _probe_duration(ffmpeg_path, raw_file)
+            if duration is None or duration <= 0:
+                continue
+            if not _elapsed_matches_file_age(duration, raw_file):
+                continue
             seek_args = ["-ss", f"{max(0.0, duration - offset):.2f}"]
         else:
-            # ffprobe couldn't read a duration (very new file) — fall back to
-            # end-relative seeking and hope there's enough complete data.
             seek_args = ["-sseof", f"-{offset:.2f}"]
 
         cmd = [
@@ -634,6 +731,97 @@ def create_screenshot(raw_file, output_file, ffmpeg_path, logger, offset_seconds
         if attempt_num < len(attempts):
             logger.warning(f"Screenshot: frame at ~{offset:.0f}s behind live was incomplete "
                            f"— retrying further back")
+
+    return False, last_error
+
+
+def _hidden_run(cmd, timeout):
+    """subprocess.run with no console window on Windows."""
+    kwargs = {"capture_output": True, "text": True, "timeout": timeout}
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        kwargs["startupinfo"] = startupinfo
+    return subprocess.run(cmd, **kwargs)
+
+
+def preview_scale_filter(width=160, height=90):
+    """ffmpeg -vf to fit a frame in *width* x *height* with letterbox."""
+    w, h = int(width), int(height)
+    return (
+        f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black"
+    )
+
+
+def create_preview_frame(raw_file, output_file, ffmpeg_path, logger,
+                         width=160, height=90, offset_seconds=3.0, timeout=12):
+    """Grab a small still from near the live edge of *raw_file* for the GUI.
+
+    Same seek-before-EOF idea as ``create_screenshot`` (incomplete last GOP),
+    but scales to a thumbnail, writes PNG (tk.PhotoImage), and hides the
+    ffmpeg console. Failures are quiet — previews are best-effort.
+    """
+    if not raw_file or not os.path.exists(raw_file):
+        return False, "recording file not found"
+    try:
+        if os.path.getsize(raw_file) < 64 * 1024:
+            return False, "file too small"
+    except OSError as e:
+        return False, str(e)
+
+    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
+    vf = preview_scale_filter(width, height)
+    # Prefer -sseof so a 4s GUI tick does not ffprobe every channel first.
+    # Fall back to elapsed -ss (same as screenshots) if the live tail is junk.
+    duration = None
+    attempts = [
+        ("sseof", offset_seconds),
+        ("sseof", offset_seconds * 2),
+        ("ss", offset_seconds),
+    ]
+    last_error = "no frame"
+
+    for mode, offset in attempts:
+        if mode == "ss":
+            if duration is None:
+                duration = _probe_duration(ffmpeg_path, raw_file)
+            if duration is None or duration <= 0:
+                continue
+            seek_args = ["-ss", f"{max(0.0, duration - offset):.2f}"]
+        else:
+            seek_args = ["-sseof", f"-{offset:.2f}"]
+        cmd = [
+            ffmpeg_path, "-hide_banner", "-y",
+            *seek_args,
+            "-i", raw_file,
+            "-map", "0:v:0", "-an",
+            "-frames:v", "1",
+            "-vf", vf,
+            "-f", "image2",
+            "-loglevel", "error",
+            output_file,
+        ]
+        try:
+            result = _hidden_run(cmd, timeout)
+        except subprocess.TimeoutExpired:
+            return False, "ffmpeg timed out"
+        except FileNotFoundError:
+            return False, "ffmpeg not found"
+        except Exception as e:
+            return False, str(e)
+
+        wrote = os.path.exists(output_file) and os.path.getsize(output_file) > 200
+        if result.returncode == 0 and wrote:
+            return True, "ok"
+        if os.path.exists(output_file) and not wrote:
+            try:
+                os.remove(output_file)
+            except Exception:
+                pass
+        err_lines = (result.stderr or "").strip().splitlines()
+        last_error = err_lines[-1] if err_lines else f"ffmpeg exited {result.returncode}"
 
     return False, last_error
 
@@ -1071,6 +1259,7 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                     "size_bytes": int(size),
                     "time": format_elapsed(elapsed),
                     "progress": progress_pct,
+                    "raw_file": raw_file,
                 }
                 if new_status != last_status:
                     status_queue.put((channel_key, new_status))
@@ -1127,11 +1316,11 @@ def _probe_duration(ffmpeg_path, raw_file):
     _big = ["-probesize", "50M", "-analyzeduration", "20M"]
     start_time = 0.0
     try:
-        fmt = subprocess.run(
+        fmt = _hidden_run(
             [ffprobe_path, "-v", "error", *_big,
              "-show_entries", "format=duration,start_time",
              "-of", "default=noprint_wrappers=1", raw_file],
-            capture_output=True, text=True, timeout=20,
+            timeout=20,
         )
         parsed = {}
         for line in (fmt.stdout or "").splitlines():
@@ -1154,12 +1343,12 @@ def _probe_duration(ffmpeg_path, raw_file):
         pass
 
     try:
-        result = subprocess.run(
+        result = _hidden_run(
             [ffprobe_path, "-v", "error", *_big,
              "-select_streams", "v:0",
              "-show_entries", "stream=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", raw_file],
-            capture_output=True, text=True, timeout=20,
+            timeout=20,
         )
         for val in (result.stdout or "").split():
             val = val.strip()
@@ -1176,9 +1365,9 @@ def _probe_duration(ffmpeg_path, raw_file):
 
     # Fallback: parse "Duration: HH:MM:SS.ss" from ffmpeg -i stderr
     try:
-        result = subprocess.run(
+        result = _hidden_run(
             [ffmpeg_path, "-i", raw_file, "-hide_banner"],
-            capture_output=True, text=True, timeout=20,
+            timeout=20,
         )
         import re as _re
         m = _re.search(r"Duration:\s*(\d+):(\d{2}):(\d{2})\.(\d+)", result.stderr)
@@ -1686,6 +1875,7 @@ def record_worker(args):
     poll_jitter_percent = parser_getint(config, 'Timeouts', 'poll_jitter_percent', 20)
     error_backoff_max_minutes = parser_getfloat(config, 'Timeouts', 'error_backoff_max_minutes', 15.0)
     reconnect_grace_minutes = parser_getint(config, 'Timeouts', 'reconnect_grace_minutes', 3)
+    reconnect_extended_minutes = parser_getint(config, 'Timeouts', 'reconnect_extended_minutes', 10)
     file_creation_timeout = parser_getint(config, 'Timeouts', 'file_creation_timeout', 60)
     filename_pattern = config.get('Recording', 'filename_pattern', fallback='{username}_{timestamp}') or '{username}_{timestamp}'
 
@@ -1782,8 +1972,8 @@ def record_worker(args):
 
     # Fast reconnect state
     reconnect_mode = False
-    reconnect_deadline = 0  # monotonic timestamp when grace period expires
-    RECONNECT_POLL_INTERVAL = 15  # seconds between checks during grace period
+    reconnect_window = ReconnectWindow(reconnect_grace_minutes * 60,
+                                       reconnect_extended_minutes * 60)
 
     # Consecutive small-file / bad-stream detection.
     # If the stream keeps producing tiny recordings that fail the remux size check
@@ -2038,8 +2228,14 @@ def record_worker(args):
                 status_queue.put((channel_key, new_status))
                 last_status = new_status.copy()
                 # Exponential backoff for errors (doubles each time, capped)
-                error_sleep_seconds = min(error_sleep_seconds * 2, error_backoff_max_seconds)
-                sleep_time = jittered_sleep(error_sleep_seconds, poll_jitter_percent)
+                if reconnect_mode:
+                    # A stream just dropped: a transient API/CDN error must not
+                    # push the next check out by minutes. Retry at the
+                    # reconnect cadence without growing the backoff.
+                    sleep_time = jittered_sleep(RECONNECT_EXTENDED_POLL_INTERVAL, poll_jitter_percent)
+                else:
+                    error_sleep_seconds = min(error_sleep_seconds * 2, error_backoff_max_seconds)
+                    sleep_time = jittered_sleep(error_sleep_seconds, poll_jitter_percent)
                 logger.warning(f"Error (#{consecutive_errors}): {error} — backing off {sleep_time:.0f}s")
                 if interruptible_sleep(sleep_time, wake_event, stop_event):
                     logger.info("Manual check requested — skipping error backoff")
@@ -2051,15 +2247,22 @@ def record_worker(args):
                 error_sleep_seconds = poll_base_seconds
 
                 if reconnect_mode:
-                    # We were recently recording — check if grace period expired
-                    if time.monotonic() < reconnect_deadline:
-                        remaining = int(reconnect_deadline - time.monotonic())
+                    phase, remaining, poll_every = reconnect_window.next_poll()
+                    if phase == "fast":
                         new_status = {"status": "Offline", "detail": f"reconnecting ({remaining}s left)", "size": "", "time": "", "progress": 0}
                         if new_status != last_status:
                             status_queue.put((channel_key, new_status))
                             last_status = new_status.copy()
                         logger.info(f"Stream dropped — fast polling ({remaining}s remaining in grace period)")
-                        interruptible_sleep(RECONNECT_POLL_INTERVAL, wake_event, stop_event)
+                        interruptible_sleep(poll_every, wake_event, stop_event)
+                        continue
+                    elif phase == "extended":
+                        new_status = {"status": "Offline", "detail": f"reconnecting, slow ({remaining}s left)", "size": "", "time": "", "progress": 0}
+                        if new_status != last_status:
+                            status_queue.put((channel_key, new_status))
+                            last_status = new_status.copy()
+                        logger.info(f"Stream still down — polling every {poll_every}s ({remaining}s remaining in extended grace)")
+                        interruptible_sleep(poll_every, wake_event, stop_event)
                         continue
                     else:
                         # Grace period expired — stream didn't come back
@@ -2308,6 +2511,7 @@ def record_worker(args):
                     "size_bytes": (last_status or {}).get("size_bytes", 0),
                     "time": (last_status or {}).get("time", ""),
                     "progress": (last_status or {}).get("progress", 50),
+                    "raw_file": raw_file,
                 }
                 status_queue.put((channel_key, new_status))
                 last_status = new_status.copy()
@@ -2449,8 +2653,12 @@ def record_worker(args):
                 reconnect_mode = False   # don't wait — fall straight through to remux+restart
             elif not stop_event.is_set() and elapsed > 10:
                 reconnect_mode = True
-                reconnect_deadline = time.monotonic() + (reconnect_grace_minutes * 60)
-                logger.info(f"Recording ended after {format_elapsed(elapsed)} — entering {reconnect_grace_minutes}min reconnect grace period")
+                reconnect_window.reset()  # armed at the first post-remux check
+                logger.info(
+                    f"Recording ended after {format_elapsed(elapsed)} — entering {reconnect_grace_minutes}min "
+                    f"reconnect grace period (+{reconnect_extended_minutes}min at {RECONNECT_EXTENDED_POLL_INTERVAL}s), "
+                    f"starting after remux"
+                )
 
             # ── Micro-fragment throttle ─────────────────────────────────────
             # If the server keeps dropping us after only a few seconds (e.g.

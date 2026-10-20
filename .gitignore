@@ -13,6 +13,10 @@ kick_channel_ids.json
 
 # Cookies (sensitive — never commit!)
 cookies.txt
+cookies*.txt
+*.har
+.env
+run_msr.local.bat
 
 # Python
 __pycache__/
@@ -26,6 +30,8 @@ venv/
 
 # Disk-space write probe (only appears if streams_dir is the repo folder)
 .msr_write_probe
+.msr_instance.lock
+msr_update_error.txt
 
 # IDE
 .vscode/
@@ -46,3 +52,6 @@ desktop.ini
 stream_recorder.log*
 console_log.txt
 log_output*.txt
+
+# Cross-process log rotation lock
+*.rotating

@@ -794,6 +794,8 @@ class FishtankAuth:
         "firstflooralt":   "first-floor-alt-as-seen-on",
         "firstflooralternate": "first-floor-alt-as-seen-on",
         "firstalt":        "first-floor-alt-as-seen-on",
+        "firstfloorptz":   "first-floor-ptz-as-seen-on",
+        "firstptz":        "first-floor-ptz-as-seen-on",
         "counter":         "counter-as-seen-on",
         "mirror":          "dressing-room-as-seen-on",
         "dressingroom":    "dressing-room-as-seen-on",
@@ -807,6 +809,7 @@ class FishtankAuth:
         "inventory":       "inventory-as-seen-on",
         "secondfloorptz":  "second-floor-ptz-as-seen-on",
         "secondptz":       "second-floor-ptz-as-seen-on",
+        "rathew":          "rathew-as-seen-on",
         "grid":            "grid-as-seen-on",
         # Season 5 short codes (do not delete).
         "dirc":       "dirc-5",

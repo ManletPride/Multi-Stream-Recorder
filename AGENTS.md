@@ -2,7 +2,7 @@
 
 Read this before changing code. The project is **not** a single-file script anymore. Several clip and GUI bugs were already fixed; reintroducing the old approaches will regress them.
 
-**Ship status (2026-09-07):** local tree is **v2.0.2**. `origin/main` has this tag. As Seen On Fishtank aliases + slug catalog ids are in this tag. Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
+**Ship status (2026-10-20):** branch `release/2026-10` is **v2.1.0** (roster panel, presence, Kick Centrifugo push, reconnect fix, install cleanup), proposed for `main` via PR. Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 
 Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 
@@ -16,10 +16,12 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 | `msr/platforms.py` | Per-site live checks, Fishtank auth, ffmpeg/yt-dlp/streamlink command builders |
 | `msr/recorder.py` | `StreamRecorder`, `BackgroundCleaner`, Kick push (`KICK_PUSHER_URL`) |
 | `msr/util.py` | Paths, cookies, logging, process kill, validation, log redaction |
+| `msr/update.py` | GitHub zipball download + allowlisted extract for in-app update |
+| `msr/apply_update.py` | Temp helper: wait for PID, copy staged files, relaunch (no `msr` import) |
 | `msr/config.py` | `Config` / `config.ini` defaults (`default_streams_dir()`, coerce invalid numbers) |
 | `msr/deps.py` | `HAS_*` flags, tool versions, optional `psutil` / tray / plyer imports |
 | `msr/iometer.py` | Status-header disk write / NIC download rates (`IoSampler`) |
-| `msr/__init__.py` | `__version__` (currently `2.0.2`) |
+| `msr/__init__.py` | `__version__` (currently `2.1.0`) |
 | `SECURITY.md` | Vulnerability reporting; what is stored on disk |
 | `.github/workflows/tests.yml` | unittest on Windows + Ubuntu, Python 3.10 and 3.12 |
 | `tests/` | unittest (`python -m unittest discover -s tests -t .`) |
@@ -32,7 +34,7 @@ After editing Python, the running GUI does **not** reload modules. The user must
 
 Kick/live MPEG-TS PCR often sits at ~10000s while the `.ts` on disk is only minutes long. Twitch can also report `format.duration` as the **last PCR** (e.g. 12686) instead of elapsed file time (e.g. 67). `_elapsed_media_duration()` must convert that before computing the cut; otherwise a 15s Clip Now seeks to ~65s of a 67s file (powdur clip was **2.6s**) and screenshots miss the frame.
 
-**Correct:** convert duration to elapsed if it looks like last-PTS (`duration > start_time` and `start_time >= 1000`). Probe the last video keyframe at or before `(elapsed - clip_seconds)`, then input `-ss` to that keyframe’s **elapsed** time (`kf_pts - format.start_time`), tiny undershoot (~0.05s), never past the keyframe. `-c copy`, `-t` extended to the live edge, `-avoid_negative_ts make_zero`. No output `-ss`, no `-copyts`.
+**Correct:** convert duration to elapsed if it looks like last-PTS (`duration > start_time` and `start_time >= 1000`). Probe the last video keyframe at or before `(elapsed - clip_seconds)`, then input `-ss` to that keyframe’s **elapsed** time (`kf_pts - format.start_time`), tiny undershoot (~0.05s), never past the keyframe. `-c copy`, `-t` extended to the live edge, `-avoid_negative_ts make_zero`. No output `-ss`, no `-copyts`. If elapsed is far behind the file’s birth time (Kick HLS ad PCR reset; nicklee 2024s vs 5990s), **ignore duration** and probe/cut with `-sseof` instead — `-ss` from the start hits the first occurrence of the new clock, minutes behind live.
 
 **Wrong (causes a frozen first GOP):** `-copyts` plus output `-ss {raw PCR pts_time}`. Audio starts at 0s, video at ~2s (Kick GOP). Verified on binxbasilisk 15s clips: bad cut video start **1.99s**; after the elapsed-seek fix, **~0.18s** (AAC/B-frame delay, not a freeze).
 
@@ -60,6 +62,32 @@ Related UI:
 - Roster right-click also has **Open Clips Folder** (uses the left-list selection, not the status row).
 - **Open in Browser** uses `channel_watch_url()` in `msr/util.py` — rumble/tiktok/fishtank are not Kick. YouTube `@handle` must not become `@@handle`.
 
+## Experimental live previews (`experiment/status-previews`)
+
+Status-tab stills from the live `.ts`. Constants in `msr/gui.py`: `PREVIEW_W`/`PREVIEW_H` (160×90), `PREVIEW_BIG_W`/`PREVIEW_BIG_H` (480×270), `PREVIEW_MS` (4000).
+
+- `create_preview_frame` / `create_screenshot` in `msr/worker.py` — seek-before-EOF (`-sseof` first, elapsed `-ss` fallback). Do **not** prefer `-ss duration-N` for screenshots: after a Kick ad PCR reset that seeks minutes behind live (preview stays current). PNG for previews (tk.PhotoImage has no JPEG), `CREATE_NO_WINDOW`. Preview failures are quiet.
+- **Clip Now** after a PCR reset: if ffprobe elapsed is far behind file birth (`_elapsed_matches_file_age`, nicklee 2024s vs 5990s), treat duration as missing and probe/cut with `-sseof` like the no-duration path. Trusted elapsed still uses keyframe elapsed `-ss` (Kick/Twitch PCR). No output `-ss`, no `-copyts`.
+- Worker **Recording** status includes **`raw_file`**. The GUI preview loop must use that path. Do **not** `listdir` recording folders on the 1s IO tick. Fallback `find_active_recording_file` is OK on the 4s preview pass if `raw_file` is missing.
+- Grab on a daemon thread, one ffmpeg at a time; skip a channel if Clip/Screenshot is in flight on it. Keep `PhotoImage` refs (`_preview_photos`, `_preview_big_photo`) or Tk drops the picture.
+- Click tile / status row / roster stay on the same channel (`_sync_nav`). **Never** call `update()` or `update_idletasks` from `<<TreeviewSelect>>` or `_sync_nav` — that nested the Tk loop and froze the GUI on Windows. `see()` / canvas scroll only in `after_idle`. Hold `_nav_lock` around `tree.move` in `_reorder_status_rows`.
+- Roster **Filter** + **Enabled**: resolve rows by **channel name**, never `ch_tree.index` (a filtered tree’s row index is not `channels[]`).
+- **Recording first** uses `ordered_status_keys` then `tree.move`. Do not delete-and-rebuild the status tree.
+- Double-click a tile pins a 480×270 copy above the strip (extra ffmpeg only for that channel). Close / double-click the same tile / double-click the large image dismisses it. Drop the pin if that channel stops recording.
+
+## Left roster panel (`ui/left-panel`)
+
+- Pure logic lives in `msr/channel_panel.py` (tested in `tests/test_channel_panel.py`); widgets are still built in `main_gui`.
+- Roster iids are `c:<channel key>` (group headers `h:<group>`). Never map rows by display text: the name column shows the bare name and the platform is a separate tag. channels.json keys are unchanged.
+- Groups are titled **Recording**, **Watching** (enabled, not recording) and **Off** (disabled; collapsible). Internal group ids stay `recording` / `enabled` / `disabled`, and the collapse flag is still `roster_disabled_collapsed` in window_state, so old state files keep working. Manual order is kept inside groups. View toggle is `roster_view` (all/enabled/live); the old `roster_enabled_only` is still read.
+- **No status dots** (removed on request; do not re-add). Live state (`channel_live_state` from `recorder.status_dict` merged with presence by `msr.presence.combined_state`) only drives the Recording group and the **Live** filter, refreshed on the 2.5s `refresh_status` tick (`_roster_live_tick`). The tree is rebuilt only when the grouped/filtered layout changes.
+- **Presence** (`msr/presence.py`): `PresenceStore` holds `{live, viewers, since, source}` per key for ALL channels. Sources: `KickPushListener` watches every Kick channel (enabled = `_wanted`, wakes the worker; disabled/stopped = `_watch`, presence only and must never call `check_now`/start anything), and `PresencePoller` polls DISABLED channels only (Kick `/api/v2/channels/{slug}` via curl_cffi, Twitch via `check_stream_streamlink`), one at a time spread over ~10 min, failures silent. Enabled channels are never polled by presence. Push needs a running session; the poller runs whenever the GUI is open.
+- **Kick realtime transport** (`msr/kick_realtime.py`): no hard-coded Pusher key (the old `32cbd69e...` key died, error 4001). Every (re)connect POSTs `web.kick.com/api/v1/realtime/connection` like the web client; Centrifugo is primary (guest token from `/v1/realtime/auth/connection`, JSON protocol: `connect` -> `subscribe {"channel":"channel.<id>"}`, answer server ping `{}` with `{}`, `refresh` the ~45 min token), Pusher with the returned `app_key`/`cluster` is the fallback. Publications are `{"event": "App\\Events\\StreamerIsLive"|"...StopStreamBroadcast", "data": "<json>"}` on `channel.<id>`, normalised to Pusher shape and parsed by `parse_kick_push_event`. Max 128 subs per connection (error 106); MSR caps at 120. Connection failures warn at most hourly, back-off up to 10 min; polling is unaffected.
+- Kick push: slugs that never confirm `subscription_succeeded` (failed id lookup, lost frame) are retried by the `kick-push-resubscribe` sweep with 2-30 min back-off. Before this they stayed unsubscribed until the next reconnect (the lettyvision symptom). Id lookup tries `_` -> `-` slug variants.
+- Amber cookie badge = `cookie_badge()`: auth-error text in a worker Error detail, an expired auth cookie for the site, or Fishtank with no cookie and no config login. Drawn on the side canvas, enabled rows only.
+
+- **Dialog title bars:** `msr/wintheme.py` `set_title_bar_dark(win, dark)` (DWM attribute 20, then 19, on the `wm_frame()` HWND after `update_idletasks`, then SWP_FRAMECHANGED to repaint). The main window, the Add channel dialog, and the custom poll/clip `simpledialog` prompts (via `watch_new_dialogs` before the blocking call) use it; `apply_theme` re-themes open dialogs. Native `messagebox` dialogs are OS-owned and can't be themed.
+
 ## Other behavior that must not regress
 
 - **Remove channel** calls `StreamRecorder.remove_channel()` so the worker is killed; do not only delete the GUI list entry.
@@ -68,7 +96,9 @@ Related UI:
 - **Logs:** `redact_cmd_for_log` / `redact_for_log` strip `jwt=`, tokens, Cookie/Authorization. `RedactLogFilter` on the root logger also redacts stderr lines, exception text, and `%(channel)s` (custom URLs with `?jwt=`). Do not log raw Fishtank auth JSON.
 - **Network ffmpeg** (`platforms.py`): protocol whitelist is `http,https,tcp,tls,crypto,hls` — **no `file`**. Direct ffmpeg (Fishtank/Rumble HLS/CMAF) uses `-protocol_whitelist`. yt-dlp recordings pass the same list as `--downloader-args ffmpeg_i:…` (must be `ffmpeg_i`, not `ffmpeg:`, or yt-dlp appends it after `-i`). Local clip/remux reads do not use that whitelist.
 - **Channel keys:** `parse_channel_key` allowlists platforms. Kick is a bare name — `:` `/` `\\` are rejected so `..\..\Users\Public:out` cannot become a platform directory. Custom URLs must be `http://` or `https://`. `coerce_channel_records` re-validates `channels.json` on load; `record_worker` refuses unsafe keys. `channel_key_to_dirs` returns `('unknown', 'unknown')` for garbage instead of joining raw `..`.
-- **`kill_orphan_ffmpeg_processes`** uses `psutil` from `msr.deps` (exported even when checking `HAS_PSUTIL`). Pass `streams_dir` — only network ffmpeg whose argv includes that directory is killed.
+- **In-app update:** banner click runs `msr.update.prepare_update` (GitHub zipball, allowlisted extract) then `_full_quit(after_children=spawn_updater)`. Spawn the helper **after** killing children or `_full_quit` will kill it. Helper is `msr/apply_update.py` copied to temp (stdlib only, no `msr` import). Never overwrite `config.ini` / `channels.json` / `cookies.txt`. HTTPS GitHub hosts only.
+- **Single instance** per `streams_dir`: `try_acquire_single_instance` in `main()` (Windows mutex / POSIX flock). A second launch focuses the existing `Multi-Stream Recorder v…` window and exits; `--headless` prints and exits 1. Do not skip this or two GUIs will record the same cameras.
+- **`kill_orphan_recording_processes`** (old name `kill_orphan_ffmpeg_processes` still wraps it) uses `psutil` from `msr.deps`. Pass `streams_dir`. Kill leftover **`record_worker` spawn processes** (and their capture tree), not only ffmpeg — ffmpeg SIGTERM is a reconnect. Skip local remux/clip (no http) and unrelated encodes. Called at startup, `StreamRecorder.stop()`, and `_full_quit`. Never kill `keep_pid`’s tree.
 - **`record_worker` imports:** `random`, `sanitize_path_component`, `custom_url_folder_names`, `parse_channel_key`, `redact_for_log`, `text_progress_bar`, `find_cookies_file`, `ffprobe_from_ffmpeg`, `parser_getfloat` / `parser_getint` / `parser_getboolean`, `default_streams_dir`. Missing any of these is a spawn-loop `NameError`.
 - **`streams_dir` default** is `default_streams_dir()` (`%USERPROFILE%\Videos\Multi-Stream Recorder` / `~/Videos/Multi-Stream Recorder`), not `E:\Streams`. Never overwrite an existing `streams_dir` in `config.ini`.
 - **Config coercion:** `Config._coerce_values` rewrites unparseable/out-of-range numbers and bools to defaults before workers spawn. Workers still use `parser_get*` so a bad dict cannot `ValueError` on `getfloat`. Do not warn “using default” without actually setting the value.

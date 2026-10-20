@@ -15,7 +15,7 @@ You should hear back. Do not share `cookies.txt`, `config.ini` passwords, or unr
 
 ## What this app stores
 
-All of this stays on **your machine**. MSR does not phone home except a GitHub “latest release” check from the GUI.
+All of this stays on **your machine**. MSR does not phone home except a GitHub “latest release” check from the GUI. If you click the update banner, it also downloads that release’s source zip from GitHub (HTTPS, github.com / api.github.com / codeload.github.com only) and copies `Multi-Stream-Recorder.py` plus `msr/` over the install folder. It does not send `config.ini`, cookies, or recordings.
 
 | File | Sensitivity |
 | --- | --- |
