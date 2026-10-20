@@ -18,6 +18,7 @@ from msr.deps import (
     Image, ImageDraw, plyer_notification, pystray,
 )
 from msr import channel_panel as cp
+from msr import wintheme as _wintheme
 from msr.presence import PresencePoller, PresenceStore, combined_state
 from msr.recorder import StreamRecorder
 from msr.util import (
@@ -318,31 +319,9 @@ def main_gui(config):
 
     # ── Windows: dark title bar via DWM API ──
     def set_title_bar_dark(dark=True):
-        """Use Windows DWM API to set title bar color.
-
-        Windows 11 and Windows 10 20H1+ support DWMWA_USE_IMMERSIVE_DARK_MODE.
-        Attribute 20 works on Windows 11 build 22000+ and Win10 20H1+.
-        Attribute 19 works on earlier Windows 11 insider/pre-release builds.
-        We try both for maximum compatibility.
-        """
-        if os.name != 'nt':
-            return
-        try:
-            import ctypes
-            hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
-            value = ctypes.c_int(1 if dark else 0)
-            # Try attribute 20 first (standard), then 19 (pre-release Win11)
-            hr = ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                hwnd, 20, ctypes.byref(value), ctypes.sizeof(value)
-            )
-            if hr != 0:  # S_OK = 0
-                ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                    hwnd, 19, ctypes.byref(value), ctypes.sizeof(value)
-                )
-            # Force title bar repaint by toggling size slightly
-            root.update_idletasks()
-        except Exception:
-            pass  # older Windows or non-Windows — silently skip
+        """Dark/light caption for the main window and any open dialogs."""
+        _wintheme.set_title_bar_dark(root, dark)
+        _wintheme.theme_toplevels(root, dark)
 
     # Restore geometry
     geom = win_state.get('geometry', '1100x760')
@@ -580,7 +559,7 @@ def main_gui(config):
     # No status dots (removed by request): live state only drives the
     # Recording group and the Live filter.
     # Layout: search + All/Enabled/Live toggle, a grouped Treeview
-    # (Recording / Channels / Disabled), a narrow canvas strip for the
+    # (Recording / Watching / Off), a narrow canvas strip for the
     # amber cookie badge, then "+ Add channel" and the cookies.txt line.
     frame_left = tk.Frame(root, padx=12, pady=12)
     frame_left.grid(row=0, column=0, sticky="ns", padx=(10, 5), pady=10)
@@ -858,8 +837,8 @@ def main_gui(config):
 
     _GROUP_TITLES = {
         cp.GROUP_RECORDING: "Recording",
-        cp.GROUP_ENABLED: "Channels",
-        cp.GROUP_DISABLED: "Disabled",
+        cp.GROUP_ENABLED: "Watching",
+        cp.GROUP_DISABLED: "Off",
     }
 
     def _layout_signature(groups):
@@ -1014,7 +993,7 @@ def main_gui(config):
     def add_channel(initial_text=""):
         t = DARK if dark_mode.get() else LIGHT
         cp.open_add_channel_dialog(root, t, _add_channel_from_dialog,
-                                   initial_text=initial_text)
+                                   initial_text=initial_text, dark=dark_mode.get())
 
     def remove_selected():
         names = _selected_roster_names()
@@ -1959,6 +1938,7 @@ def main_gui(config):
     def on_poll_change(*_args):
         selected = poll_var.get()
         if selected == CUSTOM_POLL_LABEL:
+            _wintheme.watch_new_dialogs(root, dark_mode.get)
             minutes = simpledialog.askfloat(
                 "Custom Polling Interval",
                 f"Minutes between offline checks "
@@ -2031,6 +2011,7 @@ def main_gui(config):
     def on_clip_length_change(*_args):
         selected = clip_var.get()
         if selected == CUSTOM_CLIP_LABEL:
+            _wintheme.watch_new_dialogs(root, dark_mode.get)
             seconds = simpledialog.askinteger(
                 "Custom Clip Length",
                 f"Seconds to grab when clipping a live recording "

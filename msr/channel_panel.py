@@ -309,7 +309,7 @@ def cookie_badge(key, cookie_info, status_entry=None, *, get_status,
 # ── Add Channel dialog (Tk) ──
 
 def open_add_channel_dialog(root, theme, on_add, initial_text="",
-                            initial_platform="kick"):
+                            initial_platform="kick", dark=None):
     """Small modal-ish dialog: name + platform, Enter adds, Esc closes.
 
     *on_add(name, platform)* returns ``(ok, error_message)``. On error the
@@ -397,6 +397,9 @@ def open_add_channel_dialog(root, theme, on_add, initial_text="",
         dlg.geometry(f"+{x}+{y}")
     except tk.TclError:
         pass
+    if dark is not None:
+        from msr.wintheme import set_title_bar_dark
+        dlg.after(10, lambda: set_title_bar_dark(dlg, dark))
     ent.focus_set()
     ent.icursor(tk.END)
     return dlg
