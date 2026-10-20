@@ -1,6 +1,47 @@
 """Optional/required tool detection (yt-dlp, streamlink, ffmpeg, …)."""
 import importlib
+import os
+import sys
 import subprocess
+
+
+def interpreter_script_dirs(executable=None):
+    """Folders where pip puts console scripts for *this* interpreter.
+
+    A venv's python/pythonw already live in ``Scripts`` (``bin``); a system
+    install keeps them in ``<python>/Scripts``. Only existing dirs are returned.
+    """
+    exe = os.path.abspath(executable or sys.executable or "")
+    base = os.path.dirname(exe)
+    out = []
+    for d in (base, os.path.join(base, "Scripts"), os.path.join(base, "bin")):
+        if d and os.path.isdir(d) and d not in out:
+            out.append(d)
+    return out
+
+
+def ensure_interpreter_scripts_on_path(environ=None, executable=None):
+    """Put this interpreter's script folders first on PATH.
+
+    yt-dlp and streamlink are run as commands. Without this, launching the
+    venv's python (or pythonw from a shortcut) without activating the venv
+    finds no yt-dlp, or an unrelated system streamlink. Child processes
+    inherit the updated PATH. Returns the dirs that were added.
+    """
+    environ = os.environ if environ is None else environ
+    parts = [p for p in environ.get("PATH", "").split(os.pathsep) if p]
+    norm = {os.path.normcase(os.path.normpath(p)) for p in parts}
+    added = [d for d in interpreter_script_dirs(executable)
+             if os.path.normcase(os.path.normpath(d)) not in norm]
+    # Prepend even if already present later, so pip-installed tools win.
+    front = interpreter_script_dirs(executable)
+    rest = [p for p in parts if os.path.normcase(os.path.normpath(p))
+            not in {os.path.normcase(os.path.normpath(d)) for d in front}]
+    environ["PATH"] = os.pathsep.join(front + rest)
+    return added
+
+
+ensure_interpreter_scripts_on_path()
 
 try:
     import psutil

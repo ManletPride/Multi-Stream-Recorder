@@ -13,6 +13,10 @@ kick_channel_ids.json
 
 # Cookies (sensitive — never commit!)
 cookies.txt
+cookies*.txt
+*.har
+.env
+run_msr.local.bat
 
 # Python
 __pycache__/

@@ -1,15 +1,28 @@
 @echo off
-rem Multi-Stream Recorder launcher: code from this repo, data from MSR_DATA.
-rem MSR_DATA holds config.ini, channels.json, cookies.txt, window_state.json,
-rem kick_channel_ids.json. Logs/recordings go to streams_dir in that config.ini.
-rem Edit these two lines if your folders or Python differ. No secrets here.
-set "MSR_DATA=E:\streams"
-set "MSR_PYTHON=pythonw"
-
+rem Multi-Stream Recorder launcher (no console window).
+rem
+rem Data folder (config.ini, channels.json, cookies.txt, window state):
+rem   - %MSR_DATA% if set (e.g. setx MSR_DATA "D:\MSR"), otherwise
+rem   - this repo folder.
+rem Optional untracked run_msr.local.bat next to this file can set MSR_DATA
+rem or MSR_PYTHON (e.g. a venv's pythonw.exe). It is git-ignored.
+setlocal
 cd /d "%~dp0"
-if not exist "%MSR_DATA%\config.ini" (
-  echo config.ini not found in %MSR_DATA% - check MSR_DATA in run_msr.bat
-  pause
-  exit /b 1
+if exist "%~dp0run_msr.local.bat" call "%~dp0run_msr.local.bat"
+if not defined MSR_PYTHON (
+  if exist "%~dp0.venv\Scripts\pythonw.exe" (
+    set "MSR_PYTHON=%~dp0.venv\Scripts\pythonw.exe"
+  ) else (
+    set "MSR_PYTHON=pythonw"
+  )
 )
-start "" "%MSR_PYTHON%" "%~dp0Multi-Stream-Recorder.py" --data-dir "%MSR_DATA%" %*
+if defined MSR_DATA (
+  if not exist "%MSR_DATA%\" (
+    echo MSR_DATA folder not found: %MSR_DATA%
+    pause
+    exit /b 1
+  )
+  start "" "%MSR_PYTHON%" "%~dp0Multi-Stream-Recorder.py" --data-dir "%MSR_DATA%" %*
+) else (
+  start "" "%MSR_PYTHON%" "%~dp0Multi-Stream-Recorder.py" %*
+)
