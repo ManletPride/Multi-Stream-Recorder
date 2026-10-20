@@ -1,4 +1,4 @@
-"""Double-click launcher: starts Multi-Stream Recorder with no console.
+r"""Double-click launcher: starts Multi-Stream Recorder with no console.
 Code comes from this repo, settings and recordings from E:\streams."""
 import os, subprocess, sys
 here = os.path.dirname(os.path.abspath(__file__))
