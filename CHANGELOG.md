@@ -1,15 +1,35 @@
 # Changelog
 
-## Unreleased
+## v2.1.0 (2026-10)
 
-Experimental branch `experiment/status-previews` (still v2.0.2 — not a numbered release).
+New roster panel, Kick realtime fix, reconnect fix, install cleanup.
 
+### Roster and GUI
+- Left panel redesigned: automatic **Recording / Watching / Off** groups, platform tags, search, **All / Enabled / Live** filter, **+ Add channel** dialog (paste a name, `platform:name` or URL), right-click menu, and an amber per-row cookie badge when a site needs or rejected your cookies.
+- Live presence for every channel. Off channels are never recorded but still show as live in the Live filter (Kick push, plus a slow ~10 min check for other platforms). The per-row status dots from the first draft were removed.
+- Dark title bars on dialogs in dark mode (shared `msr/wintheme.py`).
+- Status tab live preview strip (click to select, double-click to pin a larger preview); Recording first ordering.
+
+### Recording
+- **Kick push fixed.** Kick retired the old Pusher key; MSR now negotiates the realtime transport the way kick.com does and speaks Centrifugo (Pusher kept as a fallback). No key is hardcoded. Connection failures back off up to ~10 min and are logged about once an hour.
+- **Reconnect window** now starts after the remux finishes, with a 30 s follow-up phase (`reconnect_extended_minutes`, default 10) after the 15 s grace phase.
+- Log rotation during a run (cross-process lock), not only at startup.
+- `--data-dir` / `MSR_HOME` to keep config, cookies and channels outside the code folder.
+- Child console windows are hidden under `pythonw`; `run_msr.pyw` / `run_msr.bat` launchers.
+
+### Install
+- Launchers are generic: data folder is `MSR_DATA` if set, else the repo folder; they use `.venv` automatically; per-machine overrides go in an untracked `run_msr.local.bat`.
+- MSR puts its own interpreter's `Scripts` folder first on PATH, so a venv works without activation (previously yt-dlp was not found, or a different system streamlink was used).
+- `yt-dlp[default]>=2025.11.12` (needs `yt-dlp-ejs` for YouTube).
+- README rewritten; Fishtank camera reference moved to `docs/fishtank.md`.
+
+### Also in this release (from the status-previews branch)
 - Status tab live-frame strip for Recording/Remuxing channels: ffmpeg writes a 160×90 PNG every 4s on a worker thread. Worker status includes `raw_file` so the GUI does not `listdir` the recordings folder on the 1s tick.
 - Roster **Filter** + **Enabled** only; status **Recording first**; preview / roster / status share roster order and selection. Do not nest `update()` / `update_idletasks` inside `<<TreeviewSelect>>` (that froze the GUI on Windows).
 - Double-click a strip tile to pin a 480×270 preview above the others (Close, double-click the same tile, or double-click the large image to dismiss).
 - **One instance per recordings folder.** A second launch focuses the existing window (or tells you a `--headless` copy is running) instead of starting another worker set. Stop / quit / relaunch also kill leftover `record_worker` processes, not only ffmpeg — killing ffmpeg alone left ghost workers that treated SIGTERM as a drop and reconnected.
 - Status-bar **vX available** installs the GitHub release zipball (launcher + `msr/`, optional `requirements.txt` / `channels_fishtank.json`). Confirm → download → stop recordings → quit → helper copies files → relaunch. `config.ini`, `channels.json`, cookies, and recordings are not touched. `--headless` still only logs; it does not auto-update.
-- Clip Now / Screenshot follow the live edge after a Kick HLS ad splice (PCR reset). Previews already used `-sseof`; screenshots had preferred `-ss duration-N`, and clips used lastPTS−start (nicklee 16:40: elapsed 2024s on a 5990s file → ~66 min behind). Screenshots try `-sseof` first. Clips distrust elapsed when it is far behind the file’s age and cut from EOF.
+- Clip Now / Screenshot follow the live edge after a Kick HLS ad splice (PCR reset). Previews already used `-sseof`; screenshots had preferred `-ss duration-N`, and clips used lastPTS−start. Screenshots try `-sseof` first. Clips distrust elapsed when it is far behind the file’s age and cut from EOF.
 
 ## v2.0.2
 

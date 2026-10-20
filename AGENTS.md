@@ -2,7 +2,7 @@
 
 Read this before changing code. The project is **not** a single-file script anymore. Several clip and GUI bugs were already fixed; reintroducing the old approaches will regress them.
 
-**Ship status (2026-09-10):** `main` is **v2.0.2** plus First Floor PTZ / Rathew aliases (`22d9283`). `origin/main` still has the v2.0.2 tag (aliases not pushed). Branch **`experiment/status-previews`** is this live-preview GUI experiment — do not merge to `main` until asked. Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
+**Ship status (2026-10-20):** branch `release/2026-10` is **v2.1.0** (roster panel, presence, Kick Centrifugo push, reconnect fix, install cleanup), proposed for `main` via PR. Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 
 Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 
@@ -21,7 +21,7 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 | `msr/config.py` | `Config` / `config.ini` defaults (`default_streams_dir()`, coerce invalid numbers) |
 | `msr/deps.py` | `HAS_*` flags, tool versions, optional `psutil` / tray / plyer imports |
 | `msr/iometer.py` | Status-header disk write / NIC download rates (`IoSampler`) |
-| `msr/__init__.py` | `__version__` (currently `2.0.2`) |
+| `msr/__init__.py` | `__version__` (currently `2.1.0`) |
 | `SECURITY.md` | Vulnerability reporting; what is stored on disk |
 | `.github/workflows/tests.yml` | unittest on Windows + Ubuntu, Python 3.10 and 3.12 |
 | `tests/` | unittest (`python -m unittest discover -s tests -t .`) |
