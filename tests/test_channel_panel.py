@@ -102,6 +102,11 @@ class TestGrouping(unittest.TestCase):
                                    view=cp.VIEW_LIVE))
         self.assertEqual(g, {"recording": ["d"], "enabled": ["c"], "disabled": []})
 
+    def test_live_view_includes_live_disabled_channels(self):
+        g = dict(cp.group_channels(self.CH, {"fishtank:e": cp.STATE_LIVE},
+                                   view=cp.VIEW_LIVE))
+        self.assertEqual(g, {"recording": [], "enabled": [], "disabled": ["fishtank:e"]})
+
     def test_coerce_view_migrates_old_checkbox(self):
         self.assertEqual(cp.coerce_view(None, True), cp.VIEW_ENABLED)
         self.assertEqual(cp.coerce_view(None, False), cp.VIEW_ALL)

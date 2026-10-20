@@ -18,9 +18,9 @@ from msr.deps import (
     Image, ImageDraw, plyer_notification, pystray,
 )
 from msr import channel_panel as cp
+from msr.presence import PresencePoller, PresenceStore, combined_state
 from msr.recorder import StreamRecorder
 from msr.util import (
-    COOKIE_DOT_COLORS, COOKIE_STATUS_UNKNOWN,
     application_dir, channel_file_stem, channel_key_to_dirs, channel_watch_url,
     check_for_updates, coerce_channel_records, find_cookies_file,
     get_cookie_status_for_channel, kill_orphan_recording_processes,
@@ -540,6 +540,14 @@ def main_gui(config):
                 json.dump(channels, f, indent=2)
         except Exception as e:
             logging.error(f"Failed to save channels: {e}")
+        # Keep the push listener's presence-only (disabled) set in step.
+        try:
+            if recorder and recorder.is_running:
+                recorder.set_watch_channels(_presence_watch_keys())
+        except NameError:
+            pass  # called during load, before the recorder slot exists
+        except Exception as e:
+            logging.debug(f"Presence watch sync failed: {e}")
 
     if skipped_on_load:
         for raw in skipped_on_load:
@@ -557,7 +565,20 @@ def main_gui(config):
         """Return list of all channel name strings."""
         return [ch["name"] for ch in channels]
 
+    # ── Live presence for ALL channels (msr/presence.py) ──
+    # Read-only: Kick push (while a session runs) + a slow poll of DISABLED
+    # channels. Never starts or wakes a recording.
+    presence_store = PresenceStore()
+
+    def _presence_watch_keys():
+        return [ch["name"] for ch in channels if not ch.get("enabled", True)]
+
+    presence_poller = PresencePoller(presence_store, lambda: [dict(c) for c in list(channels)])
+    presence_poller.start()
+
     # ── Left panel — Channel roster (see msr/channel_panel.py) ──
+    # No status dots (removed by request): live state only drives the
+    # Recording group and the Live filter.
     # Layout: search + All/Enabled/Live toggle, a grouped Treeview
     # (Recording / Channels / Disabled), a narrow canvas strip for the
     # amber cookie badge, then "+ Add channel" and the cookies.txt line.
@@ -661,39 +682,17 @@ def main_gui(config):
     ch_tree = ttk.Treeview(ch_tree_frame, columns=("check", "name", "tag", "_key"),
                            displaycolumns=("check", "name", "tag"), show="tree",
                            height=10, selectmode="extended", style="Roster.Treeview")
-    ch_tree.column("#0", width=26, minwidth=26, stretch=False, anchor="center")
+    ch_tree.column("#0", width=0, minwidth=0, stretch=False)  # hidden tree column
     ch_tree.column("check", width=26, anchor="center", stretch=False)
     ch_tree.column("name", width=200, anchor="w")
-    ch_tree.column("tag", width=66, anchor="e", stretch=False)
+    ch_tree.column("tag", width=96, anchor="e", stretch=False)
     ch_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-    DOT_CANVAS_W = 22
-    dot_canvas = tk.Canvas(ch_tree_frame, width=DOT_CANVAS_W, highlightthickness=0,
+    BADGE_CANVAS_W = 22
+    badge_canvas = tk.Canvas(ch_tree_frame, width=BADGE_CANVAS_W, highlightthickness=0,
                            borderwidth=0)
-    dot_canvas.pack(side=tk.LEFT, fill=tk.Y)
+    badge_canvas.pack(side=tk.LEFT, fill=tk.Y)
 
-    # Status dot images (transparent background works in both themes).
-    def _make_dot(color, size=12, r=4.5):
-        img = tk.PhotoImage(width=size, height=size)
-        c = (size - 1) / 2.0
-        for yy in range(size):
-            row = []
-            for xx in range(size):
-                if (xx - c) ** 2 + (yy - c) ** 2 <= r * r:
-                    row.append(xx)
-            for xx in row:
-                img.put(color, (xx, yy))
-        return img
-
-    _dot_images = {s: _make_dot(c) for s, c in cp.DOT_COLORS.items()}
-    _blank_image = tk.PhotoImage(width=12, height=12)
-    _DOT_TIPS = {
-        cp.STATE_RECORDING: "Recording",
-        cp.STATE_LIVE: "Live — not writing a file right now (starting / reconnecting)",
-        cp.STATE_OFFLINE: "Offline / not checked / disabled",
-    }
-
-    _row_state = {}     # iid -> STATE_* currently drawn
     _row_group = {}     # iid -> group id
     _badges = {}        # channel key -> tooltip text
     _roster_sig = [None]
@@ -708,7 +707,14 @@ def main_gui(config):
 
     def _roster_states():
         sd = _status_lookup()
-        return {ch["name"]: cp.channel_live_state(sd.get(ch["name"])) for ch in channels}
+        pres = presence_store.snapshot()
+        now = time.time()
+        out = {}
+        for ch in channels:
+            key = ch["name"]
+            out[key] = combined_state(cp.channel_live_state(sd.get(key)), pres.get(key),
+                                      ch.get("enabled", True), now)
+        return out
 
     def _compute_badges():
         sd = _status_lookup()
@@ -725,11 +731,11 @@ def main_gui(config):
                 out[key] = tip
         return out
 
-    def _redraw_dot_canvas():
+    def _redraw_badge_canvas():
         """Paint amber cookie badges next to the rows that need one."""
         t = DARK if dark_mode.get() else LIGHT
-        dot_canvas.configure(bg=t['tree_field'])
-        dot_canvas.delete("all")
+        badge_canvas.configure(bg=t['tree_field'])
+        badge_canvas.delete("all")
         for item in ch_tree.get_children():
             key = _channel_name_from_item(item)
             if not key or key not in _badges:
@@ -738,35 +744,35 @@ def main_gui(config):
             if not bbox:
                 continue
             _x, y, _w, h = bbox
-            dot_canvas.create_text(DOT_CANVAS_W // 2, y + h // 2, text=cp.BADGE_GLYPH,
+            badge_canvas.create_text(BADGE_CANVAS_W // 2, y + h // 2, text=cp.BADGE_GLYPH,
                                    fill=cp.BADGE_COLOR, font=("Segoe UI Symbol", 10))
 
-    _dot_redraw_after_id = [None]
+    _badge_redraw_after_id = [None]
 
-    def _schedule_dot_redraw(_event=None):
-        if _dot_redraw_after_id[0] is not None:
+    def _schedule_badge_redraw(_event=None):
+        if _badge_redraw_after_id[0] is not None:
             return
         def _run():
-            _dot_redraw_after_id[0] = None
-            _redraw_dot_canvas()
-        _dot_redraw_after_id[0] = dot_canvas.after(16, _run)
+            _badge_redraw_after_id[0] = None
+            _redraw_badge_canvas()
+        _badge_redraw_after_id[0] = badge_canvas.after(16, _run)
 
-    ch_tree.bind("<Configure>", _schedule_dot_redraw)
-    ch_tree.bind("<MouseWheel>", _schedule_dot_redraw)
-    ch_tree.bind("<Button-4>", _schedule_dot_redraw)
-    ch_tree.bind("<Button-5>", _schedule_dot_redraw)
-    dot_canvas.bind("<MouseWheel>", lambda e: (ch_tree.yview_scroll(int(-e.delta / 120), "units"), "break")[1])
+    ch_tree.bind("<Configure>", _schedule_badge_redraw)
+    ch_tree.bind("<MouseWheel>", _schedule_badge_redraw)
+    ch_tree.bind("<Button-4>", _schedule_badge_redraw)
+    ch_tree.bind("<Button-5>", _schedule_badge_redraw)
+    badge_canvas.bind("<MouseWheel>", lambda e: (ch_tree.yview_scroll(int(-e.delta / 120), "units"), "break")[1])
     _orig_yview = ch_tree.yview
 
     def _yview(*args):
         result = _orig_yview(*args)
         if args:
-            _schedule_dot_redraw()
+            _schedule_badge_redraw()
         return result
 
     ch_tree.yview = _yview
 
-    # ── Hover tooltip: badge reason, dot meaning, platform ──
+    # ── Hover tooltip: badge reason, full channel key ──
     _hover = {"tip": None, "text": None}
 
     def _hover_hide(_e=None):
@@ -785,8 +791,6 @@ def main_gui(config):
             return None
         if region_col == "badge":
             return _badges.get(key)
-        if region_col == "#0":
-            return _DOT_TIPS.get(_row_state.get(item, cp.STATE_OFFLINE))
         if region_col == "#3":
             tip = f"{key}"
             if key in _badges:
@@ -815,8 +819,8 @@ def main_gui(config):
 
     ch_tree.bind("<Motion>", _hover_motion, add="+")
     ch_tree.bind("<Leave>", _hover_hide, add="+")
-    dot_canvas.bind("<Motion>", lambda e: _hover_motion(e, "badge"), add="+")
-    dot_canvas.bind("<Leave>", _hover_hide, add="+")
+    badge_canvas.bind("<Motion>", lambda e: _hover_motion(e, "badge"), add="+")
+    badge_canvas.bind("<Leave>", _hover_hide, add="+")
 
     def _channel_name_from_item(item):
         if item and item.startswith("c:"):
@@ -864,7 +868,7 @@ def main_gui(config):
                 tuple(ch.get("enabled", True) for ch in channels))
 
     def _populate_channel_tree(states=None):
-        """Rebuild the roster from ``channels`` (filter, groups, dots)."""
+        """Rebuild the roster from ``channels`` (filter, groups)."""
         if states is None:
             states = _roster_states()
         query = roster_filter_var.get()
@@ -879,7 +883,6 @@ def main_gui(config):
         except tk.TclError:
             top = 0.0
         ch_tree.delete(*ch_tree.get_children())
-        _row_state.clear()
         _row_group.clear()
         show_headers = sum(1 for _g, keys in groups if keys) > 1 or bool(groups[2][1])
         for gid, keys in groups:
@@ -889,22 +892,18 @@ def main_gui(config):
                          and not query.strip())
             if show_headers:
                 arrow = ("▸" if collapsed else "▾") if gid == cp.GROUP_DISABLED else ""
-                ch_tree.insert("", tk.END, iid="h:" + gid, image=_blank_image,
+                ch_tree.insert("", tk.END, iid="h:" + gid,
                                values=(arrow, f"{_GROUP_TITLES[gid]} ({len(keys)})", "", ""),
                                tags=("header",))
             if collapsed:
                 continue
             for key in keys:
                 enabled = enabled_by_key.get(key, True)
-                state = states.get(key, cp.STATE_OFFLINE)
-                if not enabled and state != cp.STATE_RECORDING:
-                    state = cp.STATE_OFFLINE
                 display, ptag = cp.channel_display(key)
                 iid = "c:" + key
-                ch_tree.insert("", tk.END, iid=iid, image=_dot_images[state],
+                ch_tree.insert("", tk.END, iid=iid,
                                values=(CHECK_ON if enabled else CHECK_OFF, display, ptag, key),
                                tags=("enabled" if enabled else "disabled",))
-                _row_state[iid] = state
                 _row_group[iid] = gid
         if selected:
             _select_roster_names(selected, see_first=False)
@@ -914,10 +913,10 @@ def main_gui(config):
             pass
         _badges.clear()
         _badges.update(_compute_badges())
-        _schedule_dot_redraw()
+        _schedule_badge_redraw()
 
     def _roster_live_tick():
-        """Called from refresh_status: move rows between groups / recolour dots."""
+        """Called from refresh_status: regroup / refilter rows, refresh badges."""
         try:
             states = _roster_states()
             groups = cp.group_channels(channels, states, roster_filter_var.get(),
@@ -925,20 +924,11 @@ def main_gui(config):
             if _layout_signature(groups) != _roster_sig[0]:
                 _populate_channel_tree(states)
                 return
-            for iid, old in list(_row_state.items()):
-                key = _channel_name_from_item(iid)
-                new = states.get(key, cp.STATE_OFFLINE)
-                if _index_for_name(key) >= 0 and not channels[_index_for_name(key)].get("enabled", True) \
-                        and new != cp.STATE_RECORDING:
-                    new = cp.STATE_OFFLINE
-                if new != old:
-                    ch_tree.item(iid, image=_dot_images[new])
-                    _row_state[iid] = new
             badges = _compute_badges()
             if badges != _badges:
                 _badges.clear()
                 _badges.update(badges)
-                _schedule_dot_redraw()
+                _schedule_badge_redraw()
         except tk.TclError:
             pass
 
@@ -1192,7 +1182,7 @@ def main_gui(config):
 
         _badges.clear()
         _badges.update(_compute_badges())
-        _schedule_dot_redraw()
+        _schedule_badge_redraw()
 
     _populate_channel_tree()
     _update_search_placeholder()
@@ -1240,8 +1230,8 @@ def main_gui(config):
                           relief='flat', bd=1)
         cookie_label.configure(bg=t['bg'], fg=t['fg'])
         cookie_indicator.configure(bg=t['bg'])
-        dot_canvas.configure(bg=t['tree_field'])
-        _schedule_dot_redraw()
+        badge_canvas.configure(bg=t['tree_field'])
+        _schedule_badge_redraw()
 
     def _paint_view_buttons(*_):
         t = DARK if dark_mode.get() else LIGHT
@@ -2422,7 +2412,7 @@ def main_gui(config):
         if headers:
             ch_tree.selection_remove(*headers)  # group headers are not channels
             return
-        _schedule_dot_redraw()
+        _schedule_badge_redraw()
         if _nav_lock[0]:
             return
         names = _selected_roster_names()
@@ -2782,7 +2772,8 @@ def main_gui(config):
             logging.info(f"  ({disabled_count} channel(s) disabled — not monitoring)")
         logging.info("=" * 60)
 
-        recorder = StreamRecorder(enabled, config)
+        recorder = StreamRecorder(enabled, config, presence=presence_store,
+                                  watch_channels=_presence_watch_keys())
         threading.Thread(target=recorder.run, daemon=True).start()
 
         start_button.config(state=tk.DISABLED)

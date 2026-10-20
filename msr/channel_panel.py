@@ -91,17 +91,12 @@ def guess_platform_from_text(text):
     return None, t
 
 
-# ── Live state → dot colour ──
+# ── Live state (drives the Recording group and the Live filter) ──
 
 STATE_RECORDING = "recording"
 STATE_LIVE = "live"
 STATE_OFFLINE = "offline"
 
-DOT_COLORS = {
-    STATE_RECORDING: "#E53935",  # red
-    STATE_LIVE: "#43A047",       # green
-    STATE_OFFLINE: "#7A7A7A",    # grey
-}
 
 _LIVE_RE = re.compile(r"\blive\b", re.I)
 _NOT_LIVE_RE = re.compile(r"\b(not|no longer|offline)\b[^,;)]*\blive\b", re.I)
@@ -111,16 +106,16 @@ _LIVE_NOT_CAPTURING_RE = re.compile(r"^(starting|retry\b)|reconnecting|bad strea
 
 
 def channel_live_state(status_entry):
-    """Map a worker status dict (the same one the Status table shows) to a dot.
+    """Map a worker status dict (the same one the Status table shows) to a state.
 
-    * red   ``recording``: ``Recording`` with a file being written (any detail
+    * ``recording``: ``Recording`` with a file being written (any detail
       except the start-up ones below, including size-split remux).
-    * green ``live``: the stream is up but nothing is being written yet or
+    * ``live``: the stream is up but nothing is being written yet or
       right now: ``Recording`` with detail ``starting`` / ``retry ...``,
       ``Offline`` in the reconnect grace (``reconnecting (Ns left)``) or the
       ``bad stream data, retry`` back-off, or any status text that says
       "live" (and not "not live").
-    * grey  ``offline``: everything else (Offline, Checking, Completed,
+    * ``offline``: everything else (Offline, Checking, Completed,
       Error, Stopped, Processing/Remuxing after the stream ended, unknown,
       no recorder running).
     """
