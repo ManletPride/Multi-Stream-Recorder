@@ -116,6 +116,7 @@ poll_interval_minutes = 3         # How often to check offline channels (fractio
 poll_jitter_percent = 20          # Random ±% added to each check
 error_backoff_max_minutes = 15    # Max delay on server errors
 reconnect_grace_minutes = 3       # Fast polling after a stream drops
+reconnect_extended_minutes = 10   # Then 30s polling before normal offline polling
 
 [Cleanup]
 auto_purge_days = 7               # Delete old temp files (0 = disabled)

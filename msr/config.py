@@ -58,6 +58,7 @@ def _coerce_specs():
         ("Timeouts", "poll_jitter_percent", "int", 20, 0, 100),
         ("Timeouts", "error_backoff_max_minutes", "float", 15.0, 0.0, None),
         ("Timeouts", "reconnect_grace_minutes", "int", 3, 0, None),
+        ("Timeouts", "reconnect_extended_minutes", "int", 10, 0, None),
         ("Timeouts", "file_creation_timeout", "int", 60, 1, None),
         ("Cleanup", "auto_purge_days", "int", 7, 0, None),
         ("Cleanup", "max_log_size_mb", "float", 20.0, 0.0, None),
@@ -106,6 +107,7 @@ class Config:
             'poll_jitter_percent': '20',      # random ±% added to each poll (avoids synchronized bursts)
             'error_backoff_max_minutes': '15', # max delay after server errors (backoff resets on success)
             'reconnect_grace_minutes': '3',   # fast 15s polling after a stream drops unexpectedly
+            'reconnect_extended_minutes': '10',  # then 30s polling this long before normal offline polling
             'file_creation_timeout': '60',    # seconds to wait for output file to appear
         },
         'Cleanup': {

@@ -79,6 +79,53 @@ from msr.util import (
 #      file takes a fraction of a second regardless of the recording's
 #      total length.
 
+RECONNECT_POLL_INTERVAL = 15           # seconds between checks in the fast phase
+RECONNECT_EXTENDED_POLL_INTERVAL = 30  # seconds between checks in the extended phase
+
+
+class ReconnectWindow:
+    """Post-drop polling schedule: fast phase, extended phase, then normal.
+
+    The window is armed lazily on the first ``next_poll()`` call, i.e. at the
+    first live check after the recording's final remux, not when the capture
+    process exits. A large remux can take minutes and used to consume the
+    whole grace period before a single fast poll ran.
+    """
+
+    def __init__(self, fast_seconds, extended_seconds,
+                 fast_interval=RECONNECT_POLL_INTERVAL,
+                 extended_interval=RECONNECT_EXTENDED_POLL_INTERVAL,
+                 clock=time.monotonic):
+        self.fast_seconds = max(0, fast_seconds)
+        self.extended_seconds = max(0, extended_seconds)
+        self.fast_interval = fast_interval
+        self.extended_interval = extended_interval
+        self._clock = clock
+        self._fast_end = None
+        self._extended_end = None
+
+    def reset(self):
+        """Disarm; the next next_poll() starts a fresh window."""
+        self._fast_end = None
+        self._extended_end = None
+
+    def next_poll(self):
+        """Return (phase, remaining_seconds, sleep_seconds).
+
+        phase is "fast", "extended" or "expired"; sleep_seconds is None when
+        expired (caller falls back to normal offline polling).
+        """
+        now = self._clock()
+        if self._fast_end is None:
+            self._fast_end = now + self.fast_seconds
+            self._extended_end = self._fast_end + self.extended_seconds
+        if now < self._fast_end:
+            return "fast", int(self._fast_end - now), self.fast_interval
+        if now < self._extended_end:
+            return "extended", int(self._extended_end - now), self.extended_interval
+        return "expired", 0, None
+
+
 def find_active_recording_file(recorder, channel_key):
     """Locate the .ts file currently being written for a channel.
 
@@ -1828,6 +1875,7 @@ def record_worker(args):
     poll_jitter_percent = parser_getint(config, 'Timeouts', 'poll_jitter_percent', 20)
     error_backoff_max_minutes = parser_getfloat(config, 'Timeouts', 'error_backoff_max_minutes', 15.0)
     reconnect_grace_minutes = parser_getint(config, 'Timeouts', 'reconnect_grace_minutes', 3)
+    reconnect_extended_minutes = parser_getint(config, 'Timeouts', 'reconnect_extended_minutes', 10)
     file_creation_timeout = parser_getint(config, 'Timeouts', 'file_creation_timeout', 60)
     filename_pattern = config.get('Recording', 'filename_pattern', fallback='{username}_{timestamp}') or '{username}_{timestamp}'
 
@@ -1924,8 +1972,8 @@ def record_worker(args):
 
     # Fast reconnect state
     reconnect_mode = False
-    reconnect_deadline = 0  # monotonic timestamp when grace period expires
-    RECONNECT_POLL_INTERVAL = 15  # seconds between checks during grace period
+    reconnect_window = ReconnectWindow(reconnect_grace_minutes * 60,
+                                       reconnect_extended_minutes * 60)
 
     # Consecutive small-file / bad-stream detection.
     # If the stream keeps producing tiny recordings that fail the remux size check
@@ -2180,8 +2228,14 @@ def record_worker(args):
                 status_queue.put((channel_key, new_status))
                 last_status = new_status.copy()
                 # Exponential backoff for errors (doubles each time, capped)
-                error_sleep_seconds = min(error_sleep_seconds * 2, error_backoff_max_seconds)
-                sleep_time = jittered_sleep(error_sleep_seconds, poll_jitter_percent)
+                if reconnect_mode:
+                    # A stream just dropped: a transient API/CDN error must not
+                    # push the next check out by minutes. Retry at the
+                    # reconnect cadence without growing the backoff.
+                    sleep_time = jittered_sleep(RECONNECT_EXTENDED_POLL_INTERVAL, poll_jitter_percent)
+                else:
+                    error_sleep_seconds = min(error_sleep_seconds * 2, error_backoff_max_seconds)
+                    sleep_time = jittered_sleep(error_sleep_seconds, poll_jitter_percent)
                 logger.warning(f"Error (#{consecutive_errors}): {error} — backing off {sleep_time:.0f}s")
                 if interruptible_sleep(sleep_time, wake_event, stop_event):
                     logger.info("Manual check requested — skipping error backoff")
@@ -2193,15 +2247,22 @@ def record_worker(args):
                 error_sleep_seconds = poll_base_seconds
 
                 if reconnect_mode:
-                    # We were recently recording — check if grace period expired
-                    if time.monotonic() < reconnect_deadline:
-                        remaining = int(reconnect_deadline - time.monotonic())
+                    phase, remaining, poll_every = reconnect_window.next_poll()
+                    if phase == "fast":
                         new_status = {"status": "Offline", "detail": f"reconnecting ({remaining}s left)", "size": "", "time": "", "progress": 0}
                         if new_status != last_status:
                             status_queue.put((channel_key, new_status))
                             last_status = new_status.copy()
                         logger.info(f"Stream dropped — fast polling ({remaining}s remaining in grace period)")
-                        interruptible_sleep(RECONNECT_POLL_INTERVAL, wake_event, stop_event)
+                        interruptible_sleep(poll_every, wake_event, stop_event)
+                        continue
+                    elif phase == "extended":
+                        new_status = {"status": "Offline", "detail": f"reconnecting, slow ({remaining}s left)", "size": "", "time": "", "progress": 0}
+                        if new_status != last_status:
+                            status_queue.put((channel_key, new_status))
+                            last_status = new_status.copy()
+                        logger.info(f"Stream still down — polling every {poll_every}s ({remaining}s remaining in extended grace)")
+                        interruptible_sleep(poll_every, wake_event, stop_event)
                         continue
                     else:
                         # Grace period expired — stream didn't come back
@@ -2592,8 +2653,12 @@ def record_worker(args):
                 reconnect_mode = False   # don't wait — fall straight through to remux+restart
             elif not stop_event.is_set() and elapsed > 10:
                 reconnect_mode = True
-                reconnect_deadline = time.monotonic() + (reconnect_grace_minutes * 60)
-                logger.info(f"Recording ended after {format_elapsed(elapsed)} — entering {reconnect_grace_minutes}min reconnect grace period")
+                reconnect_window.reset()  # armed at the first post-remux check
+                logger.info(
+                    f"Recording ended after {format_elapsed(elapsed)} — entering {reconnect_grace_minutes}min "
+                    f"reconnect grace period (+{reconnect_extended_minutes}min at {RECONNECT_EXTENDED_POLL_INTERVAL}s), "
+                    f"starting after remux"
+                )
 
             # ── Micro-fragment throttle ─────────────────────────────────────
             # If the server keeps dropping us after only a few seconds (e.g.
