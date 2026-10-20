@@ -70,6 +70,7 @@ class TestListenerSafety(unittest.TestCase):
         self.rec = _FakeRecorder()
         self.store = pr.PresenceStore()
         self.l = KickPushListener(self.rec, _FakeConfig(self.tmp.name), presence=self.store)
+        self.l._protocol = "pusher"  # these frames are Pusher-shaped
         self.l.set_channels(["vimp"], watch=["acx6", "lettyvision"])
 
     def tearDown(self):
@@ -116,6 +117,7 @@ class TestListenerSafety(unittest.TestCase):
 
     def test_no_recorder_is_fine(self):
         l = KickPushListener(None, _FakeConfig(self.tmp.name), presence=self.store)
+        l._protocol = "pusher"
         l.set_channels([], watch=["acx6"])
         l._on_message(None, _frame(KICK_LIVE_EVENT, 2))
         self.assertTrue(self.store.get("acx6")["live"])

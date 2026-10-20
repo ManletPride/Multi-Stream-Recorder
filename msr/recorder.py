@@ -18,6 +18,10 @@ from msr.util import (
     kill_orphan_recording_processes,
     kill_process_tree,
 )
+from msr.kick_realtime import (
+    BROWSER_HEADERS, CENTRIFUGO_MAX_SUBS, cf_connect, cf_refresh, cf_subscribe,
+    cf_unsubscribe, negotiate, new_client_id, parse_centrifugo_message, pusher_url,
+)
 from msr.worker import record_worker, remux_to_mp4, save_metadata
 
 # ────────────────────────────────────────────────
@@ -391,18 +395,17 @@ def purge_old_pending_files(root_path, max_age_days, logger=None):
 # ────────────────────────────────────────────────
 
 # ============ KICK PUSH NOTIFICATIONS ============
-# Kick's public Pusher endpoint (same socket the kick.com website uses).
-# If Kick rotates the app key, grab the new URL from DevTools -> Network ->
-# WS filter on any kick.com page and update it here.
-KICK_PUSHER_URL = (
-    "wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679"
-    "?protocol=7&client=js&version=8.4.0-rc2&flash=false"
-)
+# The socket is negotiated on every (re)connect the same way kick.com's web
+# client does it (msr/kick_realtime.py): Centrifugo today, Pusher with the
+# returned app key/cluster as a fallback. Never hard-code a key here again
+# (the old Pusher key died with error 4001 "App key ... not in this cluster").
 KICK_LIVE_EVENT = "App\\Events\\StreamerIsLive"
 KICK_STOP_EVENT = "App\\Events\\StopStreamBroadcast"
 KICK_ID_CACHE_FILE = "kick_channel_ids.json"   # lives next to config.ini
 PUSH_RECONNECT_BASE = 5        # seconds; doubles up to the cap below
-PUSH_RECONNECT_MAX = 300
+PUSH_RECONNECT_MAX = 600       # ~10 min cap
+PUSH_FAILURE_LOG_EVERY = 3600  # log connection failures at most hourly
+PUSH_TOKEN_REFRESH_MARGIN = 300  # refresh the Centrifugo token 5 min early
 
 
 def _safe_int(v):
@@ -461,7 +464,8 @@ def parse_kick_push_event(msg):
 
 
 class KickPushListener:
-    """Single-connection Pusher listener for Kick go-live events.
+    """Single-connection Kick realtime listener (Centrifugo or Pusher) for
+    go-live events.
 
     Two sets of slugs share one socket:
 
@@ -506,6 +510,17 @@ class KickPushListener:
         # retry bookkeeping for slugs that did not subscribe
         self._retry_at: dict = {}
         self._retry_gap: dict = {}
+        # transport state (negotiated per connection)
+        self._conn: dict = {}
+        self._protocol = "centrifugo"
+        self._cmd_id = 0
+        self._cf_pending: dict = {}    # command id -> slug awaiting subscribe reply
+        self._cf_channels: dict = {}   # slug -> subscribed centrifugo channel
+        self._token_expires = 0.0
+        self._healthy = False
+        self._fail_logged = False
+        self._last_fail_log = 0.0
+        self._limit_logged = False
         self._cache_path = os.path.join(
             os.path.dirname(os.path.abspath(
                 getattr(config, 'config_file', 'config.ini'))),
@@ -583,6 +598,18 @@ class KickPushListener:
 
     # ── connection loop ──
 
+    def _log_failure(self, what):
+        """Connection problems: one warning per hour, the rest at debug."""
+        now = time.monotonic()
+        if now - self._last_fail_log >= PUSH_FAILURE_LOG_EVERY or not self._fail_logged:
+            self._fail_logged = True
+            self._last_fail_log = now
+            self.logger.warning(
+                f"Kick push: {what} — polling continues; retrying with back-off "
+                f"(further failures logged at most hourly)")
+        else:
+            self.logger.debug(f"Kick push: {what}")
+
     def _run(self):
         import websocket  # websocket-client (guarded by HAS_WEBSOCKET)
         backoff = PUSH_RECONNECT_BASE
@@ -590,53 +617,111 @@ class KickPushListener:
             self._subscribed.clear()
             self._retry_at.clear()
             self._retry_gap.clear()
-            connected_at = time.monotonic()
+            self._cf_pending.clear()
+            self._cf_channels.clear()
+            self._healthy = False
             try:
-                self._ws = websocket.WebSocketApp(
-                    KICK_PUSHER_URL,
-                    on_open=self._on_open,
-                    on_message=self._on_message,
-                    on_error=lambda w, e: self.logger.warning(
-                        f"Kick push: socket error: {e}"),
-                    on_close=lambda w, c, r: self.logger.info(
-                        f"Kick push: socket closed ({c})"),
-                )
-                # ping keeps Pusher from dropping the idle connection
-                self._ws.run_forever(ping_interval=30, ping_timeout=10)
+                conn = self._negotiate(new_client_id())
             except Exception as e:
-                self.logger.warning(f"Kick push: connection failed: {e}")
-            finally:
-                self._connected = False
-                self._ws = None
-                # Connection is gone — clear every push flag so the workers'
-                # status line stops advertising push coverage.
-                for slug in list(self._subscribed) or list(self._wanted):
-                    self._set_push_flag(slug, False)
-                self._subscribed.clear()
+                conn = None
+                self._log_failure(f"realtime negotiation failed ({e})")
+            if conn is not None:
+                self._conn = conn
+                self._protocol = conn["provider"]
+                url = (conn["url"] if self._protocol == "centrifugo"
+                       else pusher_url(conn["app_key"], conn["cluster"]))
+                try:
+                    self._ws = websocket.WebSocketApp(
+                        url,
+                        header=[f"User-Agent: {BROWSER_HEADERS['user-agent']}"],
+                        on_open=self._on_open,
+                        on_message=self._on_message,
+                        on_error=lambda w, e: self._log_failure(f"socket error: {e}"),
+                        on_close=lambda w, c, r: self.logger.info(
+                            f"Kick push: socket closed ({c})") if self._healthy else None,
+                    )
+                    # ping keeps proxies from dropping the idle connection;
+                    # Centrifugo's own app-level ping ({}) is answered too.
+                    self._ws.run_forever(ping_interval=30, ping_timeout=10,
+                                         origin="https://kick.com")
+                except Exception as e:
+                    self._log_failure(f"connection failed ({e})")
+                finally:
+                    self._connected = False
+                    self._ws = None
+                    # Connection is gone — clear every push flag so the workers'
+                    # status line stops advertising push coverage.
+                    for slug in list(self._subscribed) or list(self._wanted):
+                        self._set_push_flag(slug, False)
+                    self._subscribed.clear()
 
             if self._stop.is_set():
                 break
-            # A connection that survived a while was healthy — reset backoff
-            if time.monotonic() - connected_at > 60:
+            # A connection that got as far as subscribing was healthy.
+            if self._healthy:
                 backoff = PUSH_RECONNECT_BASE
-            self.logger.info(f"Kick push: reconnecting in {backoff}s")
+                self._fail_logged = False
+            self.logger.debug(f"Kick push: reconnecting in {backoff}s")
             if self._stop.wait(backoff):
                 break
             backoff = min(backoff * 2, PUSH_RECONNECT_MAX)
 
     def _on_open(self, ws):
+        if self._protocol == "centrifugo":
+            # Subscriptions wait for the connect reply.
+            try:
+                ws.send(cf_connect(self._next_cmd_id(), self._conn.get("token", "")))
+            except Exception as e:
+                self._log_failure(f"connect send failed ({e})")
+            return
+        self._on_ready()
+
+    def _on_ready(self):
         self._connected = True
+        self._healthy = True
         with self._lock:
             wanted = sorted(self._wanted) + sorted(self._watch - self._wanted)
-        self.logger.info(f"Kick push: connected — subscribing {len(wanted)} channel(s)")
+        self.logger.info(
+            f"Kick push: connected ({self._protocol}) — subscribing {len(wanted)} channel(s)")
         for slug in wanted:
             self._subscribe(slug)
+
+    def _next_cmd_id(self):
+        self._cmd_id += 1
+        return self._cmd_id
+
+    def _negotiate(self, client_id):
+        return negotiate(client_id)
+
+    def _maybe_refresh_token(self):
+        """Centrifugo guest tokens expire (~45 min); refresh before that."""
+        if self._protocol != "centrifugo" or not self._connected or not self._token_expires:
+            return
+        if time.monotonic() < self._token_expires - PUSH_TOKEN_REFRESH_MARGIN:
+            return
+        ws = self._ws
+        try:
+            from msr.kick_realtime import AUTH_CONNECTION_PATH, http_post_json, parse_token_response
+            tok = parse_token_response(http_post_json(
+                AUTH_CONNECTION_PATH, {"client_id": self._conn.get("client_id")}))
+            if not tok:
+                raise RuntimeError("no token")
+            self._conn["token"] = tok
+            self._token_expires = 0  # set again from the refresh reply
+            ws.send(cf_refresh(self._next_cmd_id(), tok))
+        except Exception as e:
+            self._log_failure(f"token refresh failed ({e}); reconnecting")
+            try:
+                ws.close()
+            except Exception:
+                pass
 
     def _sweep_loop(self):
         """Retry slugs that never confirmed (failed id lookup / lost frame)."""
         while not self._stop.wait(PUSH_RESUBSCRIBE_CHECK):
             if not self._connected or self._ws is None:
                 continue
+            self._maybe_refresh_token()
             for slug in self.pending_slugs():
                 if self._stop.is_set():
                     return
@@ -649,9 +734,15 @@ class KickPushListener:
         self._retry_at[slug] = time.monotonic() + gap
 
     def _on_message(self, ws, raw):
+        if self._protocol == "centrifugo":
+            self._on_centrifugo_message(ws, raw)
+            return
         try:
             msg = json.loads(raw)
         except (ValueError, TypeError):
+            return
+        if msg.get("event") == "pusher:error":
+            self._log_failure(f"pusher error {str(msg.get('data'))[:120]}")
             return
         ev = parse_kick_push_event(msg)
         kind = ev["kind"]
@@ -660,21 +751,65 @@ class KickPushListener:
         slug = self._id_to_slug.get(ev["channel_id"])
         if not slug:
             return
-
         if kind == "subscribed":
-            self._subscribed.add(slug)
-            self._retry_at.pop(slug, None)
-            self._retry_gap.pop(slug, None)
-            with self._lock:
-                recording = slug in self._wanted
-            if recording:
-                self._set_push_flag(slug, True)
-            self.logger.info(
-                f"Kick push: listening for {slug} (channel.{ev['channel_id']})"
-                + ("" if recording else " — presence only"))
+            self._mark_subscribed(slug, ev["channel_id"])
             return
-
         self._handle_live_event(slug, kind, ev)
+
+    def _on_centrifugo_message(self, ws, raw):
+        for fr in parse_centrifugo_message(raw):
+            t = fr["type"]
+            if t == "ping":
+                try:
+                    ws.send("{}")
+                except Exception:
+                    pass
+            elif t == "reply":
+                if fr["kind"] in ("connect", "refresh"):
+                    ttl = (fr.get("result") or {}).get("ttl")
+                    if ttl:
+                        self._token_expires = time.monotonic() + float(ttl)
+                    if fr["kind"] == "connect":
+                        self._on_ready()
+                elif fr["kind"] == "subscribe":
+                    slug = self._cf_pending.pop(fr["id"], None)
+                    if slug:
+                        cid = self._ids.get(slug)
+                        self._cf_channels[slug] = f"channel.{cid}"
+                        self._mark_subscribed(slug, cid)
+            elif t == "error":
+                slug = self._cf_pending.pop(fr.get("id"), None)
+                what = f"{slug}: " if slug else ""
+                if fr.get("code") == 106 and not self._limit_logged:
+                    self._limit_logged = True
+                    self.logger.warning(
+                        f"Kick push: subscription limit reached ({what}error 106) — "
+                        f"remaining channels rely on polling")
+                elif slug:
+                    self.logger.info(f"Kick push: subscribe {what}error {fr.get('code')} "
+                                     f"{fr.get('message')}")
+                else:
+                    self._log_failure(f"server error {fr.get('code')} {fr.get('message')}")
+            elif t == "pub":
+                ev = parse_kick_push_event(fr["msg"])
+                if ev["kind"] in ("live", "stop"):
+                    slug = self._id_to_slug.get(ev["channel_id"])
+                    if slug:
+                        self._handle_live_event(slug, ev["kind"], ev)
+            elif t == "disconnect":
+                self._log_failure(f"server disconnect {fr.get('code')} {fr.get('reason')}")
+
+    def _mark_subscribed(self, slug, cid):
+        self._subscribed.add(slug)
+        self._retry_at.pop(slug, None)
+        self._retry_gap.pop(slug, None)
+        with self._lock:
+            recording = slug in self._wanted
+        if recording:
+            self._set_push_flag(slug, True)
+        self.logger.info(
+            f"Kick push: listening for {slug} (channel.{cid})"
+            + ("" if recording else " — presence only"))
 
     def _handle_live_event(self, slug, kind, ev):
         """Presence for every slug; a recorder wake ONLY for recording slugs."""
@@ -717,6 +852,20 @@ class KickPushListener:
             return
         self._id_to_slug[cid] = slug
         try:
+            if self._protocol == "centrifugo":
+                if slug in self._cf_pending.values():
+                    return  # still waiting for the reply
+                if len(self._cf_channels) + len(self._cf_pending) >= CENTRIFUGO_MAX_SUBS:
+                    if not self._limit_logged:
+                        self._limit_logged = True
+                        self.logger.warning(
+                            f"Kick push: more than {CENTRIFUGO_MAX_SUBS} Kick channels — "
+                            f"the rest rely on polling")
+                    return
+                cmd = self._next_cmd_id()
+                self._cf_pending[cmd] = slug
+                ws.send(cf_subscribe(cmd, f"channel.{cid}"))
+                return
             ws.send(json.dumps({
                 "event": "pusher:subscribe",
                 "data": {"auth": "", "channel": f"channel.{cid}"},
@@ -730,9 +879,14 @@ class KickPushListener:
         self._subscribed.discard(slug)
         self._retry_at.pop(slug, None)
         self._retry_gap.pop(slug, None)
+        chan = self._cf_channels.pop(slug, None)
         if ws is None or cid is None:
             return
         try:
+            if self._protocol == "centrifugo":
+                if chan:
+                    ws.send(cf_unsubscribe(self._next_cmd_id(), chan))
+                return
             ws.send(json.dumps({
                 "event": "pusher:unsubscribe",
                 "data": {"channel": f"channel.{cid}"},
