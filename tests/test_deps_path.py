@@ -25,13 +25,14 @@ class InterpreterPathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             exe = self._fake_python(root, "Scripts")
             scripts = os.path.dirname(exe)
-            env = {"PATH": os.pathsep.join([r"C:\other", scripts])}
+            # Drive-letter paths are one PATH entry only where ';' is the
+            # separator. On POSIX, ':' would split "C:\other" into "C" and
+            # "\other", which is the same split the OS itself would do.
+            other = r"C:\other" if os.name == "nt" else os.path.join(root, "other")
+            env = {"PATH": os.pathsep.join([other, scripts])}
             added = ensure_interpreter_scripts_on_path(env, exe)
             self.assertEqual(added, [])
-            parts = env["PATH"].split(os.pathsep)
-            self.assertEqual(parts[0], scripts)
-            self.assertEqual(parts.count(scripts), 1)
-            self.assertIn(r"C:\other", parts)
+            self.assertEqual(env["PATH"].split(os.pathsep), [scripts, other])
 
     def test_empty_path(self):
         with tempfile.TemporaryDirectory() as root:
