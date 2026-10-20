@@ -1636,13 +1636,9 @@ def _ensure_redact_filter(logger):
 def rotate_log_if_needed(log_file, max_bytes, backup_count):
     """Roll stream_recorder.log over at startup if it has grown too large.
 
-    Deliberately NOT logging.handlers.RotatingFileHandler: every recording
-    worker is a separate process that opens this same file, and mid-run
-    rollover requires renaming a file that those other processes still hold
-    open — which fails outright on Windows.  Rotating once at startup, before
-    any worker exists, sidesteps the problem entirely.  The trade-off is that
-    the active log can exceed max_bytes during a single long session; it gets
-    trimmed at the next launch.
+    Startup rename-based rotation, before any worker exists. During a run
+    SharedRotatingFileHandler enforces the same cap with copy-then-truncate,
+    because renaming a file other worker processes hold open fails on Windows.
 
     Keeps stream_recorder.log.1 … .N, oldest discarded.
     """
@@ -1667,6 +1663,85 @@ def rotate_log_if_needed(log_file, max_bytes, backup_count):
         pass  # logging must never be the thing that stops the app starting
 
 
+LOG_MAX_BYTES_ENV = "MSR_LOG_MAX_BYTES"
+LOG_BACKUPS_ENV = "MSR_LOG_BACKUP_COUNT"
+
+
+class SharedRotatingFileHandler(logging.FileHandler):
+    """Size-capped log file shared by the main process and every worker.
+
+    logging.handlers.RotatingFileHandler renames the active file, which fails
+    on Windows while other worker processes hold it open. This handler uses
+    copy-then-truncate instead: the current contents are copied to ``.1``
+    (older backups shift up) and the live file is truncated in place. Every
+    process keeps its append-mode handle, so later writes go to the start of
+    the now-empty file. A short-lived lock file stops two processes rotating
+    at once. A few lines written between the copy and the truncate can be
+    lost; that is the accepted trade-off. Size is checked at most every
+    ``check_interval`` seconds.
+    """
+
+    def __init__(self, filename, max_bytes, backup_count, encoding="utf-8",
+                 check_interval=5.0):
+        super().__init__(filename, mode="a", encoding=encoding)
+        self.max_bytes = int(max_bytes or 0)
+        self.backup_count = int(backup_count or 0)
+        self.check_interval = check_interval
+        self._next_check = 0.0
+
+    def emit(self, record):
+        super().emit(record)
+        if self.max_bytes <= 0:
+            return
+        now = time.monotonic()
+        if now < self._next_check:
+            return
+        self._next_check = now + self.check_interval
+        try:
+            if os.path.getsize(self.baseFilename) >= self.max_bytes:
+                self.rotate()
+        except Exception:
+            pass  # never let logging take the recorder down
+
+    def rotate(self):
+        log_file = self.baseFilename
+        lock = log_file + ".rotating"
+        try:
+            if os.path.exists(lock) and time.time() - os.path.getmtime(lock) > 120:
+                os.remove(lock)  # stale lock from a crashed process
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except OSError:
+            return  # another process is rotating right now
+        try:
+            os.close(fd)
+            if os.path.getsize(log_file) < self.max_bytes:
+                return  # someone else already rotated
+            if self.stream:
+                self.stream.flush()
+            if self.backup_count > 0:
+                for i in range(self.backup_count - 1, 0, -1):
+                    src, dst = f"{log_file}.{i}", f"{log_file}.{i + 1}"
+                    if os.path.exists(src):
+                        os.replace(src, dst)
+                shutil.copyfile(log_file, f"{log_file}.1")
+            with open(log_file, "r+b") as fh:
+                fh.truncate(0)
+        finally:
+            try:
+                os.remove(lock)
+            except OSError:
+                pass
+
+
+def _log_limits_from_env():
+    try:
+        max_bytes = int(os.environ.get(LOG_MAX_BYTES_ENV, 20 * 1024 * 1024))
+        backups = int(os.environ.get(LOG_BACKUPS_ENV, 3))
+    except ValueError:
+        max_bytes, backups = 20 * 1024 * 1024, 3
+    return max_bytes, backups
+
+
 def setup_logging(root_path, config=None):
     """Setup logging for main process."""
     os.makedirs(root_path, exist_ok=True)
@@ -1682,14 +1757,18 @@ def setup_logging(root_path, config=None):
             backups = config.getint('Cleanup', 'log_backup_count', fallback=3)
         except Exception:
             pass
-    rotate_log_if_needed(log_file, int(max_mb * 1024 * 1024), backups)
+    max_bytes = int(max_mb * 1024 * 1024)
+    rotate_log_if_needed(log_file, max_bytes, backups)
+    # Workers inherit the environment, so they apply the same cap.
+    os.environ[LOG_MAX_BYTES_ENV] = str(max_bytes)
+    os.environ[LOG_BACKUPS_ENV] = str(backups)
 
     formatter = logging.Formatter(
         "%(asctime)s [PID %(process)d] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
 
-    file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
+    file_handler = SharedRotatingFileHandler(log_file, max_bytes, backups)
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(formatter)
 
@@ -1710,7 +1789,8 @@ def setup_child_logging(root_path, channel_key):
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
 
-    file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
+    max_bytes, backups = _log_limits_from_env()
+    file_handler = SharedRotatingFileHandler(log_file, max_bytes, backups)
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(logging.Formatter(
         "%(asctime)s [PID %(process)d] [%(channel)s] %(message)s",

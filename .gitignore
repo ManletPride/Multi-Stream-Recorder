@@ -48,3 +48,6 @@ desktop.ini
 stream_recorder.log*
 console_log.txt
 log_output*.txt
+
+# Cross-process log rotation lock
+*.rotating

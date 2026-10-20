@@ -53,6 +53,7 @@ import threading
 
 from msr import __version__
 from msr.config import Config
+from msr.paths import ENV_VAR as DATA_DIR_ENV, activate_data_dir, resolve_data_dir
 from msr.deps import (
     DENO_VERSION, FFMPEG_VERSION, HAS_CURL_CFFI, HAS_DENO, HAS_FFMPEG,
     HAS_NOTIFICATIONS, HAS_PSUTIL, HAS_STREAMLINK, HAS_TRAY, HAS_YTDLP,
@@ -140,12 +141,16 @@ examples:
   %(prog)s                     Launch GUI (default)
   %(prog)s --headless          Run without GUI (Ctrl+C to stop)
   %(prog)s --config my.ini     Use a custom config file
+  %(prog)s --data-dir D:\\msr-data   Code here; config, channels, cookies from D:\\msr-data
         """,
     )
     parser.add_argument('--headless', action='store_true',
                         help='Run without GUI (background mode)')
     parser.add_argument('--config', default='config.ini',
-                        help='Path to config file (default: config.ini)')
+                        help='Path to config file (default: config.ini, relative to the data dir)')
+    parser.add_argument('--data-dir', default=None,
+                        help=f'Folder holding config.ini, channels.json, window_state.json, '
+                             f'kick_channel_ids.json (default: ${DATA_DIR_ENV} or the current directory)')
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
 
     args = parser.parse_args()
@@ -153,7 +158,15 @@ examples:
     if os.name == 'nt':
         mp.set_start_method('spawn', force=True)
 
-    config = Config(args.config)
+    data_dir = resolve_data_dir(args.data_dir)
+    if data_dir:
+        try:
+            activate_data_dir(data_dir)
+        except FileNotFoundError as e:
+            print(f"ERROR: {e}")
+            sys.exit(2)
+
+    config = Config(os.path.abspath(args.config))
 
     setup_logging(config.get('Paths', 'streams_dir'), config)
 
@@ -167,6 +180,7 @@ examples:
     logging.info(f"System tray available: {HAS_TRAY}")
     logging.info(f"Notifications available: {HAS_NOTIFICATIONS}")
     logging.info(f"Streams directory: {config.get('Paths', 'streams_dir')}")
+    logging.info(f"Data directory: {os.getcwd()} (config: {config.config_file})")
 
     streams_dir = config.get('Paths', 'streams_dir')
     if not try_acquire_single_instance(streams_dir, logging.getLogger()):
