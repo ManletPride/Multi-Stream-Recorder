@@ -42,6 +42,7 @@ keeps working; recording workers import ``msr.worker.record_worker`` directly
 so Windows spawn does not re-run the GUI.
 """
 
+import msr.nowindow  # noqa: F401  (must come first: hides child console windows)
 import argparse
 import json
 import logging
