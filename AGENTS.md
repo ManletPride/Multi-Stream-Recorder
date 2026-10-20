@@ -75,6 +75,14 @@ Status-tab stills from the live `.ts`. Constants in `msr/gui.py`: `PREVIEW_W`/`P
 - **Recording first** uses `ordered_status_keys` then `tree.move`. Do not delete-and-rebuild the status tree.
 - Double-click a tile pins a 480×270 copy above the strip (extra ffmpeg only for that channel). Close / double-click the same tile / double-click the large image dismisses it. Drop the pin if that channel stops recording.
 
+## Left roster panel (`ui/left-panel`)
+
+- Pure logic lives in `msr/channel_panel.py` (tested in `tests/test_channel_panel.py`); widgets are still built in `main_gui`.
+- Roster iids are `c:<channel key>` (group headers `h:<group>`). Never map rows by display text: the name column shows the bare name and the platform is a separate tag. channels.json keys are unchanged.
+- Groups: Recording, Channels, Disabled (collapsible, `roster_disabled_collapsed` in window_state). Manual order is kept inside groups. View toggle is `roster_view` (all/enabled/live); the old `roster_enabled_only` is still read.
+- Dots come from `channel_live_state(recorder.status_dict[key])` on the 2.5s `refresh_status` tick (`_roster_live_tick`). The tree is rebuilt only when group membership changes; otherwise images update in place.
+- Amber cookie badge = `cookie_badge()`: auth-error text in a worker Error detail, an expired auth cookie for the site, or Fishtank with no cookie and no config login. Drawn on the side canvas, enabled rows only.
+
 ## Other behavior that must not regress
 
 - **Remove channel** calls `StreamRecorder.remove_channel()` so the worker is killed; do not only delete the GUI list entry.
