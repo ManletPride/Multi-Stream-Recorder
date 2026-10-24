@@ -19,6 +19,7 @@ from msr.deps import (
 )
 from msr import channel_panel as cp
 from msr import dialogs as _dialogs
+from msr import logview
 from msr import wintheme as _wintheme
 from msr.presence import PresencePoller, PresenceStore, combined_state
 from msr.recorder import StreamRecorder
@@ -1855,19 +1856,39 @@ def main_gui(config):
     log_toolbar.pack(fill=tk.X, padx=10, pady=(8, 4))
 
     auto_scroll_var = tk.BooleanVar(value=True)
-    ttk.Checkbutton(log_toolbar, text="Auto-scroll", variable=auto_scroll_var).pack(side=tk.LEFT)
+    ttk.Checkbutton(
+        log_toolbar, text="Auto-scroll", variable=auto_scroll_var,
+        command=lambda: auto_scroll_var.get() and log_follow.jump(),
+    ).pack(side=tk.LEFT)
 
     def clear_logs():
-        log_text.configure(state=tk.NORMAL)
-        log_text.delete("1.0", tk.END)
-        log_text.configure(state=tk.DISABLED)
+        log_follow.clear()
 
     ttk.Button(log_toolbar, text="Clear", command=clear_logs).pack(side=tk.RIGHT)
 
     log_text = tk.Text(log_tab, wrap=tk.WORD, font=("Consolas", 9), state=tk.DISABLED,
                        borderwidth=0, relief="flat")
     log_scroll = ttk.Scrollbar(log_tab, orient=tk.VERTICAL, command=log_text.yview)
-    log_text.configure(yscrollcommand=log_scroll.set)
+    new_lines_btn = ttk.Button(log_tab, text="\u2193 New lines")
+
+    def _show_new_lines(count):
+        # Auto-scroll follows the log only while you are at the bottom; when you have
+        # scrolled back, new lines wait and this button jumps to them.
+        if count > 0:
+            new_lines_btn.configure(text=f"\u2193 {count} new line{'s' if count != 1 else ''}")
+            new_lines_btn.place(relx=1.0, rely=1.0, x=-34, y=-18, anchor="se")
+            new_lines_btn.lift()
+        else:
+            new_lines_btn.place_forget()
+
+    log_follow = logview.LogFollower(log_text, enabled=auto_scroll_var.get, on_behind=_show_new_lines)
+    new_lines_btn.configure(command=log_follow.jump)
+
+    def _log_yscroll(first, last):
+        log_scroll.set(first, last)
+        log_follow.on_scroll(first, last)
+
+    log_text.configure(yscrollcommand=_log_yscroll)
     log_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 10), pady=(0, 10))
     log_text.pack(fill=tk.BOTH, expand=True, padx=(10, 0), pady=(0, 10))
 
@@ -2688,22 +2709,14 @@ def main_gui(config):
 
     def refresh_logs():
         """Pull log messages from queue and append to log viewer."""
-        count = 0
-        while count < 50:  # process up to 50 messages per tick to avoid blocking
+        batch = []
+        while len(batch) < 50:  # up to 50 messages per tick to avoid blocking
             try:
-                msg = log_queue.get_nowait()
-                log_text.configure(state=tk.NORMAL)
-                log_text.insert(tk.END, msg + "\n")
-                # Keep log buffer reasonable (max ~5000 lines)
-                line_count = int(log_text.index('end-1c').split('.')[0])
-                if line_count > 5000:
-                    log_text.delete("1.0", f"{line_count - 4000}.0")
-                log_text.configure(state=tk.DISABLED)
-                if auto_scroll_var.get():
-                    log_text.see(tk.END)
-                count += 1
+                batch.append(log_queue.get_nowait())
             except stdlib_queue.Empty:
                 break
+        if batch:
+            log_follow.append(batch)  # trims to ~4000 lines past 5000; follows only at the bottom
         root.after(500, refresh_logs)
 
     # ── Recording controls ──
