@@ -8,7 +8,7 @@ import tempfile
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk
 
 from msr import __version__
 from msr.deps import (
@@ -18,6 +18,7 @@ from msr.deps import (
     Image, ImageDraw, plyer_notification, pystray,
 )
 from msr import channel_panel as cp
+from msr import dialogs as _dialogs
 from msr import wintheme as _wintheme
 from msr.presence import PresencePoller, PresenceStore, combined_state
 from msr.recorder import StreamRecorder
@@ -268,7 +269,7 @@ class QueueLogHandler(logging.Handler):
 def main_gui(config):
     """Main GUI window with dark mode, system tray, log viewer, and notifications."""
     import tkinter as tk
-    from tkinter import ttk, messagebox, simpledialog
+    from tkinter import ttk
     import queue as stdlib_queue
 
     # ── Theme colors ──
@@ -318,6 +319,8 @@ def main_gui(config):
                               config.getboolean('GUI', 'dark_mode', fallback=True)))
 
     # ── Windows: dark title bar via DWM API ──
+    _dialogs.set_dark_getter(dark_mode.get)  # popups follow the app's dark/light switch
+
     def set_title_bar_dark(dark=True):
         """Dark/light caption for the main window and any open dialogs."""
         _wintheme.set_title_bar_dark(root, dark)
@@ -1000,10 +1003,10 @@ def main_gui(config):
         if not names:
             return
         shown = "\n".join(names[:8]) + (f"\n… and {len(names) - 8} more" if len(names) > 8 else "")
-        if not messagebox.askyesno(
+        if not _dialogs.ask_yes_no(
+                root,
                 "Remove channel" + ("s" if len(names) > 1 else ""),
-                f"Remove from the list (recordings on disk are kept)?\n\n{shown}",
-                parent=root):
+                f"Remove from the list (recordings on disk are kept)?\n\n{shown}"):
             return
         drop = set(names)
         for ch_name in names:
@@ -1375,7 +1378,8 @@ def main_gui(config):
             clips = os.path.join(streams, 'Clips')
         cfg_path = os.path.abspath(getattr(config, 'config_file', 'config.ini'))
 
-        messagebox.showinfo(
+        _dialogs.show_info(
+            root,
             f"Multi-Stream Recorder v{__version__}",
             f"Multi-Stream Recorder v{__version__}\n\n"
             f"Kick, Twitch, YouTube, Rumble, TikTok,\n"
@@ -1938,14 +1942,13 @@ def main_gui(config):
     def on_poll_change(*_args):
         selected = poll_var.get()
         if selected == CUSTOM_POLL_LABEL:
-            _wintheme.watch_new_dialogs(root, dark_mode.get)
-            minutes = simpledialog.askfloat(
+            minutes = _dialogs.ask_float(
+                root,
                 "Custom Polling Interval",
                 f"Minutes between offline checks "
                 f"({POLL_MIN_MINUTES:g}–{POLL_MAX_MINUTES:g}):\n\n"
                 f"Values below {POLL_MIN_MINUTES:g} min are not allowed — "
                 f"checking too often risks rate limiting or IP bans.",
-                parent=root,
                 minvalue=POLL_MIN_MINUTES, maxvalue=POLL_MAX_MINUTES)
             if minutes is None:
                 # Cancelled — restore whatever was selected before
@@ -2011,12 +2014,11 @@ def main_gui(config):
     def on_clip_length_change(*_args):
         selected = clip_var.get()
         if selected == CUSTOM_CLIP_LABEL:
-            _wintheme.watch_new_dialogs(root, dark_mode.get)
-            seconds = simpledialog.askinteger(
+            seconds = _dialogs.ask_int(
+                root,
                 "Custom Clip Length",
                 f"Seconds to grab when clipping a live recording "
                 f"({CLIP_MIN_SECONDS}–{CLIP_MAX_SECONDS}):",
-                parent=root,
                 minvalue=CLIP_MIN_SECONDS, maxvalue=CLIP_MAX_SECONDS)
             if seconds is None:
                 # Cancelled — restore whatever was selected before
@@ -2112,7 +2114,8 @@ def main_gui(config):
             zip_url = zipball_url_for_tag(tag)
         target = application_dir()
         if not os.access(target, os.W_OK):
-            messagebox.showerror(
+            _dialogs.show_error(
+                root,
                 "Cannot update",
                 f"The install folder is not writable:\n{target}",
             )
@@ -2122,7 +2125,8 @@ def main_gui(config):
             "Active recordings will be stopped first.\n\n"
             if recording else ""
         )
-        if not messagebox.askyesno(
+        if not _dialogs.ask_yes_no(
+            root,
             "Install update",
             f"Download v{tag} from GitHub and restart Multi-Stream Recorder?\n\n"
             f"{extra}"
@@ -2135,7 +2139,8 @@ def main_gui(config):
 
         def _fail(msg):
             logging.warning("In-app update failed: %s", msg)
-            messagebox.showerror(
+            _dialogs.show_error(
+                root,
                 "Update failed",
                 f"{msg}\n\nYou can still open the release page from GitHub.",
             )
@@ -2201,7 +2206,7 @@ def main_gui(config):
             os.remove(path)
         except OSError:
             pass
-        messagebox.showerror("Update failed", msg)
+        _dialogs.show_error(root, "Update failed", msg)
 
     root.after(400, _warn_if_last_update_failed)
 
@@ -2709,15 +2714,15 @@ def main_gui(config):
             return
         enabled = get_enabled_channels()
         if not enabled:
-            messagebox.showwarning("No channels", "Enable at least one channel (click the checkbox).")
+            _dialogs.show_warning(root, "No channels", "Enable at least one channel (click the checkbox).")
             return
         if recorder and recorder.is_running:
-            messagebox.showinfo("Already running", "Recording is active.")
+            _dialogs.show_info(root, "Already running", "Recording is active.")
             return
 
         # Warn about large number of concurrent recordings
         if len(enabled) >= 15:
-            if not messagebox.askyesno("High Channel Count",
+            if not _dialogs.ask_yes_no(root, "High Channel Count",
                     f"You're about to monitor {len(enabled)} channels simultaneously.\n\n"
                     "This may strain your CPU, RAM, and disk I/O. Each channel spawns "
                     "its own process.\n\nContinue?"):
@@ -2741,7 +2746,7 @@ def main_gui(config):
 
         if issues:
             msg = "The following issues may prevent recording:\n\n" + "\n\n".join(issues) + "\n\nStart anyway?"
-            if not messagebox.askyesno("Dependency Warning", msg):
+            if not _dialogs.ask_yes_no(root, "Dependency Warning", msg):
                 return
 
         logging.info("=" * 60)

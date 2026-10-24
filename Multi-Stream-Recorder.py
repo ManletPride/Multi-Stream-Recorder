@@ -208,6 +208,7 @@ examples:
                     "recordings folder.\n\n"
                     "If you do not see the window, check the system tray "
                     "or a --headless copy.",
+                    parent=_root,
                 )
                 _root.destroy()
             except Exception:
@@ -240,7 +241,8 @@ examples:
                 messagebox.showerror(
                     "Multi-Stream Recorder — Missing Dependencies",
                     f"The following critical issues were found:\n\n{detail}\n\n"
-                    "The program cannot start until these are resolved."
+                    "The program cannot start until these are resolved.",
+                    parent=_err_root,
                 )
                 _err_root.destroy()
             except Exception:

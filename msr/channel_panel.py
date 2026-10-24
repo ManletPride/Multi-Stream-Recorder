@@ -324,8 +324,8 @@ def open_add_channel_dialog(root, theme, on_add, initial_text="",
 
     t = theme
     dlg = tk.Toplevel(root)
+    dlg.withdraw()  # shown by dialogs.present() once the caption is themed and it is centred
     dlg.title("Add channel")
-    dlg.transient(root)
     dlg.resizable(False, False)
     dlg.configure(bg=t["bg"], padx=14, pady=12)
 
@@ -390,16 +390,10 @@ def open_add_channel_dialog(root, theme, on_add, initial_text="",
     dlg.bind("<Return>", _submit)
     dlg.bind("<KP_Enter>", _submit)
     dlg.bind("<Escape>", _cancel)
-    try:
-        root.update_idletasks()
-        x = root.winfo_rootx() + 60
-        y = root.winfo_rooty() + 80
-        dlg.geometry(f"+{x}+{y}")
-    except tk.TclError:
-        pass
+    from msr import dialogs
     if dark is not None:
-        from msr.wintheme import set_title_bar_dark
-        dlg.after(10, lambda: set_title_bar_dark(dlg, dark))
+        dialogs.apply_title_bar(dlg, dark)
+    dialogs.present(dlg, root)  # themed caption first, then centred over root, then shown
     ent.focus_set()
     ent.icursor(tk.END)
     return dlg
