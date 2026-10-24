@@ -20,6 +20,8 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 | `msr/apply_update.py` | Temp helper: wait for PID, copy staged files, relaunch (no `msr` import) |
 | `msr/config.py` | `Config` / `config.ini` defaults (`default_streams_dir()`, coerce invalid numbers) |
 | `msr/deps.py` | `HAS_*` flags, tool versions, optional `psutil` / tray / plyer imports |
+| `msr/dialogs.py` | Themed popups: `show_info/warning/error`, `ask_yes_no`, `ask_int/float`, `new_dialog` + `present` for custom ones. Always parented, centred, caption themed (via `wintheme`) before positioning. Never call `messagebox`/`simpledialog` directly; `tests/test_chrome_guards.py` fails on any call without `parent=` and on a Toplevel without the themed caption |
+| `msr/logview.py` | `LogFollower`: the Log tab only follows new lines while scrolled to the bottom; a New lines button appears when behind |
 | `msr/iometer.py` | Status-header disk write / NIC download rates (`IoSampler`) |
 | `msr/__init__.py` | `__version__` (currently `2.1.0`) |
 | `SECURITY.md` | Vulnerability reporting; what is stored on disk |
