@@ -5,6 +5,7 @@
 UI overhaul: themed popups, calmer Logs tab, Restore previous, window memory, Library tab, status snapshot.
 
 - Popups and dialogs are themed (dark/light), parented to the window and centred; the native message boxes are gone. A test guards this.
+- **Streams** button beside Clips opens the recordings folder (`streams_dir`); it creates nothing and shows a themed message if the folder is missing. The disk/network meter moved to its own thin row under the Status header so the buttons fit at the default window width.
 - Logs tab follows new lines only while you are scrolled to the bottom; a **New lines** button appears when you are scrolled back.
 - Fixed a startup crash (the window flashed and vanished under `pythonw`) caused by the Log filter box reusing the roster filter's name; a hidden-window smoke test now launches the real UI in dark and light mode.
 - **Restore previous...**: the last 20 versions of `channels.json` and `config.ini` are kept in `msr_history/` (git-ignored) and can be restored from the `...` button beside About. Passwords and other secrets are masked in the list.

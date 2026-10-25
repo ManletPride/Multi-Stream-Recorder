@@ -1034,6 +1034,23 @@ def open_local_path(path):
         subprocess.Popen(["xdg-open", path])
 
 
+def open_existing_folder(configured, default="", opener=None):
+    """Open the folder named by a config value (blank = `default`) with the same helper as the
+    Clips button. Creates nothing. Returns (opened, message): `message` explains a refusal in
+    words fit for a themed popup (the path is shown to the user on screen only)."""
+    path = (configured or "").strip() or (default or "").strip()
+    if not path:
+        return False, "No recordings folder is set. Choose one in config.ini ([Paths] streams_dir)."
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isdir(path):
+        return False, f"The recordings folder does not exist yet:\n{path}\n\nIt is created when the first recording starts."
+    try:
+        (opener or open_local_path)(path)
+    except OSError as exc:
+        return False, f"Could not open the recordings folder:\n{path}\n\n{exc}"
+    return True, path
+
+
 # ────────────────────────────────────────────────
 #          Process Management
 # ────────────────────────────────────────────────

@@ -19,6 +19,7 @@ from msr.deps import (
     Image, ImageDraw, plyer_notification, pystray,
 )
 from msr import channel_panel as cp
+from msr.config import default_streams_dir
 from msr import dialogs as _dialogs
 from msr import history as _history
 from msr import library as _library
@@ -33,7 +34,7 @@ from msr.util import (
     application_dir, channel_file_stem, channel_key_to_dirs, channel_watch_url,
     check_for_updates, coerce_channel_records, ffprobe_from_ffmpeg, find_cookies_file,
     get_cookie_status_for_channel, kill_orphan_recording_processes,
-    open_local_path, parse_custom_url,
+    open_existing_folder, open_local_path, parse_custom_url,
     redact_for_log, validate_channel_name, validate_cookies,
 )
 from msr.iometer import (
@@ -467,7 +468,7 @@ def main_gui(config):
         tree.tag_configure("unknown", foreground=t['offline_fg'])
 
         # Tk widgets (non-ttk) — set all frame backgrounds
-        for w in [frame_right, bottom_bar, btn_frame, toggle_frame, status_header]:
+        for w in [frame_right, bottom_bar, btn_frame, toggle_frame, status_header, status_meter_row]:
             w.configure(bg=t['bg'])
         try:
             _theme_roster(t)
@@ -1479,6 +1480,9 @@ def main_gui(config):
 
     status_header = tk.Frame(status_tab)
     status_header.pack(fill=tk.X, padx=10, pady=(10, 6))
+    # The disk/network meter lives on its own thin row under the header: the header's buttons
+    # (Clip Now, Screenshot, Clips, Streams) already fill the row at the default window width.
+    status_meter_row = tk.Frame(status_tab)
     status_label = tk.Label(status_header, text="Live Recording Status",
                             font=("Segoe UI", 13, "bold"), anchor="w")
     status_label.pack(side=tk.LEFT)
@@ -1800,6 +1804,14 @@ def main_gui(config):
         if names:
             _open_clips_dir_for_channel(names[0])
 
+    def _open_recordings_folder():
+        """The Streams button: open streams_dir (Recorded/Processed live below it). Creates
+        nothing; a themed popup says so if the folder is not there yet."""
+        ok, why = open_existing_folder(config.get("Paths", "streams_dir", fallback=""),
+                                       default_streams_dir())
+        if not ok:
+            _dialogs.show_info(root, "Streams folder", why)
+
     # pack(side=RIGHT) first = rightmost. Clip Now is the primary action.
     clip_now_btn = ttk.Button(status_header, text="Clip Now",
                               command=_clip_selected_channel, width=10)
@@ -1826,11 +1838,19 @@ def main_gui(config):
              "status list. Right-click a row for\n"
              "the same action.")
 
-    # Whole-disk write + NIC download, immediately left of the Clips button.
+    streams_folder_btn = ttk.Button(status_header, text="Streams",
+                                    command=_open_recordings_folder, width=8)
+    streams_folder_btn.pack(side=tk.RIGHT, padx=(0, 6))
+    _Tooltip(streams_folder_btn,
+             "Open the recordings folder\n"
+             "(streams_dir from config.ini:\n"
+             "Recorded, Processed, Clips...).")
+
+    # Whole-disk write + NIC download, right-aligned on its own row under the header.
     # Hidden when psutil is missing — there is no fallback counter.
     _io_sampler = IoSampler(config.get("Paths", "streams_dir"))
     io_meter_label = tk.Label(
-        status_header, text=format_header(_io_sampler.last),
+        status_meter_row, text=format_header(_io_sampler.last),
         font=("Segoe UI", 9), anchor="e", width=32,
     )
 
@@ -1870,7 +1890,8 @@ def main_gui(config):
         root.after(1000, _refresh_io_meter)
 
     if HAS_PSUTIL:
-        io_meter_label.pack(side=tk.RIGHT, padx=(0, 12))
+        status_meter_row.pack(fill=tk.X, padx=10, pady=(0, 4), after=status_header)
+        io_meter_label.pack(side=tk.RIGHT)
         _Tooltip(io_meter_label, lambda: format_tooltip(_io_sampler.last))
 
     def _show_status_context_menu(event):

@@ -29,6 +29,7 @@ This is **v2.1.0**. See [CHANGELOG.md](CHANGELOG.md).
 - Per-channel status with measured resolution, fps and bitrate.
 - Live preview strip of every recording; click a tile to select, double-click to pin a larger preview.
 - **Clip Now** (last N seconds, stream copy, keyframe-aligned) and **Screenshot**, without interrupting the recording.
+- **Clips** and **Streams** buttons open the clips folder of the selected channel and the recordings folder.
 - Disk write and network meters.
 
 **Library tab**
