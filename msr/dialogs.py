@@ -23,6 +23,7 @@ from tkinter import ttk
 from typing import Callable
 
 from msr import wintheme
+from msr.winstate import format_geometry, parse_geometry
 
 _dark_getter: Callable[[], bool] | None = None
 
@@ -75,11 +76,25 @@ def apply_title_bar(win: tk.Toplevel, dark: bool | None = None) -> None:
             pass
 
     paint()
+    wintheme.enable_background_drag(win)  # every dialog can be moved by its background
     win._msr_title_bar = True  # type: ignore[attr-defined]
+    pending: list[str] = []
+
+    def cancel(event=None) -> None:
+        if event is not None and event.widget is not win:
+            return
+        for token in pending:
+            try:
+                win.after_cancel(token)
+            except tk.TclError:
+                pass
+        pending.clear()
+
     try:
         win.bind("<Map>", lambda e: paint() if e.widget is win else None, add="+")
+        win.bind("<Destroy>", cancel, add="+")  # a dialog closed in under 0.5 s leaves no stray callbacks
         for delay in _RETITLE_MS:
-            win.after(delay, paint)
+            pending.append(win.after(delay, paint))
     except tk.TclError:
         pass
 
@@ -142,6 +157,9 @@ def center_over(win: tk.Toplevel, parent: tk.Misc | None) -> None:
         apply_title_bar(win)
     owner = visible_owner(parent)
     size = (win.winfo_reqwidth(), win.winfo_reqheight())
+    stored = parse_geometry(getattr(win, "_msr_geometry", None))
+    if stored:  # a remembered size (and place) from winstate.attach()
+        size = (stored[0], stored[1])
     if owner is not None:
         try:
             owner.update_idletasks()
@@ -153,6 +171,8 @@ def center_over(win: tk.Toplevel, parent: tk.Misc | None) -> None:
     area = work_area(win, rect[0] + rect[2] // 2, rect[1] + rect[3] // 2)
     x, y = centered_position(rect, size, area)
     wanted = f"+{x}+{y}"
+    if stored:
+        wanted = format_geometry(stored[0], stored[1], *( (stored[2], stored[3]) if stored[2] is not None else (x, y) ))
     win.geometry(wanted)
     win._msr_place = wanted  # type: ignore[attr-defined]
     done = [False]

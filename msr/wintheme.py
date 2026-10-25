@@ -53,6 +53,78 @@ def set_title_bar_dark(win, dark=True):
         return False  # older Windows — silently skip
 
 
+# ---------------------------------------------------------------- drag by background
+WM_NCLBUTTONDOWN = 0x00A1
+HTCAPTION = 2
+_PLAIN_CLASSES = {"Tk", "Toplevel", "Frame", "TFrame", "Labelframe", "TLabelframe", "Label", "TLabel",
+                  "TSeparator"}
+
+
+def is_drag_background(widget) -> bool:
+    """True for plain background (frames, labels, separators) and false for anything the
+    user interacts with: buttons, entries, lists, trees, tabs, sashes, sliders, canvases,
+    text, scrollbars, and any label that shows an image, has a click binding or a hand cursor."""
+    try:
+        if widget.winfo_class() not in _PLAIN_CLASSES:
+            return False
+        if widget.winfo_class() in ("Label", "TLabel"):
+            if str(widget.cget("image")):
+                return False
+            if widget.bind("<Button-1>") or widget.bind("<ButtonPress-1>") or widget.bind("<Double-Button-1>"):
+                return False
+            if str(widget.cget("cursor")) in ("hand1", "hand2", "pointinghand"):
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def caption_lparam(x_root: int, y_root: int) -> int:
+    """MAKELONG(x, y) of the screen position, 16 bits each (negative = left/above the origin)."""
+    return ((int(y_root) & 0xFFFF) << 16) | (int(x_root) & 0xFFFF)
+
+
+def _begin_caption_drag(top, x_root: int, y_root: int) -> bool:
+    """Ask Windows to move `top` as if its title bar was grabbed. PostMessage, never
+    SendMessage: SendMessage runs the move loop inside the Tk callback and Tk timers that
+    fire in it re-enter Tcl and crash the process."""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        hwnd = frame_hwnd(top)
+        if not hwnd:
+            return False
+        lparam = caption_lparam(x_root, y_root)
+        user32.ReleaseCapture()
+        user32.PostMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, lparam)
+        return True
+    except Exception:
+        return False
+
+
+def enable_background_drag(top) -> None:
+    """Let the window be moved by dragging its plain background (once per window)."""
+    if getattr(top, "_msr_drag", False):
+        return
+    top._msr_drag = True
+
+    def press(event):
+        widget = event.widget
+        if not is_drag_background(widget):
+            return None
+        try:
+            if str(top.state()) == "zoomed" or widget.winfo_toplevel() is not top:
+                return None
+        except Exception:
+            return None
+        return "break" if _begin_caption_drag(top, event.x_root, event.y_root) else None
+
+    top._msr_drag_press = press  # type: ignore[attr-defined]  (tests call it without a mouse)
+    top.bind("<ButtonPress-1>", press, add="+")
+
+
 def theme_toplevels(root, dark, seen=None):
     """Apply the caption to every titled Toplevel under *root* (dialogs,
     including tkinter.simpledialog ones). Overrideredirect tooltips are skipped."""

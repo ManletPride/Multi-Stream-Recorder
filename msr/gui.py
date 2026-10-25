@@ -20,6 +20,7 @@ from msr.deps import (
 from msr import channel_panel as cp
 from msr import dialogs as _dialogs
 from msr import history as _history
+from msr import winstate as _winstate
 from msr import restore_dialog as _restore_dialog
 from msr import logview
 from msr import wintheme as _wintheme
@@ -329,9 +330,10 @@ def main_gui(config):
         _wintheme.set_title_bar_dark(root, dark)
         _wintheme.theme_toplevels(root, dark)
 
-    # Restore geometry
-    geom = win_state.get('geometry', '1100x760')
+    # Restore geometry (made safe for the monitors connected now: never off-screen)
+    geom = _winstate.fit_main_geometry(root, win_state.get('geometry'), '1100x760', (1060, 720))
     root.geometry(geom)
+    _wintheme.enable_background_drag(root)  # drag the window by its plain background
     # Width floor raised from 960 to 1060 in v1.8.0: the bottom toolbar packs
     # right-to-left, so when it runs out of horizontal room the *leftmost*
     # widget (the About button) is the one that gets clipped — it was
@@ -1394,7 +1396,8 @@ def main_gui(config):
             return None
 
         _restore_dialog.open_restore(root, channels_file, "Restore previous channel list",
-                                     can_restore=blocked, on_restored=_reload_channels_from_disk)
+                                     can_restore=blocked, on_restored=_reload_channels_from_disk,
+                                     state_file=state_file)
 
     def _restore_settings():
         def restored(_path):
@@ -1403,7 +1406,7 @@ def main_gui(config):
 
         _restore_dialog.open_restore(
             root, config.config_file, "Restore previous settings (config.ini)", on_restored=restored,
-            note="Restart Multi-Stream Recorder to use the restored settings.")
+            state_file=state_file, note="Restart Multi-Stream Recorder to use the restored settings.")
 
     def _about_dialog():
         deps = []
@@ -2946,7 +2949,8 @@ def main_gui(config):
         # Save window state
         try:
             col_widths = {col: tree.column(col, "width") for col in VISIBLE_STATUS_COLUMNS}
-            state = {
+            state = load_window_state(state_file)  # keep keys written elsewhere (dialog places)
+            state.update({
                 'geometry': root.geometry(),
                 'dark_mode': dark_mode.get(),
                 'column_widths': col_widths,
@@ -2955,7 +2959,7 @@ def main_gui(config):
                 'roster_enabled_only': roster_view_var.get() == cp.VIEW_ENABLED,
                 'roster_disabled_collapsed': bool(disabled_collapsed[0]),
                 'status_recording_first': bool(recording_first_var.get()),
-            }
+            })
             save_window_state(state_file, state)
         except Exception:
             pass

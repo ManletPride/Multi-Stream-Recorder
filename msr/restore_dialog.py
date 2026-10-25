@@ -8,7 +8,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Callable
 
-from msr import dialogs, history
+from msr import dialogs, history, winstate
 
 
 def when_text(stamp) -> str:
@@ -19,7 +19,7 @@ class RestoreWindow:
     """The window itself; open_restore() builds it and runs it modally."""
 
     def __init__(self, parent, path, title: str, *, can_restore: Callable[[], str | None] | None = None,
-                 on_restored: Callable[[str], None] | None = None, note: str = ""):
+                 on_restored: Callable[[str], None] | None = None, note: str = "", state_file=None):
         self.parent, self.path, self.title = parent, path, title
         self.can_restore, self.on_restored, self.note = can_restore, on_restored, note
         self.versions: list[history.Version] = []
@@ -53,6 +53,10 @@ class RestoreWindow:
         self.win.bind("<Escape>", lambda _e: self.win.destroy())
         self.win.protocol("WM_DELETE_WINDOW", self.win.destroy)
         self.refresh()
+        self.win.update_idletasks()
+        if state_file:  # remembers its size and place between sessions
+            winstate.attach(self.win, state_file, "restore_" + Path(str(path)).stem,
+                            (self.win.winfo_reqwidth() * 2 // 3, self.win.winfo_reqheight() * 2 // 3))
 
     def refresh(self) -> None:
         self.versions = history.list_versions(self.path)
