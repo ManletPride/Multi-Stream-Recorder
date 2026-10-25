@@ -147,9 +147,38 @@ def _free_gb(folder: str) -> float | None:
         return None
 
 
-def build_status(config_path: str = "config.ini", tools: dict | None = None) -> dict:
+def _roster_keys(channels_path: str) -> list[str] | None:
+    """The raw roster names (None when channels.json is missing or unreadable)."""
+    from msr.util import coerce_channel_records
+    try:
+        with open(channels_path, "r", encoding="utf-8") as fh:
+            records, _skipped = coerce_channel_records(json.load(fh))
+    except (OSError, ValueError):
+        return None
+    return [r["name"] for r in records]
+
+
+def library_snapshot(parser, streams: str, channels_path: str) -> dict:
+    """Sizes per site/channel/month for `--json --library` (see msr/library.py).
+
+    Opt-in because it walks the whole recordings folder. It only lists folders and reads file
+    sizes (no ffprobe, no video is opened), writes nothing (no cache) and exports no paths."""
+    from msr import library
+    try:
+        roots = library.roots_from_config(parser)
+    except configparser.Error:
+        roots = library.Roots(streams)
+    if not roots.streams_dir:
+        roots = library.Roots(streams, roots.clips_dir, roots.extra_dirs)
+    stats = library.scan_library(roots, collect_videos=False)
+    library.mark_roster(stats, _roster_keys(channels_path))
+    return library.to_dict(stats)
+
+
+def build_status(config_path: str = "config.ini", tools: dict | None = None, library: bool = False) -> dict:
     """The whole snapshot as a JSON-able dict. Paths in config.ini are resolved from the
-    current directory (the data dir) exactly like the app does."""
+    current directory (the data dir) exactly like the app does. `library=True` adds a
+    "library" section (the slow, opt-in part)."""
     parser, present = _read_config(config_path)
     streams = (parser.get("Paths", "streams_dir", fallback="") or "").strip() or default_streams_dir()
     channels_path = parser.get("Paths", "channels_file", fallback="") or "channels.json"
@@ -178,7 +207,7 @@ def build_status(config_path: str = "config.ini", tools: dict | None = None) -> 
     if not present:
         problems.append("config.ini not found - defaults shown (it is created on first normal start)")
 
-    return {
+    snapshot = {
         "app": {"name": "Multi-Stream Recorder", "version": __version__},
         "system": {"python": platform.python_version(), "os": sys.platform},
         "running": is_running(streams),
@@ -196,6 +225,9 @@ def build_status(config_path: str = "config.ini", tools: dict | None = None) -> 
         "problems": problems,
         "ok": not problems,
     }
+    if library:
+        snapshot["library"] = library_snapshot(parser, streams, channels_path)
+    return snapshot
 
 
 def render(status: dict) -> str:

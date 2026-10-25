@@ -154,6 +154,7 @@ examples:
   %(prog)s --headless          Run without GUI (Ctrl+C to stop)
   %(prog)s --config my.ini     Use a custom config file
   %(prog)s --json              Print a read-only status snapshot as JSON and exit
+  %(prog)s --json --library    The same plus sizes per site/channel/month (lists folders, slower)
   %(prog)s --data-dir D:\\msr-data   Code here; config, channels, cookies from D:\\msr-data
         """,
     )
@@ -167,9 +168,14 @@ examples:
     parser.add_argument('--json', action='store_true',
                         help='Print a read-only status snapshot (settings, roster, tools, problems) '
                              'as JSON and exit. Starts nothing; no secrets or personal paths')
+    parser.add_argument('--library', action='store_true',
+                        help='With --json: also scan the recordings folders (read-only, sizes only, '
+                             'nothing is written) and add a "library" section')
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
 
     args = parser.parse_args()
+    if args.library and not args.json:
+        parser.error('--library only works together with --json')
 
     if os.name == 'nt':
         mp.set_start_method('spawn', force=True)
@@ -184,7 +190,7 @@ examples:
 
     if args.json:
         from msr.status import build_status, render
-        print(render(build_status(os.path.abspath(args.config))))
+        print(render(build_status(os.path.abspath(args.config), library=args.library)))
         return
 
     config = Config(os.path.abspath(args.config))
