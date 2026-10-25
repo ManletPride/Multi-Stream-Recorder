@@ -56,6 +56,9 @@ log_output*.txt
 # Cross-process log rotation lock
 *.rotating
 
+# Your own colour themes (themes/*.json in the data folder)
+themes/
+
 # Version history of channels.json / config.ini (Restore previous...)
 msr_history/
 

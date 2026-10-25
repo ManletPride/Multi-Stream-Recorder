@@ -2,9 +2,17 @@
 
 ## Unreleased
 
+**Themes.** The Dark Mode checkbox is replaced by a **Theme...** button in the bottom bar. Pick a theme in the list and the whole window changes as you click; **OK** keeps it, **Cancel** puts the old one back. No restart.
+
+- Built-in themes: **PowerShell Blue** (the default), Neutral Dark, Light, High Contrast, Midnight Purple and Paper.
+- Every colour in the app now comes from one place, `msr/themes.py` (semantic tokens: backgrounds, text, buttons, Start/Stop, log levels, status colours, chart series and per-site colours, tooltips, caption). A test scans the source and fails on any hard-coded colour elsewhere, and another checks WCAG contrast in every theme (text at least 4.5:1, chart colours at least 3:1 against their background).
+- The choice is saved as `[GUI] theme` in `config.ini`. Existing installs migrate on their own: `dark_mode = true` starts in PowerShell Blue, `false` in Light. The old key is still read and is kept in step when you pick a theme, so an older version keeps working.
+- The Library charts, hover tooltips, roster, log, dialogs, drop-down lists, menus and the Windows title bar (colours too on Windows 11) all follow the theme live.
+- Your own themes: put `*.json` files in a `themes` folder in the data folder (the Theme window has **Open themes folder** and **Reload**, and writes a how-to sample). Only known colour names with `#rrggbb` values are accepted; a bad file is ignored and listed in the window. A new built-in theme is one entry in `msr/themes.py`.
+
 UI overhaul: themed popups, calmer Logs tab, Restore previous, window memory, Library tab, status snapshot.
 
-- Popups and dialogs are themed (dark/light), parented to the window and centred; the native message boxes are gone. A test guards this.
+- Popups and dialogs are themed, parented to the window and centred; the native message boxes are gone. A test guards this.
 - **Streams** button beside Clips opens the recordings folder (`streams_dir`); it creates nothing and shows a themed message if the folder is missing. The disk/network meter moved to its own thin row under the Status header so the buttons fit at the default window width.
 - Logs tab follows new lines only while you are scrolled to the bottom; a **New lines** button appears when you are scrolled back.
 - Fixed a startup crash (the window flashed and vanished under `pythonw`) caused by the Log filter box reusing the roster filter's name; a hidden-window smoke test now launches the real UI in dark and light mode.

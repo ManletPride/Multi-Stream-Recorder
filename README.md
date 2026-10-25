@@ -44,7 +44,7 @@ This is **v2.1.0**. See [CHANGELOG.md](CHANGELOG.md).
 - Follows new lines only while you are at the bottom (a **New lines** button appears when you scrolled back), filter box and level drop-down, search highlighting, coloured warnings/errors, Ctrl+F, **Open log file**.
 
 **Housekeeping**
-- Dark/light themed popups; windows remember their size and place and can be dragged by their background.
+- **Themes**: the **Theme...** button (bottom bar) opens a list with a live preview: PowerShell Blue (default), Neutral Dark, Light, High Contrast, Midnight Purple, Paper. Popups, charts and the Windows title bar follow. Add your own as `themes/*.json` in the data folder (the window can open the folder and writes a sample). Windows remember their size and place and can be dragged by their background.
 - **Restore previous...** (the `...` button beside About): the last 20 versions of `channels.json` and `config.ini`, with passwords masked in the list.
 - One instance per recordings folder; a second launch focuses the existing window.
 - `stream_recorder.log` rotates at a size limit (default 20 MB, 3 backups). Stream URLs, tokens and cookie headers are redacted from the log.
@@ -169,7 +169,8 @@ These are stored in plain text, which is one more reason `config.ini` is git-ign
 | `Cleanup/max_log_size_mb`, `log_backup_count` | 20, 3 | Log rotation |
 | `Clipping/clip_length_seconds`, `screenshot_format` | 30, jpg | Clip Now / Screenshot |
 | `Advanced/verbose` | false | Very noisy; only for diagnosing a failure |
-| `GUI/dark_mode`, `minimize_to_tray`, `notifications` | true | UI |
+| `GUI/theme` | PowerShell Blue | Colour theme (set from the **Theme...** button). Old `GUI/dark_mode` is still read: `true` = PowerShell Blue, `false` = Light |
+| `GUI/minimize_to_tray`, `notifications` | true | UI |
 
 Output layout: `streams_dir\Recorded\<platform>\<channel>\` (raw `.ts` while recording), `Processed\...` (final `.mp4`), `Clips\...`, `PendingDeletion\` (originals, purged after `auto_purge_days`).
 

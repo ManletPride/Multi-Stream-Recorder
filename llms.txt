@@ -29,7 +29,7 @@ It never includes passwords, e-mail addresses, cookie names or file names, API k
 - `cookies.txt`: the user's site logins. Treat like a password.
 - `library_cache.json`: remembered video lengths for the Library tab's **Count hours** (path + mtime + size keyed; safe to delete).
 - `library_actions.log` (what the Library tab deleted or moved, JSON lines) and `library_moves.json` (where files moved to PendingDeletion came from, for Undo/Restore; deleting it only loses exact restore paths).
-- `window_state.json`: window geometry, theme, column widths, and per-dialog positions (`dialogs` map).
+- `window_state.json`: window geometry, column widths, and per-dialog positions (`dialogs` map).
 - `kick_channel_ids.json`: cache. `stream_recorder.log*`: log (tokens and cookie headers redacted, still do not paste publicly).
 - `msr_history/<file name>/<timestamp>.bak`: last 20 versions of `channels.json` and `config.ini`, written before every overwrite. They are full copies, secrets included. GUI: the "..." button beside About, then "Restore previous...".
 - `channels_fishtank.json` (tracked, ships with releases): the house Fishtank roster. Not user data.
@@ -44,6 +44,7 @@ Kick is a bare name (`gmhikaru`). Everything else is `platform:name`: `twitch:ch
 - `msr/gui.py`: Tk UI (`main_gui`). `msr/worker.py`: `record_worker` (multiprocessing target; must stay top-level), clips, remux. `msr/platforms.py`: per-site live checks and command builders. `msr/recorder.py`: `StreamRecorder`.
 - `msr/config.py`: `Config` and defaults. `msr/status.py`: the `--json` snapshot. `msr/history.py`: version history and masked summaries. `msr/winstate.py`: window geometry memory.
 - `msr/dialogs.py`, `msr/wintheme.py`, `msr/logview.py`, `msr/restore_dialog.py`: themed popups, title bar, drag by background, Log tab behaviour (follow only at the bottom, filter), Restore window.
+- `msr/themes.py` (no tkinter; the ONLY file with colour values), `msr/themeui.py`, `msr/theme_dialog.py`: themes and the Theme... window. A theme is a name, a dark flag and semantic colour tokens. Choice saved as `[GUI] theme` in `config.ini` (old `dark_mode` still read and migrated: true = PowerShell Blue, false = Light). Add a built-in theme with one `_add(_make(...))` entry in `msr/themes.py`; user themes are `themes/*.json` in the data folder (`{"name", "base", "dark", "colors": {token: "#rrggbb"}}`, bad files ignored). `tests/test_themes.py` checks contrast; `tests/test_theme_guard.py` fails on a colour literal anywhere else.
 - `msr/library.py`, `msr/charts.py`, `msr/library_window.py`: the Library tab (read-only scan in a background thread, Canvas charts, channel table; optional `[Library] extra_dirs = A;B` in `config.ini` adds more folders to scan, scan-only).
 - `msr/library_actions.py` (no tkinter), `msr/library_dialog.py`, `msr/library_manage.py`: file management from the Library tab. Default action moves to `PendingDeletion` (reversible, Undo/Restore); permanent delete needs a typed confirmation; a `Guard` limits it to recordings, clips, screenshots and their `.meta.json` inside the library folders and never touches a recording channel or a recent file.
 - `msr/util.py`: paths, logging (`redact_for_log`), process control, single-instance lock, validation.
@@ -52,6 +53,7 @@ Kick is a bare name (`gmhikaru`). Everything else is `platform:name`: `twitch:ch
 
 - Do not read, print, commit or upload `config.ini`, `cookies.txt`, `channels.json`, logs, HAR files, `.env` or `msr_history/`. Use `--json` to learn the state of an install instead.
 - Use a temporary data folder for experiments (`--data-dir <temp>` with a small `config.ini` whose `streams_dir` is inside it). Do not press Start with a real roster.
+- Colours: never write a hex or named colour in code; use a token from `msr.themes.current()` (add one to `msr/themes.py` if none fits).
 - Tkinter popups: use `msr.dialogs` (always parented, themed, centred); never call `messagebox`/`simpledialog` directly. `tests/test_chrome_guards.py` enforces this.
 - Windows drag-by-background must use PostMessage, never SendMessage (a nested move loop re-enters Tcl and crashes).
 - A running GUI does not reload `msr/`: fully quit and relaunch after code changes.

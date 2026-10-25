@@ -20,6 +20,9 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 | `msr/apply_update.py` | Temp helper: wait for PID, copy staged files, relaunch (no `msr` import) |
 | `msr/config.py` | `Config` / `config.ini` defaults (`default_streams_dir()`, coerce invalid numbers) |
 | `msr/deps.py` | `HAS_*` flags, tool versions, optional `psutil` / tray / plyer imports |
+| `msr/themes.py` | The ONLY file with colour values; no tkinter. `Theme` (name, dark flag, semantic tokens), the built-in list, `current()/set_current()`, `resolve_saved()` (config migration), WCAG helpers, user themes from `<data>/themes/*.json` |
+| `msr/themeui.py` | `apply_ttk(root, style, theme)`: every ttk style, drop-down lists, `menu_colors` |
+| `msr/theme_dialog.py` | The **Theme...** window (live preview, OK / Cancel, Open themes folder, Reload) |
 | `msr/dialogs.py` | Themed popups: `show_info/warning/error`, `ask_yes_no`, `ask_int/float`, `new_dialog` + `present` for custom ones. Always parented, centred, caption themed (via `wintheme`) before positioning. Never call `messagebox`/`simpledialog` directly; `tests/test_chrome_guards.py` fails on any call without `parent=` and on a Toplevel without the themed caption |
 | `msr/logview.py` | `LogFollower`: the Log tab only follows new lines while scrolled to the bottom; a New lines button appears when behind. Also the filter (words + minimum level; `GuiFormatter` tags WARNING/ERROR lines), search highlighting and `open_log_file` |
 | `msr/history.py` | Last-20 version history of `channels.json` / `config.ini` in git-ignored `msr_history/<file>/<stamp>.bak`, written by `snapshot()` before every overwrite (`Config._write`, `save_channels`). `summarize()` masks anything `is_sensitive` (passwords, e-mail, keys, cookies): never show raw ini values in a restore list. History failure must never block a save |
@@ -119,6 +122,14 @@ Status-tab stills from the live `.ts`. Constants in `msr/gui.py`: `PREVIEW_W`/`P
 
 - **Dialog title bars:** `msr/wintheme.py` `set_title_bar_dark(win, dark)` (DWM attribute 20, then 19, on the `wm_frame()` HWND after `update_idletasks`, then SWP_FRAMECHANGED to repaint). The main window, the Add channel dialog, and the custom poll/clip `simpledialog` prompts (via `watch_new_dialogs` before the blocking call) use it; `apply_theme` re-themes open dialogs. Native `messagebox` dialogs are OS-owned and can't be themed.
 
+## Themes (`msr/themes.py`)
+- **Never write a colour in code.** Use `themes.current()["token"]` (or `Muted.TLabel` / `Warn.TLabel` / `Error.TLabel` / `Ok.TLabel` styles). A new colour need means a new token in `COLOR_TOKENS` and a value in every theme. `tests/test_theme_guard.py` scans `msr/*.py` for hex and named colours (one explained allowlist entry) and `tests/test_themes.py` checks every theme for completeness and WCAG contrast (`TEXT_PAIRS` at least 4.5:1, `GRAPHIC_PAIRS` chart colours at least 3:1).
+- **Add a theme:** one `_add(_make("Name", dark_flag, bg=..., ...))` entry in `msr/themes.py`. `_make` fills tokens you leave out (hover, selection, caption, chart tones); `**_SITES_DARK` / `_SITES_LIGHT` / `_SITES_HC` give the per-site chart colours. The Theme window, config migration and tests pick it up from the list.
+- Applying: `apply_theme()` in `main_gui` calls `themeui.apply_ttk`, recolours the classic Tk widgets, the log tags, the roster, menus, the caption (`wintheme.set_title_bar_dark` uses the theme's dark flag and, on Windows 11, its caption colours) and `LibraryPanel.refresh_theme()` (charts, site colours, tooltips). Code that draws with its own colours (canvases, tooltips, dialogs) must read `themes.current()` when it draws, not at import.
+- Config: `[GUI] theme = <name>` is written only when the user confirms a theme (it is deliberately not in `DEFAULT_CONFIG`, so migration can see it is unset). `dark_mode` is still read (window_state.json first, then config.ini) and kept in step. `true` migrates to PowerShell Blue, `false` to Light. An unknown saved name falls back the same way.
+- User themes: `<data>/themes/*.json` (git-ignored), max 20 files of 20 KB, `{"name", "base", "dark", "colors"}`; only known tokens with `#rrggbb`; a bad file is ignored and listed in the Theme window. Built-in names cannot be replaced.
+- `tests/test_theme_smoke.py` launches the real window hidden and applies every theme through the Theme window, checking widget and chart colours, the tooltip, the saved config and the bottom-bar width at 1100 and 1060 px.
+
 ## Other behavior that must not regress
 
 - **Remove channel** calls `StreamRecorder.remove_channel()` so the worker is killed; do not only delete the GUI list entry.
@@ -137,7 +148,7 @@ Status-tab stills from the live `.ts`. Constants in `msr/gui.py`: `PREVIEW_W`/`P
 - **Cookie dots** redraw from tree events / `yview`, not a 500ms idle loop.
 - **Disk / NIC meters** (a thin right-aligned row under the Status header: the header's four buttons already fill it at the 1100 px default and the meter was being clipped to ~120 px) are whole-disk write and whole-NIC download from `psutil`. MSR-only write rate uses worker `size_bytes` on the status dict — do **not** `listdir` the recordings folder on the GUI 1s tick. Tooltip holds stream Mbps from the status detail string. Hidden when `psutil` is missing. Sample with `root.after(1000)`. On Windows, map `streams_dir` to `PhysicalDriveN` via `IOCTL_STORAGE_GET_DEVICE_NUMBER`.
 - **Stop Recording** / per-channel stop join process trees on a background thread. Do not call `recorder.stop()` or `stop_channel()` on the Tk thread (the GUI freezes for 10s×N). `_full_quit` may still stop synchronously before `os._exit`.
-- **Bottom toolbar** packs `side=RIGHT` (first = rightmost). Pack each combobox *before* its label so the caption sits to the left of *that* dropdown: `Clip Length: [combo]  Polling: [combo]  Dark Mode`. Do not pack the label first — that put “Clip Length:” on the poll combo and “Check Now” on the clip combo.
+- **Bottom toolbar** packs `side=RIGHT` (first = rightmost). Pack each combobox *before* its label so the caption sits to the left of *that* dropdown: `Clip Length: [combo]  Polling: [combo]  Theme...`. Do not pack the label first — that put “Clip Length:” on the poll combo and “Check Now” on the clip combo.
 - **GUI log queue** is bounded (`Queue(maxsize=2000)`, drop-oldest). Do not use an unbounded `Queue`.
 - **`check_disk_space`** fails closed when the path is not writable. Do not `return True, 0` on `disk_usage` errors.
 - **Kick records with streamlink.** Do not log “yt-dlp failed” on a missing Kick file; the retry is another streamlink argv.
