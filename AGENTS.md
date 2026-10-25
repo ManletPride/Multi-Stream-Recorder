@@ -10,7 +10,7 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 
 | Path | Role |
 | --- | --- |
-| `Multi-Stream-Recorder.py` | Thin launcher only (`main()`, `--headless`). Users still run this. |
+| `Multi-Stream-Recorder.py` | Thin launcher only (`main()`, `--headless`, `--json`). Users still run this. |
 | `msr/gui.py` | Tkinter UI (`main_gui`) |
 | `msr/worker.py` | `record_worker` (multiprocessing target), clips, remux, monitor |
 | `msr/platforms.py` | Per-site live checks, Fishtank auth, ffmpeg/yt-dlp/streamlink command builders |
@@ -21,7 +21,11 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 | `msr/config.py` | `Config` / `config.ini` defaults (`default_streams_dir()`, coerce invalid numbers) |
 | `msr/deps.py` | `HAS_*` flags, tool versions, optional `psutil` / tray / plyer imports |
 | `msr/dialogs.py` | Themed popups: `show_info/warning/error`, `ask_yes_no`, `ask_int/float`, `new_dialog` + `present` for custom ones. Always parented, centred, caption themed (via `wintheme`) before positioning. Never call `messagebox`/`simpledialog` directly; `tests/test_chrome_guards.py` fails on any call without `parent=` and on a Toplevel without the themed caption |
-| `msr/logview.py` | `LogFollower`: the Log tab only follows new lines while scrolled to the bottom; a New lines button appears when behind |
+| `msr/logview.py` | `LogFollower`: the Log tab only follows new lines while scrolled to the bottom; a New lines button appears when behind. Also the filter (words + minimum level; `GuiFormatter` tags WARNING/ERROR lines), search highlighting and `open_log_file` |
+| `msr/history.py` | Last-20 version history of `channels.json` / `config.ini` in git-ignored `msr_history/<file>/<stamp>.bak`, written by `snapshot()` before every overwrite (`Config._write`, `save_channels`). `summarize()` masks anything `is_sensitive` (passwords, e-mail, keys, cookies): never show raw ini values in a restore list. History failure must never block a save |
+| `msr/restore_dialog.py` | Themed "Restore previous..." window (the `\u22ef` menu beside About). Restore snapshots the current file first, so it can be undone; channel restore is refused while recording |
+| `msr/winstate.py` | Window size/place memory: main window geometry clamped to the current monitors, per-dialog geometry merged into `window_state.json["dialogs"]` (merge, never rewrite the file), negative places written `+-N` |
+| `msr/status.py` | `--json` snapshot. Read-only; no secrets, no absolute paths, custom URLs reduced to the host |
 | `msr/iometer.py` | Status-header disk write / NIC download rates (`IoSampler`) |
 | `msr/__init__.py` | `__version__` (currently `2.1.0`) |
 | `SECURITY.md` | Vulnerability reporting; what is stored on disk |

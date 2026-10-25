@@ -142,6 +142,7 @@ examples:
   %(prog)s                     Launch GUI (default)
   %(prog)s --headless          Run without GUI (Ctrl+C to stop)
   %(prog)s --config my.ini     Use a custom config file
+  %(prog)s --json              Print a read-only status snapshot as JSON and exit
   %(prog)s --data-dir D:\\msr-data   Code here; config, channels, cookies from D:\\msr-data
         """,
     )
@@ -152,6 +153,9 @@ examples:
     parser.add_argument('--data-dir', default=None,
                         help=f'Folder holding config.ini, channels.json, window_state.json, '
                              f'kick_channel_ids.json (default: ${DATA_DIR_ENV} or the current directory)')
+    parser.add_argument('--json', action='store_true',
+                        help='Print a read-only status snapshot (settings, roster, tools, problems) '
+                             'as JSON and exit. Starts nothing; no secrets or personal paths')
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
 
     args = parser.parse_args()
@@ -166,6 +170,11 @@ examples:
         except FileNotFoundError as e:
             print(f"ERROR: {e}")
             sys.exit(2)
+
+    if args.json:
+        from msr.status import build_status, render
+        print(render(build_status(os.path.abspath(args.config))))
+        return
 
     config = Config(os.path.abspath(args.config))
 

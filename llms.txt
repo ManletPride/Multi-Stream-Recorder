@@ -1,0 +1,51 @@
+# Multi-Stream Recorder
+
+> Desktop app (Python 3.10+, Tkinter, Windows first) that watches a roster of live channels and records each one automatically as MP4. One worker process per channel. Sites: Kick, Twitch, YouTube, Rumble, TikTok, Fishtank.live, and any URL yt-dlp supports. License MIT.
+
+This file is a manual for AI assistants and scripts. It contains no secrets and no personal paths. For humans see README.md; for contributors see AGENTS.md; for the security model see SECURITY.md.
+
+## Run
+
+- GUI: `python Multi-Stream-Recorder.py` (or `run_msr.pyw` / `run_msr.bat`, no console window).
+- Headless: `python Multi-Stream-Recorder.py --headless` (Ctrl+C stops; reads the roster, records every enabled channel).
+- Status snapshot: `python Multi-Stream-Recorder.py --json`. Prints ONE JSON document and exits. Read-only: it starts nothing, takes no lock, creates no file, opens no window.
+- Data folder: `--data-dir DIR` or env `MSR_HOME` (folder must exist). `config.ini`, `channels.json`, `cookies.txt`, `window_state.json` live there; default is the current directory. `--config FILE` picks another ini (relative to the data folder).
+- `--version` prints the version.
+- Tests: `python -m unittest discover -s tests -t .` (no network, no real recording, GUI tests use hidden windows).
+
+## `--json` output (stable keys)
+
+`app{name,version}`, `system{python,os}`, `running` (true/false/null: another copy holds this recordings folder's single-instance lock), `config{file,found,settings,recordings_folder{exists,free_gb},fishtank_login_set,cookies_file_set}`, `channels{file,found,total,enabled,skipped,by_platform,channels[{name,enabled}]}`, `tools{yt-dlp,streamlink,ffmpeg,deno,psutil,curl_cffi,tray,notifications}`, `problems[]` (human-readable strings), `ok` (true when `problems` is empty).
+
+It never includes passwords, e-mail addresses, cookie names or file names, API keys, absolute paths, or custom-URL query strings (a custom channel is shown as `custom:<host>`). `config.settings` omits `[Paths]` and `[Fishtank]`.
+
+## Files the app owns (all in the data folder, all git-ignored)
+
+- `config.ini`: settings. `[Fishtank]` email/password are plaintext. Never print, commit or paste it.
+- `channels.json`: the roster, a list of `{"name": key, "enabled": bool}` (plain strings also accepted).
+- `cookies.txt`: the user's site logins. Treat like a password.
+- `window_state.json`: window geometry, theme, column widths, and per-dialog positions (`dialogs` map).
+- `kick_channel_ids.json`: cache. `stream_recorder.log*`: log (tokens and cookie headers redacted, still do not paste publicly).
+- `msr_history/<file name>/<timestamp>.bak`: last 20 versions of `channels.json` and `config.ini`, written before every overwrite. They are full copies, secrets included. GUI: the "..." button beside About, then "Restore previous...".
+- `channels_fishtank.json` (tracked, ships with releases): the house Fishtank roster. Not user data.
+
+## Channel keys
+
+Kick is a bare name (`gmhikaru`). Everything else is `platform:name`: `twitch:chess`, `youtube:@LofiGirl`, `rumble:NewsmaxTV`, `tiktok:qvc`, `fishtank:director`, `custom:https://...` (http/https only). Unknown platforms, `file:` URLs and names with path characters are rejected (`msr.util.parse_channel_key`).
+
+## Code map
+
+- `Multi-Stream-Recorder.py`: launcher, argparse, `--headless`, `--json`.
+- `msr/gui.py`: Tk UI (`main_gui`). `msr/worker.py`: `record_worker` (multiprocessing target; must stay top-level), clips, remux. `msr/platforms.py`: per-site live checks and command builders. `msr/recorder.py`: `StreamRecorder`.
+- `msr/config.py`: `Config` and defaults. `msr/status.py`: the `--json` snapshot. `msr/history.py`: version history and masked summaries. `msr/winstate.py`: window geometry memory.
+- `msr/dialogs.py`, `msr/wintheme.py`, `msr/logview.py`, `msr/restore_dialog.py`: themed popups, title bar, drag by background, Log tab behaviour (follow only at the bottom, filter), Restore window.
+- `msr/util.py`: paths, logging (`redact_for_log`), process control, single-instance lock, validation.
+
+## Rules for assistants working on this repo
+
+- Do not read, print, commit or upload `config.ini`, `cookies.txt`, `channels.json`, logs, HAR files, `.env` or `msr_history/`. Use `--json` to learn the state of an install instead.
+- Use a temporary data folder for experiments (`--data-dir <temp>` with a small `config.ini` whose `streams_dir` is inside it). Do not press Start with a real roster.
+- Tkinter popups: use `msr.dialogs` (always parented, themed, centred); never call `messagebox`/`simpledialog` directly. `tests/test_chrome_guards.py` enforces this.
+- Windows drag-by-background must use PostMessage, never SendMessage (a nested move loop re-enters Tcl and crashes).
+- A running GUI does not reload `msr/`: fully quit and relaunch after code changes.
+- Keep line endings LF (`.gitattributes`).
