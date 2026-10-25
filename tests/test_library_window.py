@@ -10,7 +10,7 @@ from unittest import mock
 
 from tkinter import ttk
 
-from msr import dialogs
+from msr import dialogs, themes
 from msr import library as lib
 from msr import library_window as lw
 from tests.test_library import put
@@ -279,8 +279,9 @@ class WindowTests(Case):
 
     def test_theme_refresh_redraws(self):
         win = self.scanned()
-        with mock.patch.object(dialogs, "is_dark", return_value=False):
-            win.refresh_theme()
+        self.addCleanup(themes.set_current, themes.current())
+        themes.set_current(themes.find(themes.LIGHT_THEME))
+        win.refresh_theme()
         win.frame.destroy()
         win.refresh_theme()  # after close: nothing happens, nothing raises
 

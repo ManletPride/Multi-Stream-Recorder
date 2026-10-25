@@ -114,7 +114,7 @@ class ActionDialog:
                 radio = ttk.Radiobutton(box, text=label, value=method, variable=self.method_var,
                                         command=self._schedule_refresh)
                 radio.pack(anchor="w")
-                note_label = ttk.Label(box, text=desc, wraplength=720, justify="left", foreground="gray")
+                note_label = ttk.Label(box, text=desc, wraplength=720, justify="left", style="Muted.TLabel")
                 note_label.pack(anchor="w", padx=(22, 0), pady=(0, 3))
                 self.method_buttons[method], self.method_notes[method] = radio, note_label
 
@@ -144,7 +144,7 @@ class ActionDialog:
 
         self.summary = ttk.Label(frame, text="", wraplength=760, justify="left")
         self.summary.pack(anchor="w", pady=(8, 0))
-        self.warning = ttk.Label(frame, text=note, wraplength=760, justify="left", foreground="#c0392b")
+        self.warning = ttk.Label(frame, text=note, wraplength=760, justify="left", style="Error.TLabel")
         self.warning.pack(anchor="w")
         self.confirm_row = ttk.Frame(frame)
         self.confirm_label = ttk.Label(self.confirm_row, text="")

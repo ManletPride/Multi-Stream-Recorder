@@ -707,11 +707,12 @@ COOKIE_STATUS_MISSING = 'missing'   # no cookie for this domain at all
 COOKIE_STATUS_EXPIRED = 'expired'   # domain present but auth cookie expired
 COOKIE_STATUS_UNKNOWN = 'unknown'   # can't determine (no cookies file, etc.)
 
-COOKIE_DOT_COLORS = {
-    COOKIE_STATUS_PRESENT: '#4CAF50',   # green
-    COOKIE_STATUS_MISSING: '#F44336',   # red
-    COOKIE_STATUS_EXPIRED: '#FF9800',   # orange
-    COOKIE_STATUS_UNKNOWN: '#888888',   # grey
+# which theme token colours the cookie dot for each status (msr/themes.py has the colours)
+COOKIE_DOT_TOKENS = {
+    COOKIE_STATUS_PRESENT: 'ok',
+    COOKIE_STATUS_MISSING: 'error',
+    COOKIE_STATUS_EXPIRED: 'warn',
+    COOKIE_STATUS_UNKNOWN: 'muted',
 }
 
 
@@ -1840,4 +1841,3 @@ def setup_child_logging(root_path, channel_key):
     return logging.LoggerAdapter(
         logging.getLogger(), {'channel': redact_for_log(channel_key)}
     )
-

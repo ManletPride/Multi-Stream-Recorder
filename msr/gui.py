@@ -29,6 +29,9 @@ from msr import library_window as _library_window
 from msr import winstate as _winstate
 from msr import restore_dialog as _restore_dialog
 from msr import logview
+from msr import themes as _themes
+from msr import themeui as _themeui
+from msr import theme_dialog as _theme_dialog
 from msr import wintheme as _wintheme
 from msr.presence import PresencePoller, PresenceStore, combined_state
 from msr.recorder import StreamRecorder
@@ -282,43 +285,30 @@ def main_gui(config):
     from tkinter import ttk
     import queue as stdlib_queue
 
-    # ── Theme colors ──
-    DARK = {
-        'bg': '#0a1628', 'fg': '#d4d4d4', 'accent': '#1a5fb4',
-        'border': '#1a3a5c',
-        'entry_bg': '#112240', 'entry_fg': '#d4d4d4',
-        'listbox_bg': '#0d1f3c', 'listbox_fg': '#cccccc',
-        'select_bg': '#1a5fb4', 'select_fg': '#ffffff',
-        'tree_bg': '#0a1628', 'tree_fg': '#d4d4d4', 'tree_field': '#0d1f3c',
-        'tree_heading_bg': '#132d5e', 'tree_heading_fg': '#d4d4d4',
-        'btn_bg': '#132d5e', 'btn_fg': '#d4d4d4',
-        'log_bg': '#081422', 'log_fg': '#b5cea8',
-        'tab_bg': '#112240', 'tab_fg': '#d4d4d4',
-        'start_bg': '#1b7a2b', 'stop_bg': '#b71c1c',
-        'rec_fg': '#4ec94e', 'offline_fg': '#5a6a8a', 'error_fg': '#f44747',
-        'completed_fg': '#4ec9b0', 'remux_fg': '#dcdcaa', 'check_fg': '#6a7a9a',
-    }
-    LIGHT = {
-        'bg': '#f0f0f0', 'fg': '#1e1e1e', 'accent': '#0078d4',
-        'border': '#c0c0c0',
-        'entry_bg': '#ffffff', 'entry_fg': '#1e1e1e',
-        'listbox_bg': '#ffffff', 'listbox_fg': '#1e1e1e',
-        'select_bg': '#0078d4', 'select_fg': '#ffffff',
-        'tree_bg': '#ffffff', 'tree_fg': '#1e1e1e', 'tree_field': '#ffffff',
-        'tree_heading_bg': '#e0e0e0', 'tree_heading_fg': '#1e1e1e',
-        'btn_bg': '#e0e0e0', 'btn_fg': '#1e1e1e',
-        'log_bg': '#ffffff', 'log_fg': '#1e1e1e',
-        'tab_bg': '#f0f0f0', 'tab_fg': '#1e1e1e',
-        'start_bg': '#4CAF50', 'stop_bg': '#F44336',
-        'rec_fg': '#006400', 'offline_fg': '#696969', 'error_fg': '#B22222',
-        'completed_fg': '#2E8B57', 'remux_fg': '#DAA520', 'check_fg': '#808080',
-    }
-
     # ── Load window state ──
     state_file = config.get('GUI', 'window_state_file', fallback='window_state.json')
     win_state = load_window_state(state_file)
     notifications_enabled = config.getboolean('GUI', 'notifications', fallback=True)
     minimize_to_tray = config.getboolean('GUI', 'minimize_to_tray', fallback=True) and HAS_TRAY
+
+    # ── Theme: every colour below comes from msr/themes.py. [GUI] theme = <name> wins; an older
+    # install only has dark_mode (window_state.json first, then config.ini): true -> PowerShell Blue,
+    # false -> Light. themes/*.json in the data folder add user themes.
+    data_dir = os.path.dirname(os.path.abspath(config.config_file))
+    user_themes_dir = os.path.join(data_dir, 'themes')
+    user_theme_problems = []
+
+    def _load_user_themes():
+        found, user_theme_problems[:] = _themes.load_user_themes(user_themes_dir)
+        _themes.register_user_themes(found)
+        for line in user_theme_problems:
+            logging.warning(f"Theme file ignored: {line}")
+
+    _load_user_themes()
+    _legacy_dark = _themes.parse_bool(win_state.get('dark_mode'), None)
+    if _legacy_dark is None:
+        _legacy_dark = _themes.parse_bool(config.get('GUI', 'dark_mode', fallback=''), None)
+    _themes.set_current(_themes.resolve_saved(config.get('GUI', 'theme', fallback=''), _legacy_dark))
 
     # ── Create root window ──
     root = tk.Tk()
@@ -330,16 +320,16 @@ def main_gui(config):
     root.title(f"Multi-Stream Recorder v{__version__}")
 
     # tk variables must be created AFTER tk.Tk()
-    dark_mode = tk.BooleanVar(value=win_state.get('dark_mode',
-                              config.getboolean('GUI', 'dark_mode', fallback=True)))
 
     # ── Windows: dark title bar via DWM API ──
-    _dialogs.set_dark_getter(dark_mode.get)  # popups follow the app's dark/light switch
 
-    def set_title_bar_dark(dark=True):
-        """Dark/light caption for the main window and any open dialogs."""
-        _wintheme.set_title_bar_dark(root, dark)
-        _wintheme.theme_toplevels(root, dark)
+    def set_title_bar_dark(_dark=None):
+        """The theme's caption (dark/light mode, and its colours on Windows 11) for the main window
+        and any open dialogs."""
+        theme = _themes.current()
+        colors = _themes.caption_colors(theme)
+        _wintheme.set_title_bar_dark(root, theme.dark, colors)
+        _wintheme.theme_toplevels(root, theme.dark, colors=colors)
 
     # Restore geometry (made safe for the monitors connected now: never off-screen)
     geom = _winstate.fit_main_geometry(root, win_state.get('geometry'), '1100x760', (1060, 720))
@@ -378,86 +368,11 @@ def main_gui(config):
     _library_panel = [None]  # set when the Library tab is built (apply_theme can run first)
 
     def apply_theme(*_args):
-        t = DARK if dark_mode.get() else LIGHT
-        style.theme_use('clam')
-
+        t = _themes.current()
+        _themeui.apply_ttk(root, style, t)
         root.configure(bg=t['bg'])
-
-        # Windows: set dark/light title bar
-        set_title_bar_dark(dark_mode.get())
-
-        # ttk styles — set bordercolor to match theme (clam theme uses these)
+        set_title_bar_dark()  # Windows: dark/light caption (and theme colours on Windows 11)
         border_color = t['border']
-        style.configure('.', background=t['bg'], foreground=t['fg'],
-                        fieldbackground=t['tree_field'],
-                        bordercolor=border_color, lightcolor=border_color,
-                        darkcolor=border_color)
-        style.configure('TFrame', background=t['bg'])
-        style.configure('TLabel', background=t['bg'], foreground=t['fg'])
-        style.configure('TNotebook', background=t['bg'], borderwidth=0,
-                        bordercolor=border_color, lightcolor=border_color,
-                        darkcolor=border_color, tabmargins=[0, 0, 0, 0])
-        style.configure('TNotebook.Tab', background=t['tab_bg'], foreground=t['tab_fg'],
-                        padding=[12, 4],
-                        bordercolor=border_color, lightcolor=border_color,
-                        darkcolor=border_color)
-        style.map('TNotebook.Tab',
-                  background=[('selected', t['accent']), ('!selected', t['tab_bg'])],
-                  foreground=[('selected', '#ffffff'), ('!selected', t['tab_fg'])],
-                  lightcolor=[('selected', border_color), ('!selected', border_color)],
-                  darkcolor=[('selected', border_color), ('!selected', border_color)],
-                  bordercolor=[('selected', border_color), ('!selected', border_color)])
-        style.configure('Treeview', background=t['tree_field'], foreground=t['tree_fg'],
-                        fieldbackground=t['tree_field'], rowheight=22,
-                        bordercolor=border_color, lightcolor=border_color,
-                        darkcolor=border_color)
-        style.configure('Treeview.Heading', background=t['tree_heading_bg'],
-                        foreground=t['tree_heading_fg'], font=("Segoe UI", 10, "bold"),
-                        bordercolor=border_color, lightcolor=t['tree_heading_bg'],
-                        darkcolor=border_color)
-        style.map('Treeview', background=[('selected', t['select_bg'])],
-                  foreground=[('selected', t['select_fg'])])
-        style.configure('TCombobox', fieldbackground=t['entry_bg'], foreground=t['entry_fg'],
-                        background=t['btn_bg'], arrowcolor=t['fg'],
-                        bordercolor=border_color, lightcolor=border_color,
-                        darkcolor=border_color)
-        style.map('TCombobox', fieldbackground=[('readonly', t['entry_bg'])],
-                  foreground=[('readonly', t['entry_fg'])],
-                  bordercolor=[('focus', t['accent'])])
-        # Style the dropdown list (Tk popdown)
-        root.option_add('*TCombobox*Listbox.background', t['entry_bg'])
-        root.option_add('*TCombobox*Listbox.foreground', t['entry_fg'])
-        root.option_add('*TCombobox*Listbox.selectBackground', t['select_bg'])
-        root.option_add('*TCombobox*Listbox.selectForeground', t['select_fg'])
-        style.configure('TCheckbutton', background=t['bg'], foreground=t['fg'],
-                        indicatorcolor=t['entry_bg'], indicatorrelief='flat')
-        style.map('TCheckbutton',
-                  background=[('active', t['bg']), ('pressed', t['bg'])],
-                  indicatorcolor=[('selected', t['accent']), ('pressed', t['accent'])])
-        style.configure('TButton', background=t['btn_bg'], foreground=t['btn_fg'],
-                        bordercolor=border_color, lightcolor=border_color,
-                        darkcolor=border_color, padding=[8, 4])
-        style.map('TButton',
-                  background=[('active', t['accent']), ('pressed', t['accent'])],
-                  foreground=[('active', '#ffffff'), ('pressed', '#ffffff')])
-        style.configure('TMenubutton', background=t['btn_bg'], foreground=t['btn_fg'],
-                        bordercolor=border_color, lightcolor=border_color,
-                        darkcolor=border_color, arrowcolor=t['fg'], padding=[8, 4])
-        style.map('TMenubutton',
-                  background=[('active', t['accent']), ('pressed', t['accent'])],
-                  foreground=[('active', '#ffffff'), ('pressed', '#ffffff')])
-        style.configure('Vertical.TScrollbar', background=t['btn_bg'],
-                        bordercolor=border_color, arrowcolor=t['fg'],
-                        troughcolor=t['tree_field'],
-                        lightcolor=border_color, darkcolor=border_color)
-        style.map('Vertical.TScrollbar',
-                  background=[('active', t['accent']), ('pressed', t['accent'])])
-        style.configure('Horizontal.TScrollbar', background=t['btn_bg'],
-                        bordercolor=border_color, arrowcolor=t['fg'],
-                        troughcolor=t['tree_field'],
-                        lightcolor=border_color, darkcolor=border_color)
-        style.map('Horizontal.TScrollbar',
-                  background=[('active', t['accent']), ('pressed', t['accent'])])
 
         # Tag colors for treeview
         tree.tag_configure("recording", foreground=t['rec_fg'], font=("Segoe UI", 10, "bold"))
@@ -490,49 +405,32 @@ def main_gui(config):
             pass
 
         start_button.configure(bg=t['start_bg'], activebackground=t['start_bg'],
-                               fg='#ffffff', activeforeground='#ffffff',
+                               fg=t['start_fg'], activeforeground=t['start_fg'],
+                               disabledforeground=t['disabled_fg'],
                                relief='flat', bd=0)
         stop_button.configure(bg=t['stop_bg'], activebackground=t['stop_bg'],
-                              fg='#ffffff', activeforeground='#ffffff',
+                              fg=t['stop_fg'], activeforeground=t['stop_fg'],
+                              disabledforeground=t['disabled_fg'],
                               relief='flat', bd=0)
 
         log_text.configure(bg=t['log_bg'], fg=t['log_fg'], insertbackground=t['log_fg'],
                            highlightbackground=border_color, highlightcolor=border_color,
                            highlightthickness=1, relief='flat')
-        _dark_log = bool(dark_mode.get())
-        log_text.tag_configure("lvl_warning", foreground='#e5c07b' if _dark_log else '#8a5a00')
-        log_text.tag_configure("lvl_error", foreground='#ff7b7b' if _dark_log else '#b71c1c')
-        log_text.tag_configure("find", background='#6b5900' if _dark_log else '#ffe58a',
-                               foreground='#ffffff' if _dark_log else '#000000')
+        log_text.tag_configure("lvl_warning", foreground=t['log_warn'])
+        log_text.tag_configure("lvl_error", foreground=t['log_error'])
+        log_text.tag_configure("find", background=t['find_bg'], foreground=t['find_fg'])
         log_text.tag_raise("find")
         if _library_panel[0] is not None:
-            _library_panel[0].refresh_theme()  # the Library charts follow the dark/light switch
+            _library_panel[0].refresh_theme()  # charts, site colours and tooltips follow the theme
 
         # Status bar at bottom
         status_bar.configure(bg=t['bg'], fg=t['offline_fg'])
-        update_label.configure(bg=t['bg'])
+        update_label.configure(bg=t['bg'], fg=t['link'])
 
-        # Context menu theming — borderwidth=0 removes the bright system border
-        ctx_menu.configure(bg=t['entry_bg'], fg=t['fg'],
-                          activebackground=t['accent'], activeforeground='#ffffff',
-                          borderwidth=0, activeborderwidth=0, relief='flat')
-        status_ctx_menu.configure(bg=t['entry_bg'], fg=t['fg'],
-                                  activebackground=t['accent'], activeforeground='#ffffff',
-                                  borderwidth=0, activeborderwidth=0, relief='flat')
-        more_menu.configure(bg=t['entry_bg'], fg=t['fg'],
-                            activebackground=t['accent'], activeforeground='#ffffff',
-                            borderwidth=0, activeborderwidth=0, relief='flat')
-        sort_menu.configure(bg=t['entry_bg'], fg=t['fg'],
-                            activebackground=t['accent'], activeforeground='#ffffff',
-                            borderwidth=0, activeborderwidth=0, relief='flat')
-
-        # Save dark_mode preference
-        try:
-            state = load_window_state(state_file)
-            state['dark_mode'] = dark_mode.get()
-            save_window_state(state_file, state)
-        except Exception:
-            pass
+        # Context menu theming - borderwidth=0 removes the bright system border
+        for menu in (ctx_menu, status_ctx_menu, more_menu, sort_menu):
+            menu.configure(**_themeui.menu_colors(t))
+        _themeui.recolor_popdowns(root, t)  # drop-down lists that already exist keep old colours otherwise
 
     # ── Load channels ──
     # channels is a list of dicts: [{"name": "twitch:saruei", "enabled": True}, ...]
@@ -623,7 +521,7 @@ def main_gui(config):
             self._tip = tw = tk.Toplevel(self._widget)
             tw.wm_overrideredirect(True)
             tw.wm_geometry(f"+{x}+{y}")
-            t = DARK if dark_mode.get() else LIGHT
+            t = _themes.current()
             tk.Label(tw, text=text, justify=tk.LEFT,
                      background=t['entry_bg'], foreground=t['fg'],
                      relief='solid', borderwidth=1,
@@ -753,7 +651,7 @@ def main_gui(config):
 
     def _redraw_badge_canvas():
         """Paint amber cookie badges next to the rows that need one."""
-        t = DARK if dark_mode.get() else LIGHT
+        t = _themes.current()
         badge_canvas.configure(bg=t['tree_field'])
         badge_canvas.delete("all")
         for item in ch_tree.get_children():
@@ -765,7 +663,7 @@ def main_gui(config):
                 continue
             _x, y, _w, h = bbox
             badge_canvas.create_text(BADGE_CANVAS_W // 2, y + h // 2, text=cp.BADGE_GLYPH,
-                                   fill=cp.BADGE_COLOR, font=("Segoe UI Symbol", 10))
+                                   fill=t['badge'], font=("Segoe UI Symbol", 10))
 
     _badge_redraw_after_id = [None]
 
@@ -827,7 +725,7 @@ def main_gui(config):
         _hover_hide()
         if not text:
             return
-        t = DARK if dark_mode.get() else LIGHT
+        t = _themes.current()
         tw = tk.Toplevel(ch_tree)
         tw.wm_overrideredirect(True)
         tw.wm_geometry(f"+{event.x_root + 14}+{event.y_root + 16}")
@@ -1032,9 +930,9 @@ def main_gui(config):
         return True, ""
 
     def add_channel(initial_text=""):
-        t = DARK if dark_mode.get() else LIGHT
+        t = _themes.current()
         cp.open_add_channel_dialog(root, t, _add_channel_from_dialog,
-                                   initial_text=initial_text, dark=dark_mode.get())
+                                   initial_text=initial_text, dark=_themes.current().dark)
 
     def remove_selected():
         names = _selected_roster_names()
@@ -1166,6 +1064,12 @@ def main_gui(config):
 
     _Tooltip(cookie_frame, _cookie_summary_tip)
 
+    cookie_dot_state = ["", "muted"]  # glyph and theme token, so a theme change can repaint the dot
+
+    def _cookie_dot(glyph, tone):
+        cookie_dot_state[:] = [glyph, tone]
+        cookie_indicator.configure(text=glyph, fg=_themes.current()[tone])
+
     def update_cookie_status():
         """Check cookies.txt, update the global indicator, and refresh badges."""
         cookies_path = find_cookies_file(config)
@@ -1175,14 +1079,14 @@ def main_gui(config):
         base_text = f"{info['total_cookies']} entries, {len(info['domains'])} domains"
 
         if not cookies_path:
-            cookie_indicator.configure(text="○", fg="#888888")
+            _cookie_dot("○", "muted")
             cookie_label.configure(text="No cookies.txt found")
         elif not info['valid']:
-            cookie_indicator.configure(text="●", fg="#F44336")
+            _cookie_dot("●", "error")
             warning = info['warnings'][0] if info['warnings'] else "Invalid format"
             cookie_label.configure(text=f"Cookies: {warning}")
         elif info['has_expired_auth']:
-            cookie_indicator.configure(text="●", fg="#FF9800")
+            _cookie_dot("●", "warn")
             domains = ", ".join(info['expired_domains'][:2])
             cookie_label.configure(text=f"Cookies: auth expired ({domains})")
         else:
@@ -1192,13 +1096,13 @@ def main_gui(config):
                 if days_left < 7:
                     expiry_note = f" (auth renew in {days_left}d)"
                     if days_left < 2:
-                        cookie_indicator.configure(text="●", fg="#FF9800")
+                        _cookie_dot("●", "warn")
                     else:
-                        cookie_indicator.configure(text="●", fg="#4CAF50")
+                        _cookie_dot("●", "ok")
                 else:
-                    cookie_indicator.configure(text="●", fg="#4CAF50")
+                    _cookie_dot("●", "ok")
             else:
-                cookie_indicator.configure(text="●", fg="#4CAF50")
+                _cookie_dot("●", "ok")
             cookie_label.configure(text=f"Cookies: {base_text}{expiry_note}")
 
         _badges.clear()
@@ -1227,7 +1131,7 @@ def main_gui(config):
                   foreground=[('selected', t['select_fg'])])
         style.layout('Roster.Treeview', [('Treeview.treearea', {'sticky': 'nswe'})])
         ch_tree.tag_configure("enabled", foreground=t['tree_fg'])
-        ch_tree.tag_configure("disabled", foreground="#777777")
+        ch_tree.tag_configure("disabled", foreground=t['check_fg'])
         ch_tree.tag_configure("header", foreground=t['offline_fg'],
                               font=("Segoe UI", 9, "bold"))
         for w in (frame_left, ch_tree_frame, search_frame, view_frame, add_frame,
@@ -1236,29 +1140,30 @@ def main_gui(config):
         ch_tree_frame.configure(bg=t['tree_field'], highlightthickness=1,
                                 highlightbackground=border_color)
         filter_entry.configure(bg=t['entry_bg'], fg=t['entry_fg'],
-                               insertbackground=t['fg'],
+                               insertbackground=t['fg'], disabledforeground=t['disabled_fg'],
+                               selectbackground=t['select_bg'], selectforeground=t['select_fg'],
                                highlightbackground=border_color,
                                highlightcolor=t['accent'],
                                highlightthickness=1, relief='flat')
-        search_placeholder.configure(bg=t['entry_bg'], fg="#8a8a8a")
+        search_placeholder.configure(bg=t['entry_bg'], fg=t['placeholder'])
         for b in view_buttons:
             b.configure(bg=t['btn_bg'], fg=t['btn_fg'], selectcolor=t['accent'],
-                        activebackground=t['accent'], activeforeground='#ffffff',
-                        highlightthickness=0)
+                        activebackground=t['btn_hover'], activeforeground=t['btn_hover_fg'],
+                        disabledforeground=t['disabled_fg'], highlightthickness=0)
         _paint_view_buttons()
-        add_btn.configure(bg=t['btn_bg'], fg=t['btn_fg'], activebackground=t['accent'],
-                          activeforeground='#ffffff', highlightbackground=border_color,
-                          relief='flat', bd=1)
+        add_btn.configure(bg=t['btn_bg'], fg=t['btn_fg'], activebackground=t['btn_hover'],
+                          activeforeground=t['btn_hover_fg'], disabledforeground=t['disabled_fg'],
+                          highlightbackground=border_color, relief='flat', bd=1)
         cookie_label.configure(bg=t['bg'], fg=t['fg'])
-        cookie_indicator.configure(bg=t['bg'])
+        cookie_indicator.configure(bg=t['bg'], fg=t[cookie_dot_state[1]])
         badge_canvas.configure(bg=t['tree_field'])
         _schedule_badge_redraw()
 
     def _paint_view_buttons(*_):
-        t = DARK if dark_mode.get() else LIGHT
+        t = _themes.current()
         for b in view_buttons:
             on = b.cget("value") == roster_view_var.get()
-            b.configure(fg='#ffffff' if on else t['btn_fg'])
+            b.configure(fg=t['accent_fg'] if on else t['btn_fg'])
 
     roster_view_var.trace_add("write", _paint_view_buttons)
 
@@ -1567,7 +1472,7 @@ def main_gui(config):
         preview_big_header.configure(bg=t["tree_field"])
         preview_big_name.configure(bg=t["tree_field"], fg=t["fg"])
         preview_big_hint.configure(bg=t["tree_field"], fg=t["offline_fg"])
-        preview_big_img.configure(bg=t["tree_field"])
+        preview_big_img.configure(bg=t["tree_field"], fg=t["fg"])
         for tile in _preview_tiles.values():
             tile["frame"].configure(bg=t["tree_field"], highlightbackground=t["border"])
             tile["img"].configure(bg=t["tree_field"])
@@ -1861,7 +1766,7 @@ def main_gui(config):
     def _paint_io_meter():
         if not HAS_PSUTIL:
             return
-        t = DARK if dark_mode.get() else LIGHT
+        t = _themes.current()
         snap = _io_sampler.last
         sev = meter_severity(snap.disk_busy_frac)
         if sev == "hot":
@@ -2104,13 +2009,15 @@ def main_gui(config):
 
     start_button = tk.Button(
         btn_frame, text=" Start Recording ", command=lambda: start_recording(),
-        bg="#4CAF50", fg="white", font=("Segoe UI", 11, "bold"), width=18, height=2,
+        bg=_themes.current()['start_bg'], fg=_themes.current()['start_fg'],
+        font=("Segoe UI", 11, "bold"), width=18, height=2,
     )
     start_button.pack(side=tk.LEFT, padx=(0, 12))
 
     stop_button = tk.Button(
         btn_frame, text=" Stop Recording ", command=lambda: stop_recording(),
-        bg="#F44336", fg="white", font=("Segoe UI", 11, "bold"), width=18, height=2,
+        bg=_themes.current()['stop_bg'], fg=_themes.current()['stop_fg'],
+        font=("Segoe UI", 11, "bold"), width=18, height=2,
         state=tk.DISABLED,
     )
     stop_button.pack(side=tk.LEFT)
@@ -2118,9 +2025,27 @@ def main_gui(config):
     toggle_frame = tk.Frame(bottom_bar)
     toggle_frame.pack(side=tk.RIGHT, padx=10)
 
-    dark_check = ttk.Checkbutton(toggle_frame, text="Dark Mode", variable=dark_mode,
-                                 command=lambda: apply_theme())
-    dark_check.pack(side=tk.RIGHT, padx=8)
+    def _apply_chosen_theme(theme):
+        """Live preview and final apply of a theme (no restart)."""
+        _themes.set_current(theme)
+        apply_theme()
+
+    def _save_chosen_theme(theme):
+        """Remember the choice in config.ini ([GUI] theme; dark_mode is kept in step for older versions)."""
+        config.config.set('GUI', 'theme', theme.name)
+        config.config.set('GUI', 'dark_mode', 'true' if theme.dark else 'false')
+        try:
+            config.save()
+        except Exception as exc:
+            logging.warning(f"Could not save the theme choice: {exc}")
+
+    def open_theme_dialog():
+        _theme_dialog.open_theme_dialog(
+            root, apply=_apply_chosen_theme, save=_save_chosen_theme, reload=_load_user_themes,
+            folder=user_themes_dir, opener=open_local_path, problems=lambda: list(user_theme_problems))
+
+    theme_button = ttk.Button(toggle_frame, text="Theme...", command=open_theme_dialog)
+    theme_button.pack(side=tk.RIGHT, padx=8)
 
     # ── Polling speed selector ──
     POLL_PRESETS = {
@@ -2303,7 +2228,7 @@ def main_gui(config):
 
     # ── Version update check ──
     update_label = tk.Label(root, text="", font=("Segoe UI", 8, "bold"),
-                            fg="#4FC3F7", cursor="hand2", anchor="e", padx=10, pady=2)
+                            fg=_themes.current()['link'], cursor="hand2", anchor="e", padx=10, pady=2)
     # Overlaid on the right side of the status bar row
     update_label.grid(row=2, column=1, sticky="e")
     update_label.grid_remove()  # hidden until an update is found
@@ -2570,7 +2495,7 @@ def main_gui(config):
 
     def _paint_preview_selection(ch_name):
         """Accent the active tile. No update_idletasks — that nested the Tk loop."""
-        t = DARK if dark_mode.get() else LIGHT
+        t = _themes.current()
         _preview_selected[0] = ch_name
         for name, tile in _preview_tiles.items():
             on = name == ch_name
@@ -2646,7 +2571,7 @@ def main_gui(config):
     tree.bind("<<TreeviewSelect>>", _on_status_select)
 
     def _sync_preview_tiles(keys):
-        t = DARK if dark_mode.get() else LIGHT
+        t = _themes.current()
         for ch_name in list(_preview_tiles):
             if ch_name not in keys:
                 _preview_tiles[ch_name]["frame"].destroy()
@@ -3110,7 +3035,6 @@ def main_gui(config):
             state = load_window_state(state_file)  # keep keys written elsewhere (dialog places)
             state.update({
                 'geometry': root.geometry(),
-                'dark_mode': dark_mode.get(),
                 'column_widths': col_widths,
                 'roster_filter': roster_filter_var.get(),
                 'roster_view': roster_view_var.get(),
@@ -3195,8 +3119,8 @@ def main_gui(config):
     apply_theme()
     # Re-apply dark title bar after window is fully mapped (100ms + 500ms delays)
     # The DWM attribute only takes effect once the HWND is realized
-    root.after(100, lambda: set_title_bar_dark(dark_mode.get()))
-    root.after(500, lambda: set_title_bar_dark(dark_mode.get()))
+    root.after(100, lambda: set_title_bar_dark())
+    root.after(500, lambda: set_title_bar_dark())
     root.after(1500, refresh_status)
     root.after(2000, _tick_previews)
     root.after(500, refresh_logs)
@@ -3211,4 +3135,3 @@ def main_gui(config):
     except KeyboardInterrupt:
         logging.info("KeyboardInterrupt detected — shutting down...")
         _full_quit()
-

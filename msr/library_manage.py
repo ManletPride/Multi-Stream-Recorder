@@ -48,7 +48,8 @@ class ManageContext:
 def popup(win, menu: tk.Menu, event) -> None:
     """Show a context menu in the app's colours."""
     pal = charts.palette(win)
-    menu.configure(bg=pal["bg"], fg=pal["fg"], activebackground=pal["accent"], activeforeground="#ffffff")
+    menu.configure(bg=pal["menu_bg"], fg=pal["menu_fg"], activebackground=pal["menu_active"],
+                   activeforeground=pal["menu_active_fg"])
     try:
         menu.tk_popup(event.x_root, event.y_root)
     finally:
@@ -485,7 +486,7 @@ class PendingTab:
         self.frame = f = ttk.Frame(parent, padding=10)
         self.info = ttk.Label(f, text="Scan the library first.", justify="left")
         self.info.pack(anchor="w")
-        ttk.Label(f, foreground="gray", wraplength=820, justify="left",
+        ttk.Label(f, style="Muted.TLabel", wraplength=820, justify="left",
                   text="PendingDeletion is MSR's own waiting room: files MSR moved aside, and files you moved "
                        "here from the Library, wait here until the automatic purge deletes them when MSR starts. "
                        "Empty it now to free the space immediately, or restore what you want back.").pack(anchor="w", pady=(4, 8))
@@ -565,7 +566,7 @@ class CleanupTab:
         self.frame = f = ttk.Frame(parent, padding=10)
         self.suggestions: dict[str, act.Suggestion] = {}
         self.stats: lib.LibraryStats | None = None
-        ttk.Label(f, foreground="gray", wraplength=820, justify="left",
+        ttk.Label(f, style="Muted.TLabel", wraplength=820, justify="left",
                   text="Ideas for freeing space. Pick one and press Review: you get the list with nothing ticked "
                        "and decide yourself. Nothing here deletes anything by itself.").pack(anchor="w")
         opts = ttk.Frame(f)

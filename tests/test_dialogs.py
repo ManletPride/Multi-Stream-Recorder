@@ -178,7 +178,7 @@ class MessageTests(TkCase):
 
     def test_caption_is_themed_before_the_dialog_is_placed_and_shown(self):
         events = []
-        dialogs.wintheme.set_title_bar_dark.side_effect = lambda win, dark: events.append("caption") or True
+        dialogs.wintheme.set_title_bar_dark.side_effect = lambda win, dark, colors=None: events.append("caption") or True
         real = dialogs.centered_position
 
         def place(*args):
@@ -197,7 +197,7 @@ class MessageTests(TkCase):
 
     def test_caption_follows_the_registered_dark_switch(self):
         calls = []
-        dialogs.wintheme.set_title_bar_dark.side_effect = lambda win, dark: calls.append(dark) or True
+        dialogs.wintheme.set_title_bar_dark.side_effect = lambda win, dark, colors=None: calls.append(dark) or True
         dialogs.set_dark_getter(lambda: False)
         self.hooks = [self.press("ok")]
         dialogs.show_info(self.root, "t", "m")
@@ -260,8 +260,8 @@ class NumberTests(TkCase):
 class AddChannelDialogTests(TkCase):
     def test_add_channel_dialog_is_themed_parented_and_placed_before_it_is_shown(self):
         from msr import channel_panel as cp
-        theme = {"bg": "#0a1628", "fg": "#d4d4d4", "entry_bg": "#112240", "entry_fg": "#d4d4d4",
-                 "border": "#1a3a5c", "accent": "#1a5fb4", "btn_bg": "#132d5e", "btn_fg": "#d4d4d4"}
+        from msr import themes
+        theme = themes.find(themes.DEFAULT_THEME)
         dlg = cp.open_add_channel_dialog(self.root, theme, lambda n, p: (True, ""), dark=True)
         self.addCleanup(dlg.destroy)
         self.assertTrue(dlg._msr_title_bar)

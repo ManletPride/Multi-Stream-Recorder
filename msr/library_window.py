@@ -231,7 +231,7 @@ class LibraryPanel:
                     "you always get a preview first, and the default is a reversible move to PendingDeletion.")
         else:
             hint = "Click a heading to sort. This list only shows sizes; use Open folder to clean up in Explorer."
-        ttk.Label(tab, foreground="gray", justify="left", wraplength=820, text=hint).pack(anchor="w", pady=(0, 4))
+        ttk.Label(tab, style="Muted.TLabel", justify="left", wraplength=820, text=hint).pack(anchor="w", pady=(0, 4))
         box = ttk.Frame(tab)
         box.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(box, columns=[c[0] for c in COLUMNS], show="headings", selectmode="extended", height=14)
@@ -459,6 +459,9 @@ class LibraryPanel:
     def refresh_theme(self) -> None:
         if not self.exists():
             return
+        # site colours come from the theme and are baked into the rows, so rebuild them
+        if self.stats is not None:
+            self._set_chart_data(self.stats)
         for chart in (self.donut, self.bars, self.months):
             chart.redraw()
 
@@ -540,11 +543,13 @@ class LibraryPanel:
         if stats is None:
             return
         self.headline.configure(text="\n".join("\u2022 " + line for line in lib.summary_lines(stats)))
-        self.donut.center_text = lib.fmt_size(stats.recordings_bytes) if stats.recordings_bytes else ""
-        self.donut.set_data(donut_rows(stats))
+        self._set_chart_data(stats)
         if self.mgr is not None:
             self.mgr.on_stats(stats)
-        self.bars.set_data(bar_rows(stats))
-        self.months.set_data(month_rows(stats))
         self._fill_tree()
 
+    def _set_chart_data(self, stats) -> None:
+        self.donut.center_text = lib.fmt_size(stats.recordings_bytes) if stats.recordings_bytes else ""
+        self.donut.set_data(donut_rows(stats))
+        self.bars.set_data(bar_rows(stats))
+        self.months.set_data(month_rows(stats))

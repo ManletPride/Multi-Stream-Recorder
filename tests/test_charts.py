@@ -3,7 +3,7 @@ import tkinter as tk
 import unittest
 from unittest import mock
 
-from msr import charts, dialogs
+from msr import charts, dialogs, themes
 
 
 class GeometryTests(unittest.TestCase):
@@ -45,8 +45,9 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(charts.label_step(0, 400), 1)
 
     def test_colours(self):
-        self.assertEqual(charts.color_for("Kick"), charts.PLATFORM_COLORS["kick"])
-        self.assertIn(charts.color_for("newsite", 1), charts.FALLBACK_COLORS)
+        t = themes.current()
+        self.assertEqual(charts.color_for("Kick"), t["site_kick"])
+        self.assertIn(charts.color_for("newsite", 1), t.series())
 
 
 class TkCase(unittest.TestCase):
@@ -157,10 +158,11 @@ class DrawTests(TkCase):
 
     def test_follows_the_dark_and_light_theme(self):
         chart = charts.BarChart(self.root, width=300)
-        with mock.patch.object(dialogs, "is_dark", return_value=True):
-            dark = charts.palette(chart)
-        with mock.patch.object(dialogs, "is_dark", return_value=False):
-            light = charts.palette(chart)
+        self.addCleanup(themes.set_current, themes.current())
+        themes.set_current(themes.find(themes.DEFAULT_THEME))
+        dark = charts.palette(chart)
+        themes.set_current(themes.find(themes.LIGHT_THEME))
+        light = charts.palette(chart)
         self.assertNotEqual(dark["track"], light["track"])
         self.assertNotEqual(dark["tip_bg"], light["tip_bg"])
 

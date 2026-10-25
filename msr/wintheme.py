@@ -7,6 +7,7 @@ system theme only; they cannot be themed from here.
 """
 
 import os
+import sys
 
 DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19
@@ -29,8 +30,47 @@ def frame_hwnd(win):
         return 0
 
 
-def set_title_bar_dark(win, dark=True):
-    """Dark (or light) caption for a Tk/Toplevel window. Returns True if applied."""
+DWMWA_BORDER_COLOR = 34
+DWMWA_CAPTION_COLOR = 35
+DWMWA_TEXT_COLOR = 36
+_WINDOWS_11_BUILD = 22000
+
+
+def colorref(color: str) -> int:
+    """'#rrggbb' as the Windows COLORREF (0x00BBGGRR) the DWM caption attributes take."""
+    return int(color[5:7], 16) << 16 | int(color[3:5], 16) << 8 | int(color[1:3], 16)
+
+
+def windows_11() -> bool:
+    try:
+        return os.name == "nt" and sys.getwindowsversion().build >= _WINDOWS_11_BUILD
+    except Exception:
+        return False
+
+
+def set_caption_colors(win, colors) -> bool:
+    """Windows 11 only: paint the caption/border/text from the theme's (bg, fg, border) hex colours.
+    Silently does nothing on older Windows or other systems (the dark/light mode still applies)."""
+    if not colors or not windows_11():
+        return False
+    try:
+        import ctypes
+        hwnd = frame_hwnd(win)
+        if not hwnd:
+            return False
+        dwm = ctypes.windll.dwmapi
+        ok = True
+        for attribute, color in zip((DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_BORDER_COLOR), colors):
+            value = ctypes.c_int(colorref(color))
+            ok = dwm.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(value), ctypes.sizeof(value)) == 0 and ok
+        return ok
+    except Exception:
+        return False
+
+
+def set_title_bar_dark(win, dark=True, colors=None):
+    """Dark (or light) caption for a Tk/Toplevel window, plus the theme's caption colours on
+    Windows 11 when ``colors`` = (background, text, border) is given. Returns True if applied."""
     if os.name != "nt" or win is None:
         return False
     try:
@@ -46,6 +86,7 @@ def set_title_bar_dark(win, dark=True):
         if hr != 0:
             hr = dwm.DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD,
                                            ctypes.byref(value), ctypes.sizeof(value))
+        set_caption_colors(win, colors)
         # Repaint the caption now instead of on the next activation/resize.
         ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, _SWP_FLAGS)
         return hr == 0
@@ -168,7 +209,7 @@ def enable_background_drag(top) -> None:
     top.bind("<ButtonPress-1>", press, add="+")
 
 
-def theme_toplevels(root, dark, seen=None):
+def theme_toplevels(root, dark, seen=None, colors=None):
     """Apply the caption to every titled Toplevel under *root* (dialogs,
     including tkinter.simpledialog ones). Overrideredirect tooltips are skipped."""
     import tkinter as tk
@@ -186,7 +227,7 @@ def theme_toplevels(root, dark, seen=None):
                 if str(w) in seen:
                     continue
                 seen.add(str(w))
-            set_title_bar_dark(w, dark)
+            set_title_bar_dark(w, dark, colors)
             done.append(w)
         except Exception:
             continue

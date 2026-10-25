@@ -11,18 +11,13 @@ import math
 import tkinter as tk
 from tkinter import ttk
 
-from msr import dialogs
-
-PLATFORM_COLORS = {
-    "kick": "#53b518", "twitch": "#9146ff", "youtube": "#e8402f", "tiktok": "#19b8b0",
-    "rumble": "#85c742", "fishtank": "#e8a33d", "custom": "#6c8ebf", "other": "#8c8c8c",
-}
-FALLBACK_COLORS = ("#c75d9b", "#4aa3a3", "#b08a3e", "#7a6fd0", "#5e9e6e", "#c9704a")
+from msr import themes
 
 
 # ------------------------------------------------------------------ pure helpers
 def color_for(platform: str, index: int = 0) -> str:
-    return PLATFORM_COLORS.get(platform.lower()) or FALLBACK_COLORS[index % len(FALLBACK_COLORS)]
+    """A site's colour in the current theme (unknown sites cycle through the theme's chart series)."""
+    return themes.current().site(platform, index)
 
 
 def slice_angles(values: list[float]) -> list[tuple[float, float]]:
@@ -90,21 +85,14 @@ def row_key(row, index: int):
 
 
 # ------------------------------------------------------------------ theme
-def palette(win: tk.Misc) -> dict:
-    dark = dialogs.is_dark(win)
-    try:
-        fg = str(ttk.Style(win).lookup("TLabel", "foreground")) or ""
-    except tk.TclError:
-        fg = ""
-    if not fg or fg.startswith("SystemWindowText"):
-        fg = "#d4d4d4" if dark else "#1e1e1e"
+def palette(win: tk.Misc | None = None) -> dict:
+    """Everything a chart or popup menu draws with, from the current theme (win is unused; it is
+    kept so callers need not change)."""
+    t = themes.current()
     return {
-        "bg": dialogs.frame_background(win), "fg": fg,
-        "muted": "#8a97b3" if dark else "#666666",
-        "track": "#16294a" if dark else "#e2e2e2",
-        "accent": "#4a9eff" if dark else "#0078d4",
-        "tip_bg": "#1d3557" if dark else "#fffbe6", "tip_fg": "#ffffff" if dark else "#1e1e1e",
-        "tip_edge": "#4a9eff" if dark else "#c0a000",
+        "bg": t["bg"], "fg": t["fg"], "muted": t["muted"], "track": t["chart_track"], "accent": t["chart_accent"],
+        "tip_bg": t["tip_bg"], "tip_fg": t["tip_fg"], "tip_edge": t["tip_edge"],
+        "menu_bg": t["entry_bg"], "menu_fg": t["fg"], "menu_active": t["select_bg"], "menu_active_fg": t["select_fg"],
     }
 
 

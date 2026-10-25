@@ -22,27 +22,32 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Callable
 
-from msr import wintheme
+from msr import themes, wintheme
 from msr.winstate import format_geometry, parse_geometry
 
 _dark_getter: Callable[[], bool] | None = None
 
-_ICONS = {"info": ("\u2139", "#4aa3ff"), "warning": ("\u26a0", "#e5b800"), "error": ("\u2716", "#f44747"),
-          "question": ("?", "#4aa3ff")}
+# glyph and the theme token its colour comes from
+_ICONS = {"info": ("\u2139", "info"), "warning": ("\u26a0", "warn"), "error": ("\u2716", "error"),
+          "question": ("?", "info")}
 _RETITLE_MS = (100, 500)
 
 
+def icon_color(kind: str) -> str:
+    return themes.current()[_ICONS[kind][1]]
+
+
 def set_dark_getter(getter: Callable[[], bool] | None) -> None:
-    """Tell the dialogs how to read the app's dark-mode switch (None = guess)."""
+    """Override how dialogs learn whether the theme is dark (default: the current theme's flag)."""
     global _dark_getter
     _dark_getter = getter
 
 
 def frame_background(win: tk.Misc) -> str:
     try:
-        return str(ttk.Style(win).lookup("TFrame", "background")) or "#f0f0f0"
+        return str(ttk.Style(win).lookup("TFrame", "background")) or themes.current()["bg"]
     except tk.TclError:
-        return "#f0f0f0"
+        return themes.current()["bg"]
 
 
 def _luminance(color: str) -> float:
@@ -62,7 +67,7 @@ def is_dark(win: tk.Misc) -> bool:
             return bool(_dark_getter())
         except Exception:
             pass
-    return _luminance(frame_background(win)) < 0.5
+    return themes.current().dark
 
 
 def apply_title_bar(win: tk.Toplevel, dark: bool | None = None) -> None:
@@ -71,7 +76,8 @@ def apply_title_bar(win: tk.Toplevel, dark: bool | None = None) -> None:
     def paint() -> None:
         try:
             if win.winfo_exists():
-                wintheme.set_title_bar_dark(win, is_dark(win) if dark is None else dark)
+                wintheme.set_title_bar_dark(win, is_dark(win) if dark is None else dark,
+                                            themes.caption_colors(themes.current()))
         except tk.TclError:
             pass
 
@@ -282,8 +288,8 @@ def _body(frame: ttk.Frame, message: str, kind: str) -> None:
     wrap = min(560, max(320, frame.winfo_screenwidth() // 3))
     top = ttk.Frame(frame)
     top.pack(fill="x")
-    glyph, color = _ICONS[kind]
-    tk.Label(top, text=glyph, fg=color, bg=frame_background(frame), font=("Segoe UI Symbol", 20)).pack(
+    glyph = _ICONS[kind][0]
+    tk.Label(top, text=glyph, fg=icon_color(kind), bg=frame_background(frame), font=("Segoe UI Symbol", 20)).pack(
         side="left", anchor="n", padx=(0, 12))
     ttk.Label(top, text=message, wraplength=wrap, justify="left").pack(side="left", fill="x", expand=True)
 
@@ -355,7 +361,7 @@ def _ask_number(parent, title, prompt, *, integer, minvalue, maxvalue, initial):
     var = tk.StringVar(win, value="" if initial is None else f"{initial:g}")
     entry = ttk.Entry(frame, textvariable=var, width=14)
     entry.pack(anchor="w", pady=(8, 0))
-    error = tk.Label(frame, text="", fg=_ICONS["error"][1], bg=frame_background(frame), anchor="w",
+    error = tk.Label(frame, text="", fg=icon_color("error"), bg=frame_background(frame), anchor="w",
                      justify="left", wraplength=420)
     error.pack(fill="x", pady=(4, 0))
     result: dict = {}
