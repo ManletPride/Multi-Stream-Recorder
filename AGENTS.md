@@ -10,7 +10,7 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 
 | Path | Role |
 | --- | --- |
-| `Multi-Stream-Recorder.py` | Thin launcher only (`main()`, `--headless`, `--json`). Users still run this. |
+| `Multi-Stream-Recorder.py` | Thin launcher only (`main()`, `--headless`, `--json`, `--json --library`). Users still run this. |
 | `msr/gui.py` | Tkinter UI (`main_gui`) |
 | `msr/worker.py` | `record_worker` (multiprocessing target), clips, remux, monitor |
 | `msr/platforms.py` | Per-site live checks, Fishtank auth, ffmpeg/yt-dlp/streamlink command builders |
@@ -25,7 +25,10 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 | `msr/history.py` | Last-20 version history of `channels.json` / `config.ini` in git-ignored `msr_history/<file>/<stamp>.bak`, written by `snapshot()` before every overwrite (`Config._write`, `save_channels`). `summarize()` masks anything `is_sensitive` (passwords, e-mail, keys, cookies): never show raw ini values in a restore list. History failure must never block a save |
 | `msr/restore_dialog.py` | Themed "Restore previous..." window (the `\u22ef` menu beside About). Restore snapshots the current file first, so it can be undone; channel restore is refused while recording |
 | `msr/winstate.py` | Window size/place memory: main window geometry clamped to the current monitors, per-dialog geometry merged into `window_state.json["dialogs"]` (merge, never rewrite the file), negative places written `+-N` |
-| `msr/status.py` | `--json` snapshot. Read-only; no secrets, no absolute paths, custom URLs reduced to the host |
+| `msr/status.py` | `--json` snapshot. Read-only; no secrets, no absolute paths, custom URLs reduced to the host. `--json --library` adds the opt-in `library` section |
+| `msr/library.py` | Library statistics: `scan_library` (listing + file sizes only, never opens a video), `Roots`/`roots_from_config` (optional `[Library] extra_dirs`), `DurationCache` + `count_hours` (opt-in recorded time), `summary_text`, `to_dict`, `ScanJob` (background thread feeding a `queue.Queue`) |
+| `msr/charts.py` | Tk Canvas charts in the app theme: `BarChart`, `DonutChart`, `ColumnChart` with hover tooltips (no matplotlib) |
+| `msr/library_window.py` | `LibraryPanel`: the **Library** tab of the main notebook (headline, charts, sortable channel table, Count hours, Copy summary, Open folder) |
 | `msr/iometer.py` | Status-header disk write / NIC download rates (`IoSampler`) |
 | `msr/__init__.py` | `__version__` (currently `2.1.0`) |
 | `SECURITY.md` | Vulnerability reporting; what is stored on disk |
@@ -35,6 +38,17 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 Do not fold these back into one file without an explicit request. On Windows, `mp.set_start_method('spawn')` pickles `msr.worker.record_worker` — that function **must stay top-level in `msr.worker`**.
 
 After editing Python, the running GUI does **not** reload modules. The user must fully quit and relaunch to pick up clip/worker changes.
+
+## Library tab (`msr/library.py`, `msr/charts.py`, `msr/library_window.py`)
+
+Size per site / channel / month of the recordings, so the user can decide what to clean up. **It never deletes or moves anything**; keep it that way (no delete button on the channel table).
+
+- **Read-only and cheap by default.** The scan only lists folders (`os.scandir`) and reads sizes and times from the entries; it never opens a video and never runs ffprobe. Recorded time is opt-in (**Count hours**): `.meta.json` sidecars first, ffprobe only if the user agrees, one file at a time, rate-limited, cancellable.
+- **Background thread, never Tk.** `ScanJob` talks to the UI through a `queue.Queue` that `LibraryPanel._poll` drains with `after`. The tab scans the first time it is opened (`activate()`), not at startup. Do not add another header or bottom-bar button: both are already full at the minimum window width, which is why this is a tab.
+- **Where things live.** The only file written is the remembered-durations cache `library_cache.json` in the data folder (git-ignored, keyed by path + mtime + size). Nothing is ever written in the recordings folders. Tests use temp trees.
+- **Public repo.** `summary_text`, `to_dict` and `--json --library` carry channel names and sizes only: no absolute paths (extra folders are labelled "Other folder N"). Channel folder paths exist in memory only for **Open folder**.
+- **Layout it understands.** `<streams_dir>/Recorded|Processed|PendingDeletion/<platform>/<channel>/...` (folder names matched case-insensitively), the clips dir (`clips_dir` or `streams_dir/Clips`), custom URLs as `custom/<site>/<user>`. Reparse points (junctions, symlinks) are skipped, in-progress `.ts` / `.part` files are counted as raw, channels not in the roster are flagged, not hidden.
+- GUI names inside `main_gui` follow the rule above (`library_panel`, `_library_panel`, `_library_tab_opened`).
 
 ## Instant clips (`create_clip` in `msr/worker.py`)
 

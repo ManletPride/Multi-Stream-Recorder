@@ -9,6 +9,7 @@ This file is a manual for AI assistants and scripts. It contains no secrets and 
 - GUI: `python Multi-Stream-Recorder.py` (or `run_msr.pyw` / `run_msr.bat`, no console window).
 - Headless: `python Multi-Stream-Recorder.py --headless` (Ctrl+C stops; reads the roster, records every enabled channel).
 - Status snapshot: `python Multi-Stream-Recorder.py --json`. Prints ONE JSON document and exits. Read-only: it starts nothing, takes no lock, creates no file, opens no window.
+- Library sizes: `python Multi-Stream-Recorder.py --json --library` adds a `library` section (below). Opt-in because it walks the recordings folder; it lists folders and reads file sizes only (no ffprobe, nothing is written, no cache). `--library` without `--json` is a usage error.
 - Data folder: `--data-dir DIR` or env `MSR_HOME` (folder must exist). `config.ini`, `channels.json`, `cookies.txt`, `window_state.json` live there; default is the current directory. `--config FILE` picks another ini (relative to the data folder).
 - `--version` prints the version.
 - Tests: `python -m unittest discover -s tests -t .` (no network, no real recording, GUI tests use hidden windows).
@@ -17,6 +18,8 @@ This file is a manual for AI assistants and scripts. It contains no secrets and 
 
 `app{name,version}`, `system{python,os}`, `running` (true/false/null: another copy holds this recordings folder's single-instance lock), `config{file,found,settings,recordings_folder{exists,free_gb},fishtank_login_set,cookies_file_set}`, `channels{file,found,total,enabled,skipped,by_platform,channels[{name,enabled}]}`, `tools{yt-dlp,streamlink,ffmpeg,deno,psutil,curl_cffi,tray,notifications}`, `problems[]` (human-readable strings), `ok` (true when `problems` is empty).
 
+`library` (only with `--library`): `scanned_at`, `scan_seconds`, `complete`, `folders_found`, `totals`, `recordings{bytes,files}`, `by_platform[{platform,bytes,files,share}]`, `channels[{platform,name,recordings_bytes,recordings_files,pending_bytes,clips_bytes,in_roster,last}]` (largest first, at most 200), `channel_count`, `by_month[{month,bytes,files}]`, `oldest`, `newest`, `disk{total,used,free}`, `added_last_30_days`, `fills_in_days`, `recorded_hours` (null: not counted), `notes`. Sizes are bytes; there are no absolute paths.
+
 It never includes passwords, e-mail addresses, cookie names or file names, API keys, absolute paths, or custom-URL query strings (a custom channel is shown as `custom:<host>`). `config.settings` omits `[Paths]` and `[Fishtank]`.
 
 ## Files the app owns (all in the data folder, all git-ignored)
@@ -24,6 +27,7 @@ It never includes passwords, e-mail addresses, cookie names or file names, API k
 - `config.ini`: settings. `[Fishtank]` email/password are plaintext. Never print, commit or paste it.
 - `channels.json`: the roster, a list of `{"name": key, "enabled": bool}` (plain strings also accepted).
 - `cookies.txt`: the user's site logins. Treat like a password.
+- `library_cache.json`: remembered video lengths for the Library tab's **Count hours** (path + mtime + size keyed; safe to delete).
 - `window_state.json`: window geometry, theme, column widths, and per-dialog positions (`dialogs` map).
 - `kick_channel_ids.json`: cache. `stream_recorder.log*`: log (tokens and cookie headers redacted, still do not paste publicly).
 - `msr_history/<file name>/<timestamp>.bak`: last 20 versions of `channels.json` and `config.ini`, written before every overwrite. They are full copies, secrets included. GUI: the "..." button beside About, then "Restore previous...".
@@ -35,10 +39,11 @@ Kick is a bare name (`gmhikaru`). Everything else is `platform:name`: `twitch:ch
 
 ## Code map
 
-- `Multi-Stream-Recorder.py`: launcher, argparse, `--headless`, `--json`.
+- `Multi-Stream-Recorder.py`: launcher, argparse, `--headless`, `--json`, `--library`.
 - `msr/gui.py`: Tk UI (`main_gui`). `msr/worker.py`: `record_worker` (multiprocessing target; must stay top-level), clips, remux. `msr/platforms.py`: per-site live checks and command builders. `msr/recorder.py`: `StreamRecorder`.
 - `msr/config.py`: `Config` and defaults. `msr/status.py`: the `--json` snapshot. `msr/history.py`: version history and masked summaries. `msr/winstate.py`: window geometry memory.
 - `msr/dialogs.py`, `msr/wintheme.py`, `msr/logview.py`, `msr/restore_dialog.py`: themed popups, title bar, drag by background, Log tab behaviour (follow only at the bottom, filter), Restore window.
+- `msr/library.py`, `msr/charts.py`, `msr/library_window.py`: the Library tab (read-only scan in a background thread, Canvas charts, channel table; optional `[Library] extra_dirs = A;B` in `config.ini` adds more folders to scan). It has no delete function.
 - `msr/util.py`: paths, logging (`redact_for_log`), process control, single-instance lock, validation.
 
 ## Rules for assistants working on this repo

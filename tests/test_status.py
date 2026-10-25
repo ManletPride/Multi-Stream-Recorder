@@ -223,9 +223,14 @@ class ManualTests(unittest.TestCase):
         for key in build_keys():
             self.assertIn(key, self.text)
 
+    def test_manual_documents_the_library_options(self):
+        for needle in ("--json --library", "library_cache.json", "extra_dirs", "by_month", "recorded_hours"):
+            self.assertIn(needle, self.text)
+
     def test_manual_points_at_real_files(self):
         for name in ("README.md", "AGENTS.md", "SECURITY.md", "msr/status.py", "msr/history.py",
-                     "msr/winstate.py", "msr/dialogs.py", "msr/logview.py", "msr/restore_dialog.py"):
+                     "msr/winstate.py", "msr/dialogs.py", "msr/logview.py", "msr/restore_dialog.py",
+                     "msr/library.py", "msr/charts.py", "msr/library_window.py"):
             self.assertTrue((ROOT / name).is_file(), name)
             self.assertIn(name, self.text + "README.md AGENTS.md SECURITY.md")
 

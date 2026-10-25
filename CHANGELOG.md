@@ -5,6 +5,7 @@
 - **Restore previous...**: the last 20 versions of `channels.json` and `config.ini` are kept in `msr_history/` (git-ignored) and can be restored from the `...` button beside About. Passwords and other secrets are masked in the list.
 - Windows and dialogs remember their size and place (clamped back on screen if a monitor is gone) and can be dragged by their background.
 - Log tab: filter box, level drop-down, search highlighting, coloured warnings/errors, Ctrl+F, **Open log file**.
+- **Library tab**: size of your recordings per site, channel and month (headline numbers, donut and bar charts with hover details, sortable channel table with **Open folder**, **Copy summary**, optional **Count hours**). Scans in a background thread with Cancel, only lists folders and reads file sizes, never changes or deletes anything. Optional `[Library] extra_dirs` in `config.ini`. `--json --library` adds the same numbers to the status snapshot.
 - `--json` prints a read-only status snapshot (no secrets, no personal paths); `llms.txt` is a manual for AI assistants.
 
 ## v2.1.0 (2026-10)

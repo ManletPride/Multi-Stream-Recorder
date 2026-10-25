@@ -31,6 +31,10 @@ This is **v2.1.0**. See [CHANGELOG.md](CHANGELOG.md).
 - **Clip Now** (last N seconds, stream copy, keyframe-aligned) and **Screenshot**, without interrupting the recording.
 - Disk write and network meters.
 
+**Library tab**
+- How much space your recordings take: total, per site (donut), top channels (bars), per month, and a sortable channel table with **Open folder**. **Copy summary** gives plain text for pasting. **Count hours** (optional) adds recorded time.
+- It only reads folder listings and file sizes in a background thread (Cancel any time) and never deletes or moves files. `--json --library` prints the same numbers for scripts.
+
 **Housekeeping**
 - One instance per recordings folder; a second launch focuses the existing window.
 - `stream_recorder.log` rotates at a size limit (default 20 MB, 3 backups). Stream URLs, tokens and cookie headers are redacted from the log.
@@ -162,7 +166,7 @@ Output layout: `streams_dir\Recorded\<platform>\<channel>\` (raw `.ts` while rec
 ## Command line
 
 ```
-python Multi-Stream-Recorder.py [--data-dir DIR] [--config FILE] [--headless] [--version]
+python Multi-Stream-Recorder.py [--data-dir DIR] [--config FILE] [--headless] [--json [--library]] [--version]
 ```
 
 `--headless` records the enabled channels in `channels.json` with no window; Ctrl+C stops cleanly.
