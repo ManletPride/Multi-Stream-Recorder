@@ -132,8 +132,19 @@ def main_headless(config):
             recorder.stop()
 
 
+def _safe_console():
+    """A redirected stdout/stderr on Windows is cp1252: printing the arrows/bullets below
+    raised UnicodeEncodeError and killed the launch. Replace what the console can't show."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except Exception:  # pythonw (no stream) or a wrapper without reconfigure
+            pass
+
+
 def main():
     """Parse arguments and start the recorder."""
+    _safe_console()
     parser = argparse.ArgumentParser(
         description=f"Multi-Stream Recorder v{__version__}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
