@@ -55,3 +55,6 @@ log_output*.txt
 
 # Cross-process log rotation lock
 *.rotating
+
+# Version history of channels.json / config.ini (Restore previous...)
+msr_history/

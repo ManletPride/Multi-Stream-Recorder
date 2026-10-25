@@ -3,6 +3,8 @@ import logging
 import os
 import configparser
 
+from msr import history
+
 
 def default_streams_dir():
     """Recordings folder for a fresh config.ini (not ``E:\\Streams``).
@@ -178,8 +180,19 @@ class Config:
         self._load_or_create()
 
     def _write(self):
+        # Keep the file as it is now in the history (Restore previous...) before overwriting it.
+        history.snapshot(self.config_file)
         with open(self.config_file, 'w', encoding='utf-8') as f:
             self.config.write(f)
+
+    def save(self):
+        """Write config.ini (the previous version goes to the history first)."""
+        self._write()
+
+    def reload(self):
+        """Re-read config.ini, e.g. after a restore, so a later save does not undo it."""
+        self.config = configparser.ConfigParser()
+        self._load_or_create()
 
     def _load_or_create(self):
         defaults = self.DEFAULT_CONFIG

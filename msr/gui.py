@@ -19,6 +19,8 @@ from msr.deps import (
 )
 from msr import channel_panel as cp
 from msr import dialogs as _dialogs
+from msr import history as _history
+from msr import restore_dialog as _restore_dialog
 from msr import logview
 from msr import wintheme as _wintheme
 from msr.presence import PresencePoller, PresenceStore, combined_state
@@ -423,6 +425,12 @@ def main_gui(config):
         style.map('TButton',
                   background=[('active', t['accent']), ('pressed', t['accent'])],
                   foreground=[('active', '#ffffff'), ('pressed', '#ffffff')])
+        style.configure('TMenubutton', background=t['btn_bg'], foreground=t['btn_fg'],
+                        bordercolor=border_color, lightcolor=border_color,
+                        darkcolor=border_color, arrowcolor=t['fg'], padding=[8, 4])
+        style.map('TMenubutton',
+                  background=[('active', t['accent']), ('pressed', t['accent'])],
+                  foreground=[('active', '#ffffff'), ('pressed', '#ffffff')])
         style.configure('Vertical.TScrollbar', background=t['btn_bg'],
                         bordercolor=border_color, arrowcolor=t['fg'],
                         troughcolor=t['tree_field'],
@@ -488,6 +496,9 @@ def main_gui(config):
         status_ctx_menu.configure(bg=t['entry_bg'], fg=t['fg'],
                                   activebackground=t['accent'], activeforeground='#ffffff',
                                   borderwidth=0, activeborderwidth=0, relief='flat')
+        more_menu.configure(bg=t['entry_bg'], fg=t['fg'],
+                            activebackground=t['accent'], activeforeground='#ffffff',
+                            borderwidth=0, activeborderwidth=0, relief='flat')
         sort_menu.configure(bg=t['entry_bg'], fg=t['fg'],
                             activebackground=t['accent'], activeforeground='#ffffff',
                             borderwidth=0, activeborderwidth=0, relief='flat')
@@ -518,6 +529,8 @@ def main_gui(config):
         logging.error(f"Error loading channels: {e}")
 
     def save_channels():
+        # The list as it was goes to the history first (a burst of quick edits keeps one copy).
+        _history.snapshot(channels_file, min_interval=45)
         try:
             with open(channels_file, "w") as f:
                 json.dump(channels, f, indent=2)
@@ -1007,7 +1020,8 @@ def main_gui(config):
         if not _dialogs.ask_yes_no(
                 root,
                 "Remove channel" + ("s" if len(names) > 1 else ""),
-                f"Remove from the list (recordings on disk are kept)?\n\n{shown}"):
+                f"Remove from the list (recordings on disk are kept)?\n\n{shown}\n\n"
+                "You can bring the old list back with \u22ef \u2192 Restore previous channel list."):
             return
         drop = set(names)
         for ch_name in names:
@@ -1360,6 +1374,36 @@ def main_gui(config):
     ch_tree.bind("<Insert>", lambda e: add_channel())
     root.bind("<Control-n>", lambda e: add_channel())
     root.bind("<Control-f>", lambda e: (filter_entry.focus_set(), "break")[1])
+
+    def _reload_channels_from_disk(_path=None):
+        """Re-read channels.json after a restore (not saved again: the file is what was chosen)."""
+        try:
+            with open(channels_file, "r") as f:
+                fresh, skipped = coerce_channel_records(json.load(f))
+        except Exception as e:
+            logging.error(f"Could not reload the restored channel list: {e}")
+            return
+        channels[:] = fresh
+        _populate_channel_tree()
+        logging.info("Channel list restored from history (%d channels)", len(fresh))
+
+    def _restore_channels():
+        def blocked():
+            if recorder and recorder.is_running:
+                return "Stop recording first, then restore the channel list."
+            return None
+
+        _restore_dialog.open_restore(root, channels_file, "Restore previous channel list",
+                                     can_restore=blocked, on_restored=_reload_channels_from_disk)
+
+    def _restore_settings():
+        def restored(_path):
+            config.reload()
+            logging.info("config.ini restored from history")
+
+        _restore_dialog.open_restore(
+            root, config.config_file, "Restore previous settings (config.ini)", on_restored=restored,
+            note="Restart Multi-Stream Recorder to use the restored settings.")
 
     def _about_dialog():
         deps = []
@@ -1949,8 +1993,7 @@ def main_gui(config):
         config.config.set('Timeouts', 'poll_interval_minutes', str(minutes))
         # Write to config.ini so it survives restarts
         try:
-            with open(config.config_file, 'w') as f:
-                config.config.write(f)
+            config.save()
         except Exception:
             pass
         # Live-apply: workers re-read the shared runtime dict each cycle,
@@ -2025,8 +2068,7 @@ def main_gui(config):
         not by the recording workers themselves."""
         config.config.set('Clipping', 'clip_length_seconds', str(int(seconds)))
         try:
-            with open(config.config_file, 'w') as f:
-                config.config.write(f)
+            config.save()
         except Exception:
             pass
         _last_clip_display[0] = display_name
@@ -2077,6 +2119,12 @@ def main_gui(config):
 
     about_btn = ttk.Button(toggle_frame, text="About", command=_about_dialog, width=6)
     about_btn.pack(side=tk.RIGHT, padx=(0, 4))
+    more_btn = ttk.Menubutton(toggle_frame, text="\u22ef", width=3)
+    more_menu = tk.Menu(more_btn, tearoff=0)
+    more_menu.add_command(label="Restore previous channel list\u2026", command=_restore_channels)
+    more_menu.add_command(label="Restore previous settings (config.ini)\u2026", command=_restore_settings)
+    more_btn.configure(menu=more_menu)
+    more_btn.pack(side=tk.RIGHT, padx=(0, 4))
 
     # ── Status bar at very bottom ──
     dep_parts = []

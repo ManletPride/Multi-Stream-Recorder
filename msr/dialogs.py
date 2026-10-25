@@ -214,6 +214,11 @@ def new_dialog(parent: tk.Misc, title: str, *, padding: int = 14) -> tuple[tk.To
     return win, frame
 
 
+def run_modal(win: tk.Toplevel, parent: tk.Misc, focus: tk.Misc | None = None) -> None:
+    """Show a dialog built with new_dialog() modally: centred, grabbed, until it is destroyed."""
+    _show_modal(win, parent, focus)
+
+
 def _show_modal(win: tk.Toplevel, parent: tk.Misc, focus: tk.Misc | None = None) -> None:
     present(win, parent)
     try:
