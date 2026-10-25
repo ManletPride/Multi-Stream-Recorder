@@ -28,7 +28,10 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 | `msr/status.py` | `--json` snapshot. Read-only; no secrets, no absolute paths, custom URLs reduced to the host. `--json --library` adds the opt-in `library` section |
 | `msr/library.py` | Library statistics: `scan_library` (listing + file sizes only, never opens a video), `Roots`/`roots_from_config` (optional `[Library] extra_dirs`), `DurationCache` + `count_hours` (opt-in recorded time), `summary_text`, `to_dict`, `ScanJob` (background thread feeding a `queue.Queue`) |
 | `msr/charts.py` | Tk Canvas charts in the app theme: `BarChart`, `DonutChart`, `ColumnChart` with hover tooltips (no matplotlib) |
-| `msr/library_window.py` | `LibraryPanel`: the **Library** tab of the main notebook (headline, charts, sortable channel table, Count hours, Copy summary, Open folder) |
+| `msr/library_window.py` | `LibraryPanel`: the **Library** tab of the main notebook (headline, clickable charts, multi-select channel table, Count hours, Copy summary, Open folder, Delete...) |
+| `msr/library_actions.py` | File management logic, **no tkinter**: `Guard` (what may ever be touched), `build_plan` (dry run), `execute`/`ActionJob` (background, cancellable), movers (PendingDeletion, Recycle Bin via `SHFileOperationW`, permanent), `Manifest` (undo), `ActionLog`, `pending_info`, `build_suggestions` |
+| `msr/library_dialog.py` | `ActionDialog`: the review window every delete goes through (scope filters, ticks, method, typed confirmation) |
+| `msr/library_manage.py` | `Manager` + the **Files**, **PendingDeletion** and **Clean up** tabs; `ManageContext` is what `gui.py` hands over (busy callback, log paths, openers) |
 | `msr/iometer.py` | Status-header disk write / NIC download rates (`IoSampler`) |
 | `msr/__init__.py` | `__version__` (currently `2.1.0`) |
 | `SECURITY.md` | Vulnerability reporting; what is stored on disk |
@@ -41,14 +44,21 @@ After editing Python, the running GUI does **not** reload modules. The user must
 
 ## Library tab (`msr/library.py`, `msr/charts.py`, `msr/library_window.py`)
 
-Size per site / channel / month of the recordings, so the user can decide what to clean up. **It never deletes or moves anything**; keep it that way (no delete button on the channel table).
+Size per site / channel / month of the recordings, and (since the manage feature) a way to clean up. **The scan and charts stay read-only**; everything that changes files lives in `msr/library_actions.py` and is reached only through the review window (`library_dialog.py`). Never add a one-click delete.
 
 - **Read-only and cheap by default.** The scan only lists folders (`os.scandir`) and reads sizes and times from the entries; it never opens a video and never runs ffprobe. Recorded time is opt-in (**Count hours**): `.meta.json` sidecars first, ffprobe only if the user agrees, one file at a time, rate-limited, cancellable.
 - **Background thread, never Tk.** `ScanJob` talks to the UI through a `queue.Queue` that `LibraryPanel._poll` drains with `after`. The tab scans the first time it is opened (`activate()`), not at startup. Do not add another header or bottom-bar button: both are already full at the minimum window width, which is why this is a tab.
 - **Where things live.** The only file written is the remembered-durations cache `library_cache.json` in the data folder (git-ignored, keyed by path + mtime + size). Nothing is ever written in the recordings folders. Tests use temp trees.
 - **Public repo.** `summary_text`, `to_dict` and `--json --library` carry channel names and sizes only: no absolute paths (extra folders are labelled "Other folder N"). Channel folder paths exist in memory only for **Open folder**.
 - **Layout it understands.** `<streams_dir>/Recorded|Processed|PendingDeletion/<platform>/<channel>/...` (folder names matched case-insensitively), the clips dir (`clips_dir` or `streams_dir/Clips`), custom URLs as `custom/<site>/<user>`. Reparse points (junctions, symlinks) are skipped, in-progress `.ts` / `.part` files are counted as raw, channels not in the roster are flagged, not hidden.
-- GUI names inside `main_gui` follow the rule above (`library_panel`, `_library_panel`, `_library_tab_opened`).
+- GUI names inside `main_gui` follow the rule above (`library_panel`, `_library_panel`, `_library_tab_opened`, `_library_busy`, `_library_purge_settings`, `library_data_dir`).
+
+### Managing files (the safety rules; do not weaken them)
+
+- **Default is reversible**: *Move to PendingDeletion*. MSR purges that folder only **at app start** (`purge_old_pending_files`, `Cleanup/auto_purge_days`), aging by `max(mtime, ctime)`; a rename keeps both, so the mover **resets mtime to now** and keeps the original in `library_moves.json` (restore puts the date back). Recycle Bin (`SHFileOperationW`, `FOF_ALLOWUNDO`, no new dependency) is offered only when the registry shows the bin's limit and the plan fits; **Delete permanently** needs the typed channel name or `DELETE`.
+- **`Guard.check` runs twice** per file: when the plan is built (dry run) and again right before each file. It refuses anything outside the Processed / Recorded / PendingDeletion / Clips folders (extra Library folders are scan-only), links/junctions on the way, files directly in a top folder, unknown file types (only recordings, raw/partial, clips, screenshots, `.meta.json`), files changed since the preview, files modified in the last 10 minutes, and **any channel or file the recorder is working on** (`busy_from_status` over `recorder.status_dict`; if that callback fails everything is blocked).
+- **No action while a scan or another action runs**, or if the action log cannot be written. Every action appends JSON lines to `library_actions.log` and a summary goes to the Log tab. `library_actions.log` and `library_moves.json` are in the data folder and git-ignored.
+- Tests use temp trees only and inject fake movers (`ManageContext.deleters`); `tests/test_gui_smoke.py` runs the real hidden app with a fake mover. Never point a test at a real library.
 
 ## Instant clips (`create_clip` in `msr/worker.py`)
 

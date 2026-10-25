@@ -34,7 +34,11 @@ This is **v2.1.0**. See [CHANGELOG.md](CHANGELOG.md).
 
 **Library tab**
 - How much space your recordings take: total, per site (donut), top channels (bars), per month, and a sortable channel table with **Open folder**. **Copy summary** gives plain text for pasting. **Count hours** (optional) adds recorded time.
-- It only reads folder listings and file sizes in a background thread (Cancel any time) and never deletes or moves files. `--json --library` prints the same numbers for scripts.
+- The scan only reads folder listings and file sizes in a background thread (Cancel any time). `--json --library` prints the same numbers for scripts.
+- **Clean up from the tab.** Click a donut slice to list a site's channels, a bar to select a channel, a month to list its files. Select channels and press **Delete...** (or right-click, or the Delete key). You always get a preview with the files, sizes and dates first, and you can untick files or filter (older than N days, keep the newest N files / N GB, a date range).
+  - The default is **Move to PendingDeletion**: reversible (an **Undo** button appears, and the **PendingDeletion** tab has **Restore**), and MSR deletes those files itself after the PendingDeletion delay, when it next starts. **Delete permanently** needs you to type the channel name or `DELETE`. The Recycle Bin is offered only when Windows reports a bin big enough.
+  - The **Files** tab lists single files (search, sort, Play, Show in Explorer, delete). The **PendingDeletion** tab shows size, age and the next purge, with **Empty now** and **Restore**. **Clean up** suggests the largest files, the oldest, channels not in your roster, leftover raw files, duplicates and empty folders, with nothing ticked until you choose.
+  - MSR never touches a channel that is recording, files changed in the last 10 minutes, or anything outside the Processed / Recorded / PendingDeletion / Clips folders. Every action is written to `library_actions.log` in the data folder.
 
 **Logs tab**
 - Follows new lines only while you are at the bottom (a **New lines** button appears when you scrolled back), filter box and level drop-down, search highlighting, coloured warnings/errors, Ctrl+F, **Open log file**.

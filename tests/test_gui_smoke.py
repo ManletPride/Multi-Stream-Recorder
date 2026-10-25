@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -167,6 +168,118 @@ class StreamsButtonTests(unittest.TestCase):
         self.assertFalse(out["recreated"])                                # creates nothing
         # The header's buttons fit the row at the default 1100 px window and at the 1060 px minimum.
         self.assertLessEqual(out["header_req"], 1060 - 40, out)
+
+
+LIBRARY_MANAGE_SCRIPT = r"""
+import gc, json, os, sys, time, tkinter as tk
+from tkinter import ttk
+sys.path.insert(0, sys.argv[1])
+os.chdir(sys.argv[2])
+os.environ["MSR_SMOKE_TEST"] = "1"
+out = {"deleted": []}
+
+def fake_mainloop(self, n=0):
+    try:
+        from msr import library_actions as act, library_dialog as ldialog, library_window as lw, dialogs
+        self.update_idletasks(); self.update()
+        panel = next(o for o in gc.get_objects() if isinstance(o, lw.LibraryPanel))
+        tabs = panel.frame.master                      # the app's notebook
+        tabs.select(panel.frame)                        # opening the tab starts the scan
+        end = time.time() + 30
+        while (panel.stats is None or panel.busy) and time.time() < end:
+            self.update(); time.sleep(0.02)
+        out["scanned"] = panel.stats is not None and bool(panel.rows)
+        out["tabs"] = [panel.tabs.tab(t, "text").strip() for t in panel.tabs.tabs()]
+        out["panel_req"], out["root_width"] = panel.frame.winfo_reqwidth(), self.winfo_width()
+        out["tab_req"] = {}
+        for t in panel.tabs.tabs():
+            panel.tabs.select(t); self.update_idletasks()
+            out["tab_req"][panel.tabs.tab(t, "text").strip()] = self.nametowidget(t).winfo_reqwidth()
+        panel.tabs.select(panel.tabs.tabs()[1])
+        # nothing may really be deleted: a fake mover records what it was asked to move
+        def fake(item):
+            out["deleted"].append(os.path.basename(item.path))
+            return {}
+        panel.mgr.ctx.deleters[act.ACTION_PENDING] = fake
+        dialogs_seen = []
+        def ask(parent, title, intro, recs=(), dirs=(), **kw):
+            d = ldialog.ActionDialog(panel.mgr, parent, title, intro, recs, dirs, **kw)
+            d.refresh()
+            out["dialog_req"] = [d.win.winfo_reqwidth(), d.win.winfo_reqheight()]
+            out["dark"] = dialogs.is_dark(d.win)
+            out["go_text"] = d.go_btn.cget("text")
+            out["allowed"] = d.allowed()
+            out["permanent_blocked"] = (d.set_method(act.ACTION_PERMANENT), d.refresh(), d.allowed())[2]
+            d.set_method(act.ACTION_PENDING); d.refresh()
+            ok = d.confirm()
+            return d.result
+        panel.mgr.ask = ask
+        first = panel.tree.get_children()[0]
+        panel.tree.selection_set(first)
+        self.update()
+        out["delete_enabled"] = "disabled" not in panel.delete_btn.state()
+        panel.delete_selected()
+        end = time.time() + 30
+        while (panel.busy or panel._rescan_pending or not panel.out.empty() or "rescanned" not in panel.status.cget("text")) and time.time() < end:
+            self.update(); time.sleep(0.02)
+        out["status"] = panel.status.cget("text")
+        out["files_left"] = sorted(os.listdir(os.path.join(sys.argv[3], "Processed", "kick", "alice")))
+    except BaseException:
+        import traceback; traceback.print_exc(file=sys.stderr)
+    sys.stdout.write(json.dumps(out)); sys.stdout.flush(); os._exit(0)
+
+tk.Tk.mainloop = fake_mainloop
+from msr.config import Config
+from msr.gui import main_gui
+main_gui(Config(os.path.abspath("config.ini")))
+"""
+
+
+class LibraryManageSmokeTests(unittest.TestCase):
+    """The real app, hidden, on a temporary library. The mover is replaced by a fake that only
+    records, so nothing is ever deleted, and no test points at real recordings."""
+
+    def run_script(self, dark: bool):
+        try:
+            import tkinter
+            tkinter.Tk().destroy()
+        except Exception as exc:
+            self.skipTest(f"no display: {exc}")
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            rec = data / "rec"
+            old = time.time() - 40 * 86400
+            for name in ("alice_20260101_120000.mp4", "alice_20260215_120000.mp4"):
+                f = rec / "Processed" / "kick" / "alice" / name
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_bytes(b"x" * 1000)
+                os.utime(f, (old, old))
+            (data / "config.ini").write_text(f"[Paths]\nstreams_dir = {rec}\n[GUI]\nminimize_to_tray = false\n"
+                                             "notifications = false\n", encoding="utf-8")
+            (data / "channels.json").write_text("[]", encoding="utf-8")
+            (data / "window_state.json").write_text(json.dumps({"dark_mode": dark}), encoding="utf-8")
+            done = subprocess.run([sys.executable, "-c", LIBRARY_MANAGE_SCRIPT, str(ROOT), str(data), str(rec)],
+                                  capture_output=True, text=True, timeout=120, cwd=str(ROOT))
+        self.assertEqual(done.returncode, 0, done.stderr[-3000:])
+        self.assertNotIn("Traceback", done.stderr)
+        out = json.loads(done.stdout)
+        self.assertTrue(out["scanned"], out)
+        self.assertEqual(out["tabs"], ["Overview", "Channels", "Files", "PendingDeletion", "Clean up"])
+        self.assertLessEqual(out["panel_req"], 1060 - 40, out)               # fits the minimum window
+        self.assertTrue(out["delete_enabled"])
+        self.assertEqual(out["dark"], dark)
+        self.assertTrue(out["allowed"])                                       # the safe move needs no typing
+        self.assertFalse(out["permanent_blocked"])                            # permanent needs the typed word
+        self.assertLessEqual(out["dialog_req"][0], 1000)
+        self.assertEqual(sorted(out["deleted"]), ["alice_20260101_120000.mp4", "alice_20260215_120000.mp4"])
+        self.assertEqual(len(out["files_left"]), 2)                           # the fake moved nothing
+        self.assertIn("2 file(s)", out["status"])
+
+    def test_dark(self):
+        self.run_script(True)
+
+    def test_light(self):
+        self.run_script(False)
 
 
 if __name__ == "__main__":

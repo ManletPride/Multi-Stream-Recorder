@@ -34,12 +34,12 @@ def _dash(n: int, text: str) -> str:
 
 # (id, heading, width, anchor, sort key, cell text)
 COLUMNS = (
-    ("name", "Channel", 190, "w", lambda c: c.name.lower(), lambda c: c.name),
-    ("site", "Site", 90, "w", lambda c: lib.platform_label(c.platform).lower(),
+    ("name", "Channel", 150, "w", lambda c: c.name.lower(), lambda c: c.name),
+    ("site", "Site", 80, "w", lambda c: lib.platform_label(c.platform).lower(),
      lambda c: lib.platform_label(c.platform)),
     ("size", "Recordings", 100, "e", lambda c: c.recordings_bytes, lambda c: _dash(c.recordings_bytes, lib.fmt_size(c.recordings_bytes))),
     ("files", "Files", 65, "e", lambda c: c.rec_files + c.raw_files, lambda c: _dash(c.rec_files + c.raw_files, f"{c.rec_files + c.raw_files:,}")),
-    ("raw", "Raw .ts", 85, "e", lambda c: c.raw_bytes, lambda c: _dash(c.raw_bytes, lib.fmt_size(c.raw_bytes))),
+    ("raw", "Raw .ts", 75, "e", lambda c: c.raw_bytes, lambda c: _dash(c.raw_bytes, lib.fmt_size(c.raw_bytes))),
     ("pending", "Pending delete", 105, "e", lambda c: c.pending_bytes, lambda c: _dash(c.pending_bytes, lib.fmt_size(c.pending_bytes))),
     ("clips", "Clips + shots", 100, "e", lambda c: c.clip_bytes + c.shot_bytes,
      lambda c: _dash(c.clip_bytes + c.shot_bytes, lib.fmt_size(c.clip_bytes + c.shot_bytes))),

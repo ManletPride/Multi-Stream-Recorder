@@ -97,6 +97,35 @@ class DrawTests(TkCase):
         self.assertEqual(chart.tooltip_at(int(x), 60), "Feb: 10")
         self.assertEqual(chart.tooltip_at(int(8 + 10), 60), "none")  # empty month is hoverable too
 
+    def test_clicking_a_bar_reports_its_key_and_ignores_empty_space(self):
+        chart = charts.BarChart(self.root, width=600)
+        chart.pack()
+        chart.set_data([("alice", 100, "9 GB", "alice", "#53b518", "kick|alice"),
+                        ("bob", 50, "4 GB", "bob", "#9146ff", "twitch|bob"),
+                        ("plain", 10, "1 GB", "no key", "#fff")])
+        got = []
+        chart.on_click = got.append
+        chart.update()
+        for y in (6 + 12, 6 + 24 + 12, 6 + 48 + 12, 400):
+            chart._clicked(type("E", (), {"x": 5, "y": y})(), chart.on_click)
+        self.assertEqual(got, ["kick|alice", "twitch|bob"])  # a row without a key is not clickable
+
+    def test_clicking_a_slice_and_a_month(self):
+        donut = charts.DonutChart(self.root)
+        donut.pack()
+        donut.set_data([("Kick", 3, "Kick", "Kick: 3", "#53b518", "kick"), ("Twitch", 1, "Twitch", "t", "#9146ff", "twitch")])
+        keys = set(donut._keys.values())
+        self.assertEqual(keys, {"kick", "twitch"})
+        column = charts.ColumnChart(self.root, height=140, width=500)
+        column.pack()
+        column.set_data([("26-01", 0, "none", None), ("26-02", 10, "Feb", "2026-02"), ("26-03", 5, "Mar", "2026-03")])
+        self.assertEqual(set(column._keys.values()), {"2026-02", "2026-03"})  # an empty month has nothing to list
+        got = []
+        column.on_click = got.append
+        x = int(8 + (500 - 16) / 3 * 1 + 20)
+        column._clicked(type("E", (), {"x": x, "y": 60})(), column.on_click)
+        self.assertEqual(got, ["2026-02"])
+
     def test_empty_data_shows_a_message(self):
         for cls in (charts.BarChart, charts.DonutChart, charts.ColumnChart):
             chart = cls(self.root)

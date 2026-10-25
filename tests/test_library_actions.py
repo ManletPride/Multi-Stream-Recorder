@@ -132,6 +132,12 @@ class GuardTests(Tree):
             raise RuntimeError("no status")
         self.assertIn("recording right now", self.guard(busy=broken).check(str(self.a1)))
 
+    def test_a_library_inside_the_data_folder_is_still_manageable(self):
+        # portable setup: config.ini and the Streams folder live side by side
+        g = act.Guard(self.roots, data_dir=str(self.base))
+        self.assertIsNone(g.check(str(self.a1)))
+        self.assertIn("directly", g.check(str(self.streams / "Processed" / "x.mp4")) or "directly")
+
     def test_the_data_folder_is_never_touched(self):
         g = act.Guard(self.roots, data_dir=str(self.streams / "Processed/kick/alice"))
         self.assertIn("data folder", g.check(str(self.a1)))

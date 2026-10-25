@@ -210,7 +210,10 @@ class Guard:
         real, real_top = os.path.realpath(path), os.path.realpath(top)
         if not inside(real, real_top):
             return "It resolves to a place outside the library folders."
-        if self.data_dir and (inside(path, self.data_dir) or inside(real, self.data_dir)):
+        # MSR's own files (config, cookies, logs) are protected by their file types. This rule only
+        # matters when the data folder sits INSIDE a library folder (a library folder inside the
+        # data folder is a normal portable setup and stays usable).
+        if self.data_dir and inside(self.data_dir, top) and (inside(path, self.data_dir) or inside(real, self.data_dir)):
             return "It is inside MSR's data folder."
         return None
 
