@@ -56,21 +56,64 @@ def set_title_bar_dark(win, dark=True):
 # ---------------------------------------------------------------- drag by background
 WM_NCLBUTTONDOWN = 0x00A1
 HTCAPTION = 2
+# The rule (one whitelist, no per-widget patches). A press may start a window drag when it lands on
+#  - a PASSIVE class: frames, label frames, labels, separators, progress bars (labels only while
+#    they are not clickable: image, <Button-1> binding or a hand cursor mean "I am a control");
+#  - the EMPTY STRIP of a notebook's tab bar (right of the last tab), never a tab itself;
+#  - a Canvas that says it is passive: msr_drag_passive = True (a canvas with no click behaviour),
+#    or passive_at(x, y) returning True (the clickable charts: only where nothing is clickable).
+# Everything else (buttons, entries, combos, lists, trees, text, scrollbars, sashes, menus,
+# check/radio buttons, ...) keeps its normal behaviour. A new widget class is NOT draggable until
+# it is added here on purpose; tests/test_gui_smoke.py walks every tab and fails on a class that
+# is in neither list.
 _PLAIN_CLASSES = {"Tk", "Toplevel", "Frame", "TFrame", "Labelframe", "TLabelframe", "Label", "TLabel",
-                  "TSeparator"}
+                  "TSeparator", "Progressbar", "TProgressbar"}
+INTERACTIVE_CLASSES = {"Button", "TButton", "Checkbutton", "TCheckbutton", "Radiobutton", "TRadiobutton",
+                       "Entry", "TEntry", "Combobox", "TCombobox", "Spinbox", "TSpinbox", "Listbox", "Text",
+                       "Treeview", "Scrollbar", "TScrollbar", "Scale", "TScale", "Menubutton", "TMenubutton",
+                       "Menu", "Panedwindow", "TPanedwindow", "TSizegrip"}
 
 
-def is_drag_background(widget) -> bool:
-    """True for plain background (frames, labels, separators) and false for anything the
-    user interacts with: buttons, entries, lists, trees, tabs, sashes, sliders, canvases,
-    text, scrollbars, and any label that shows an image, has a click binding or a hand cursor."""
+def in_empty_tab_strip(notebook, x: int, y: int) -> bool:
+    """True when (x, y) in the notebook's own coordinates is in the tab bar but not on a tab
+    (the empty stretch right of the last tab, or the margin left of the first). Tabs on top only."""
     try:
-        if widget.winfo_class() not in _PLAIN_CLASSES:
+        if not notebook.tabs():
             return False
-        if widget.winfo_class() in ("Label", "TLabel"):
+        selected = notebook.nametowidget(notebook.select())
+        if selected.winfo_y() <= 2 or selected.winfo_x() > 4:  # tab bar not on top
+            return False
+        if not 0 <= y < selected.winfo_y() or not 0 <= x < notebook.winfo_width():
+            return False
+        try:
+            notebook.index(f"@{int(x)},{int(y)}")  # raises when no tab is there
+            return False
+        except Exception:
+            return True
+    except Exception:
+        return False
+
+
+def is_drag_background(widget, x: int | None = None, y: int | None = None) -> bool:
+    """True for plain background (see the rule above) and false for anything the user interacts
+    with. x, y are the press position in the widget's own coordinates (needed for notebooks and
+    charts, which are draggable only in their empty parts)."""
+    try:
+        cls = widget.winfo_class()
+        if cls in ("TNotebook", "Notebook"):
+            return x is not None and in_empty_tab_strip(widget, x, y)
+        if cls == "Canvas":
+            probe = getattr(widget, "passive_at", None)
+            if callable(probe):
+                return x is not None and bool(probe(x, y))
+            return bool(getattr(widget, "msr_drag_passive", False)) and not widget.bind("<Button-1>")
+        if cls not in _PLAIN_CLASSES:
+            return False
+        if cls in ("Label", "TLabel"):
             if str(widget.cget("image")):
                 return False
-            if widget.bind("<Button-1>") or widget.bind("<ButtonPress-1>") or widget.bind("<Double-Button-1>"):
+            if (widget.bind("<Button-1>") or widget.bind("<ButtonPress-1>") or widget.bind("<Double-Button-1>")
+                    or widget.bind("<ButtonRelease-1>")):
                 return False
             if str(widget.cget("cursor")) in ("hand1", "hand2", "pointinghand"):
                 return False
@@ -112,7 +155,7 @@ def enable_background_drag(top) -> None:
 
     def press(event):
         widget = event.widget
-        if not is_drag_background(widget):
+        if not is_drag_background(widget, getattr(event, "x", None), getattr(event, "y", None)):
             return None
         try:
             if str(top.state()) == "zoomed" or widget.winfo_toplevel() is not top:

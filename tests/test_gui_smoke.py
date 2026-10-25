@@ -282,5 +282,159 @@ class LibraryManageSmokeTests(unittest.TestCase):
         self.run_script(False)
 
 
+DRAG_AUDIT_SCRIPT = r"""
+import gc, json, os, sys, time, tkinter as tk
+from types import SimpleNamespace
+sys.path.insert(0, sys.argv[1])
+os.chdir(sys.argv[2])
+os.environ["MSR_SMOKE_TEST"] = "1"
+out = {"unknown": [], "passive_wrong": [], "interactive_wrong": [], "uncovered": [], "classes": {}, "notebooks": [],
+       "clickable_labels_ok": True, "canvases": []}
+
+def fake_mainloop(self, n=0):
+    try:
+        from msr import library_window as lw, wintheme as wt
+        self.update_idletasks(); self.update()
+        top = self
+        panel = next(o for o in gc.get_objects() if isinstance(o, lw.LibraryPanel))
+        panel.frame.master.select(panel.frame)
+        end = time.time() + 30
+        while (panel.stats is None or panel.busy) and time.time() < end:
+            self.update(); time.sleep(0.02)
+        calls = []
+        wt._begin_caption_drag = lambda *a: calls.append(a) or True   # never starts a real drag
+
+        def walk(w):
+            for c in w.winfo_children():
+                if isinstance(c, tk.Toplevel):
+                    continue
+                yield c
+                yield from walk(c)
+
+        def audit_tree():
+            for w in walk(top):
+                cls = w.winfo_class()
+                out["classes"][cls] = out["classes"].get(cls, 0) + 1
+                if cls == "Menu":
+                    continue                      # popup menus are their own windows
+                if str(top) not in w.bindtags():
+                    out["uncovered"].append(str(w))  # the window-level binding would never see a press
+                got = wt.is_drag_background(w, 2, 2)
+                if cls in wt._PLAIN_CLASSES:
+                    clickable = cls in ("Label", "TLabel") and (str(w.cget("image")) or w.bind("<Button-1>")
+                                                                or w.bind("<Double-Button-1>"))
+                    if got == bool(clickable):
+                        out["passive_wrong"].append(str(w))
+                elif cls in wt.INTERACTIVE_CLASSES:
+                    if got:
+                        out["interactive_wrong"].append(str(w))
+                elif cls in ("TNotebook", "Canvas"):
+                    pass                          # checked below
+                else:
+                    out["unknown"].append(f"{cls} {w}")
+                if cls == "Canvas":
+                    out["canvases"].append([str(w), bool(getattr(w, "msr_drag_passive", False)),
+                                            callable(getattr(w, "passive_at", None)), bool(w.bind("<Button-1>"))])
+
+        def notebooks(w):
+            return [c for c in walk(w) if c.winfo_class() == "TNotebook"]
+
+        def select_all(nb_list, depth=0):
+            # visit every tab of every notebook, nested ones too
+            for nb in nb_list:
+                for tab in nb.tabs():
+                    nb.select(tab); self.update(); self.update_idletasks()
+                    audit_tree()
+                    inner = [n for n in notebooks(nb.nametowidget(tab))]
+                    select_all(inner, depth + 1)
+        select_all(notebooks(top))
+        audit_tree()
+
+        for nb in notebooks(top):
+            nb.update_idletasks()
+            width = nb.winfo_width()
+            sel = nb.nametowidget(nb.select())
+            strip_h = sel.winfo_y()
+            def press(x, y):
+                before = len(calls)
+                ev = SimpleNamespace(widget=nb, x=x, y=y, x_root=nb.winfo_rootx() + x, y_root=nb.winfo_rooty() + y)
+                result = top._msr_drag_press(ev) if nb.winfo_toplevel() is top else None
+                return result, len(calls) - before
+            info = {"name": str(nb), "strip_h": strip_h, "tabs": len(nb.tabs()), "width": width}
+            info["empty_strip"] = press(width - 3, max(2, strip_h // 2))
+            tab_x = None
+            for x in range(2, width, 4):
+                try:
+                    nb.index(f"@{x},{max(2, strip_h // 2)}")
+                    tab_x = x
+                    break
+                except tk.TclError:
+                    pass
+            info["tab_x"] = tab_x
+            info["on_tab"] = press(tab_x, max(2, strip_h // 2)) if tab_x is not None else None
+            info["client"] = press(width // 2, strip_h + 30)
+            out["notebooks"].append(info)
+    except BaseException:
+        import traceback; traceback.print_exc(file=sys.stderr)
+    sys.stdout.write(json.dumps(out)); sys.stdout.flush(); os._exit(0)
+
+tk.Tk.mainloop = fake_mainloop
+from msr.config import Config
+from msr.gui import main_gui
+main_gui(Config(os.path.abspath("config.ini")))
+"""
+
+
+class DragAuditSmokeTests(unittest.TestCase):
+    """Walks the real, hidden app (Status, Logs, Library with all its tabs) and checks the
+    drag-by-background rule widget by widget. No real drag is ever started."""
+
+    def run_audit(self, dark: bool):
+        try:
+            import tkinter
+            tkinter.Tk().destroy()
+        except Exception as exc:
+            self.skipTest(f"no display: {exc}")
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            rec = data / "rec"
+            old = time.time() - 40 * 86400
+            for name in ("alice_20260101_120000.mp4", "alice_20260215_120000.mp4"):
+                f = rec / "Processed" / "kick" / "alice" / name
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_bytes(b"x" * 1000)
+                os.utime(f, (old, old))
+            (data / "config.ini").write_text(f"[Paths]\nstreams_dir = {rec}\n[GUI]\nminimize_to_tray = false\n"
+                                             "notifications = false\n", encoding="utf-8")
+            (data / "channels.json").write_text("[]", encoding="utf-8")
+            (data / "window_state.json").write_text(json.dumps({"dark_mode": dark}), encoding="utf-8")
+            done = subprocess.run([sys.executable, "-c", DRAG_AUDIT_SCRIPT, str(ROOT), str(data)],
+                                  capture_output=True, text=True, timeout=120, cwd=str(ROOT))
+        self.assertEqual(done.returncode, 0, done.stderr[-3000:])
+        self.assertNotIn("Traceback", done.stderr)
+        out = json.loads(done.stdout)
+        self.assertFalse(out["unknown"], f"widget classes with no drag decision (add them to wintheme): {out['unknown']}")
+        self.assertFalse(out["uncovered"], out["uncovered"])                  # all see the window-level binding
+        self.assertFalse(out["passive_wrong"], out["passive_wrong"])          # passive ones drag, clickable labels do not
+        self.assertFalse(out["interactive_wrong"], out["interactive_wrong"])  # controls never drag
+        for cls in ("TFrame", "TLabel", "TButton", "TNotebook", "Treeview", "Canvas"):
+            self.assertIn(cls, out["classes"])
+        for _name, flagged, _has_probe, bound in out["canvases"]:
+            if flagged:
+                self.assertFalse(bound)                                       # a flagged canvas has no click behaviour
+        self.assertGreaterEqual(len(out["notebooks"]), 2)                     # app tabs and Library tabs
+        for nb in out["notebooks"]:
+            self.assertEqual(nb["empty_strip"], ["break", 1], nb)             # empty tab strip starts a drag
+            self.assertIsNotNone(nb["tab_x"], nb)
+            self.assertEqual(nb["on_tab"], [None, 0], nb)                     # a tab still just switches tabs
+            self.assertEqual(nb["client"], [None, 0], nb)                     # the notebook body is not the strip
+
+    def test_dark(self):
+        self.run_audit(True)
+
+    def test_light(self):
+        self.run_audit(False)
+
+
 if __name__ == "__main__":
     unittest.main()

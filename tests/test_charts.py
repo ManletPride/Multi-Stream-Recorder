@@ -126,6 +126,18 @@ class DrawTests(TkCase):
         column._clicked(type("E", (), {"x": x, "y": 60})(), column.on_click)
         self.assertEqual(got, ["2026-02"])
 
+    def test_margins_are_passive_so_the_window_can_be_dragged_from_them(self):
+        chart = charts.BarChart(self.root, width=600)
+        chart.pack()
+        chart.set_data([("alice", 100, "9 GB", "alice", "#53b518", "kick|alice"), ("plain", 10, "1", "t", "#fff")])
+        chart.update()
+        self.assertFalse(chart.passive_at(5, 6 + 12))      # a clickable bar keeps its click
+        self.assertTrue(chart.passive_at(5, 6 + 24 + 12))  # a row without a key does nothing
+        self.assertTrue(chart.passive_at(590, 400))        # empty space
+        empty = charts.DonutChart(self.root)
+        empty.set_data([])
+        self.assertTrue(empty.passive_at(3, 3))
+
     def test_empty_data_shows_a_message(self):
         for cls in (charts.BarChart, charts.DonutChart, charts.ColumnChart):
             chart = cls(self.root)

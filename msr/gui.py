@@ -711,6 +711,7 @@ def main_gui(config):
     badge_canvas = tk.Canvas(ch_tree_frame, width=BADGE_CANVAS_W, highlightthickness=0,
                            borderwidth=0)
     badge_canvas.pack(side=tk.LEFT, fill=tk.Y)
+    badge_canvas.msr_drag_passive = True  # only hover tips: the window can be dragged from here
 
     _row_group = {}     # iid -> group id
     _badges = {}        # channel key -> tooltip text
@@ -1535,6 +1536,7 @@ def main_gui(config):
                                 command=preview_canvas.xview)
     preview_canvas.configure(xscrollcommand=preview_hsb.set)
     preview_canvas.pack(fill=tk.X, side=tk.TOP)
+    preview_canvas.msr_drag_passive = True  # empty strip around the thumbnails (they are their own widgets)
     preview_hsb.pack(fill=tk.X, side=tk.TOP)
     preview_inner = tk.Frame(preview_canvas)
     _preview_canvas_win = preview_canvas.create_window((0, 0), window=preview_inner, anchor="nw")

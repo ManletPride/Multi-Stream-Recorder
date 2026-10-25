@@ -176,6 +176,11 @@ class ChartCanvas(tk.Canvas):
                 return self._keys[item]
         return None
 
+    def passive_at(self, x: int, y: int) -> bool:
+        """True where a press does nothing (margins, titles, empty space): the window may be
+        dragged from there. Clickable bars, slices and months keep selecting."""
+        return self.key_at(x, y) is None
+
     def _clicked(self, event, handler) -> None:
         key = self.key_at(event.x, event.y)
         if key is not None and handler is not None:
