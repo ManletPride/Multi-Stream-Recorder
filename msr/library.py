@@ -26,7 +26,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Iterable
+from typing import Callable, Iterable, NamedTuple
 
 from msr.util import PENDING_DELETION_FOLDER, channel_key_to_dirs
 
@@ -147,6 +147,42 @@ class VideoRef:
     channel: tuple[str, str]
 
 
+SIDECAR_SUFFIX = ".meta.json"
+
+
+def classify(name: str, category: str) -> str:
+    """What a file in the library is, from its name and the folder category it was found in:
+    recording | raw | partial | clip | screenshot | sidecar | media (a video/image sitting in
+    PendingDeletion) | other (anything else: never touched by the clean-up tools)."""
+    low = name.lower()
+    ext = os.path.splitext(low)[1]
+    if low.endswith(PARTIAL_SUFFIXES):
+        return "partial"
+    if low.endswith(SIDECAR_SUFFIX):
+        return "sidecar"
+    if category == "clips":
+        return "screenshot" if ext in IMAGE_EXT else "clip" if ext in VIDEO_EXT else "other"
+    if ext in VIDEO_EXT:
+        return {"processed": "recording", "recorded": "raw", "pending": "media"}.get(category, "other")
+    if category == "pending" and ext in IMAGE_EXT:
+        return "media"
+    return "other"
+
+
+class FileRec(NamedTuple):
+    """One file seen by a scan (only kept when asked: collect_files). Used by the Library tab's
+    file views and clean-up tools; never exported."""
+    path: str
+    size: int
+    mtime: float
+    ctime: float
+    category: str   # processed | recorded | pending | clips
+    platform: str   # lower-case folder name
+    channel: str    # folder name(s) below the platform ('site/user' for custom URLs)
+    kind: str       # see classify()
+    when: float     # date in the name (else mtime)
+
+
 @dataclass
 class LibraryStats:
     roots_found: dict = field(default_factory=dict)         # category -> bool
@@ -172,6 +208,8 @@ class LibraryStats:
     seconds_total: float | None = None
     timed_files: int = 0
     videos: list = field(default_factory=list)              # VideoRef of finished recordings
+    files: list = field(default_factory=list)               # FileRec of every file (collect_files only)
+    empty_dirs: list = field(default_factory=list)          # folders with nothing in them (collect_files only)
 
     def cat(self, name: str) -> tuple[int, int]:
         b, f = self.categories.get(name, (0, 0))
@@ -232,7 +270,7 @@ def _is_link(entry, st=None) -> bool:
 
 def scan_library(roots: Roots, progress: Callable[[int, int, str], None] | None = None,
                  cancel: threading.Event | None = None, now: float | None = None,
-                 collect_videos: bool = True) -> LibraryStats:
+                 collect_videos: bool = True, collect_files: bool = False) -> LibraryStats:
     """Scan the folders in `roots`. Never raises for filesystem problems (they are counted);
     returns what it has, with .cancelled set, when `cancel` is set.
 
@@ -282,6 +320,9 @@ def scan_library(roots: Roots, progress: Callable[[int, int, str], None] | None 
         ch = channel_for(platform, channel, category, folder)
         partial = low.endswith(PARTIAL_SUFFIXES)
         mtime = st.st_mtime
+        if collect_files:
+            stats.files.append(FileRec(entry.path, size, mtime, st.st_ctime, category, platform.lower(), channel,
+                                       classify(name, category), date_from_name(name) or mtime))
         if partial:
             stats.partial_files += 1
             stats.partial_bytes += size
@@ -348,14 +389,18 @@ def scan_library(roots: Roots, progress: Callable[[int, int, str], None] | None 
                 stats.unreadable_dirs += 1
                 continue
             with it:
+                entries = 0
                 while True:
                     try:
                         entry = next(it)
                     except StopIteration:
+                        if entries == 0 and depth >= 1 and collect_files and category != "other":
+                            stats.empty_dirs.append(path)
                         break
                     except OSError:
                         stats.unreadable_dirs += 1
                         break
+                    entries += 1
                     check(label)
                     try:
                         st = entry.stat(follow_symlinks=False)
@@ -724,8 +769,10 @@ class ScanJob(threading.Thread):
 
     def __init__(self, roots: Roots, out, *, roster: Iterable[str] | None = None,
                  cache_path: str | None = None, ffprobe: str | None = None, hours_after: bool = False,
-                 hours_for: LibraryStats | None = None, probe_missing: bool = True):
+                 hours_for: LibraryStats | None = None, probe_missing: bool = True,
+                 collect_files: bool = False):
         super().__init__(daemon=True, name="LibraryScan")
+        self.collect_files = collect_files
         self.roots, self.out = roots, out
         self.roster = list(roster) if roster is not None else None
         self.cache_path, self.ffprobe = cache_path, ffprobe
@@ -740,7 +787,7 @@ class ScanJob(threading.Thread):
             stats = self.hours_for
             if stats is None:
                 stats = scan_library(self.roots, lambda f, b, l: self.out.put(("progress", f, b, l)),
-                                     self.cancel_event)
+                                     self.cancel_event, collect_files=self.collect_files)
                 mark_roster(stats, self.roster)
                 self.out.put(("done", stats))
             if (self.hours_after or self.hours_for is not None) and not self.cancel_event.is_set():
