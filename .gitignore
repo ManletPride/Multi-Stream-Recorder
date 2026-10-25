@@ -58,3 +58,7 @@ log_output*.txt
 
 # Version history of channels.json / config.ini (Restore previous...)
 msr_history/
+
+# Remembered video lengths for the Library window (Count hours)
+library_cache.json
+library_cache.json.tmp
