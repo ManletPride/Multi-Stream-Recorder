@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+UI overhaul: themed popups, calmer Logs tab, Restore previous, window memory, Library tab, status snapshot.
+
+- Popups and dialogs are themed (dark/light), parented to the window and centred; the native message boxes are gone. A test guards this.
+- Logs tab follows new lines only while you are scrolled to the bottom; a **New lines** button appears when you are scrolled back.
+- Fixed a startup crash (the window flashed and vanished under `pythonw`) caused by the Log filter box reusing the roster filter's name; a hidden-window smoke test now launches the real UI in dark and light mode.
 - **Restore previous...**: the last 20 versions of `channels.json` and `config.ini` are kept in `msr_history/` (git-ignored) and can be restored from the `...` button beside About. Passwords and other secrets are masked in the list.
 - Windows and dialogs remember their size and place (clamped back on screen if a monitor is gone) and can be dragged by their background.
 - Log tab: filter box, level drop-down, search highlighting, coloured warnings/errors, Ctrl+F, **Open log file**.

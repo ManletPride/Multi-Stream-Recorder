@@ -35,7 +35,12 @@ This is **v2.1.0**. See [CHANGELOG.md](CHANGELOG.md).
 - How much space your recordings take: total, per site (donut), top channels (bars), per month, and a sortable channel table with **Open folder**. **Copy summary** gives plain text for pasting. **Count hours** (optional) adds recorded time.
 - It only reads folder listings and file sizes in a background thread (Cancel any time) and never deletes or moves files. `--json --library` prints the same numbers for scripts.
 
+**Logs tab**
+- Follows new lines only while you are at the bottom (a **New lines** button appears when you scrolled back), filter box and level drop-down, search highlighting, coloured warnings/errors, Ctrl+F, **Open log file**.
+
 **Housekeeping**
+- Dark/light themed popups; windows remember their size and place and can be dragged by their background.
+- **Restore previous...** (the `...` button beside About): the last 20 versions of `channels.json` and `config.ini`, with passwords masked in the list.
 - One instance per recordings folder; a second launch focuses the existing window.
 - `stream_recorder.log` rotates at a size limit (default 20 MB, 3 backups). Stream URLs, tokens and cookie headers are redacted from the log.
 - `--data-dir` / `MSR_HOME` keep config, cookies and channel list outside the code folder.
