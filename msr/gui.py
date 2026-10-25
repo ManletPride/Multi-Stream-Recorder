@@ -23,6 +23,8 @@ from msr.config import default_streams_dir
 from msr import dialogs as _dialogs
 from msr import history as _history
 from msr import library as _library
+from msr import library_actions as _library_actions
+from msr import library_manage as _library_manage
 from msr import library_window as _library_window
 from msr import winstate as _winstate
 from msr import restore_dialog as _restore_dialog
@@ -35,7 +37,7 @@ from msr.util import (
     check_for_updates, coerce_channel_records, ffprobe_from_ffmpeg, find_cookies_file,
     get_cookie_status_for_channel, kill_orphan_recording_processes,
     open_existing_folder, open_local_path, parse_custom_url,
-    redact_for_log, validate_channel_name, validate_cookies,
+    redact_for_log, reveal_in_file_browser, validate_channel_name, validate_cookies,
 )
 from msr.iometer import (
     IoSampler, format_header, format_tooltip, meter_severity, sum_stream_mbps,
@@ -2054,8 +2056,26 @@ def main_gui(config):
     # Library tab: size per site/channel, charts, per-month totals. Scans (read-only, in a
     # background thread) the first time it is opened; remembered video lengths live in the
     # app's own data folder (library_cache.json, git-ignored).
+    def _library_purge_settings():
+        try:
+            days = config.getint('Cleanup', 'auto_purge_days', fallback=7)
+        except ValueError:
+            days = 7
+        return days, config.getboolean('Cleanup', 'purge_on_startup', fallback=True)
+
+    def _library_busy():
+        # which channels / files the recorder is working on right now (they are never touched)
+        return _library_actions.busy_from_status(dict(getattr(recorder, 'status_dict', None) or {}))
+
+    library_data_dir = os.path.dirname(os.path.abspath(config.config_file))
     library_panel = _library_window.LibraryPanel(
         notebook,
+        manage_ctx=_library_manage.ManageContext(
+            data_dir=library_data_dir,
+            log_path=os.path.join(library_data_dir, "library_actions.log"),
+            manifest_path=os.path.join(library_data_dir, "library_moves.json"),
+            get_busy=_library_busy, get_purge=_library_purge_settings,
+            revealer=reveal_in_file_browser, opener=open_local_path, logger=logging.getLogger("msr.library")),
         get_roots=lambda: _library.roots_from_config(config),
         get_roster=lambda: [c["name"] for c in channels],
         cache_path=os.path.join(os.path.dirname(os.path.abspath(config.config_file)), "library_cache.json"),

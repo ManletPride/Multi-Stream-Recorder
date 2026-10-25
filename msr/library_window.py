@@ -3,8 +3,11 @@
 A panel that lives in the main window's notebook (next to Status and Logs), with the Canvas
 charts from msr/charts.py. The scan runs in a background thread (msr/library.py ScanJob) and
 talks to the panel only through a queue that the panel polls, so the UI never freezes and the
-thread never touches Tk. It starts the first time the tab is opened. Nothing here deletes
-anything: the channel table only helps you decide what to clean up yourself.
+thread never touches Tk. It starts the first time the tab is opened.
+
+With a ManageContext the tab can also manage files (msr/library_manage.py): delete a channel's
+content, drill into single files, empty PendingDeletion, clean-up suggestions. Every one of those
+goes through a review window and msr/library_actions.py; without a context the tab is read-only.
 """
 
 from __future__ import annotations
@@ -17,6 +20,8 @@ from typing import Callable
 
 from msr import charts, dialogs
 from msr import library as lib
+from msr import library_actions as act
+from msr import library_manage as manage
 
 POLL_MS = 100
 TOP_CHANNELS = 10
@@ -47,12 +52,15 @@ COLUMNS = (
 _COLUMN = {c[0]: c for c in COLUMNS}
 
 
-def sorted_channels(channels, column: str, descending: bool, text: str = "", not_in_roster: bool = False):
-    """Channels filtered by a name/site substring (and optionally 'not in the roster') and
-    sorted by a table column. Ties keep a stable name order."""
+def sorted_channels(channels, column: str, descending: bool, text: str = "", not_in_roster: bool = False,
+                    site: str | None = None):
+    """Channels filtered by a name/site substring (and optionally 'not in the roster', or one
+    site) and sorted by a table column. Ties keep a stable name order."""
     needle = (text or "").strip().lower()
     rows = []
     for ch in channels:
+        if site and ch.platform.lower() != site.lower():
+            continue
         if needle and needle not in ch.name.lower() and needle not in lib.platform_label(ch.platform).lower():
             continue
         if not_in_roster and ch.in_roster is not False:
@@ -75,7 +83,8 @@ def donut_rows(stats: lib.LibraryStats):
         label = lib.platform_label(p)
         pct = b * 100 / total
         rows.append((label, b, f"{label}  {lib.fmt_size(b)}  ({pct:.0f}%)",
-                     f"{label}: {lib.fmt_size(b)} in {f:,} files ({pct:.1f}% of recordings)", charts.color_for(p, i)))
+                     f"{label}: {lib.fmt_size(b)} in {f:,} files ({pct:.1f}% of recordings). Click to list its channels",
+                     charts.color_for(p, i), p))
     if rest:
         b = sum(r[1] for r in rest)
         f = sum(r[2] for r in rest)
@@ -95,8 +104,8 @@ def bar_rows(stats: lib.LibraryStats, count: int = TOP_CHANNELS):
             tip += f"; last {lib._day(ch.last)}"
         if ch.seconds is not None:
             tip += f"; {lib.fmt_hours(ch.seconds)}"
-        rows.append((ch.name, ch.recordings_bytes, lib.fmt_size(ch.recordings_bytes), tip,
-                     charts.color_for(ch.platform)))
+        rows.append((ch.name, ch.recordings_bytes, lib.fmt_size(ch.recordings_bytes), tip + ". Click to select, double-click to open",
+                     charts.color_for(ch.platform), f"{ch.platform.lower()}|{ch.name.lower()}"))
     return rows
 
 
@@ -105,7 +114,8 @@ def month_rows(stats: lib.LibraryStats):
     for key in charts.month_axis(stats.months):
         b, f = stats.months.get(key, (0, 0))
         out.append((f"{key[2:4]}-{key[5:]}", b,
-                    f"{key}: {lib.fmt_size(b)} in {f:,} recordings" if f else f"{key}: nothing recorded"))
+                    f"{key}: {lib.fmt_size(b)} in {f:,} recordings. Click to list them" if f else f"{key}: nothing recorded",
+                    key if f else None))
     return out
 
 
@@ -114,8 +124,13 @@ class LibraryPanel:
 
     def __init__(self, container, get_roots: Callable[[], lib.Roots], get_roster: Callable[[], list[str]] | None = None,
                  cache_path: str | None = None, ffprobe: str | None = None,
-                 opener: Callable[[str], None] | None = None):
+                 opener: Callable[[str], None] | None = None, manage_ctx: manage.ManageContext | None = None):
         self.get_roots, self.get_roster = get_roots, get_roster
+        self.mgr: manage.Manager | None = None
+        self._manage_ctx = manage_ctx
+        self.site_filter: str | None = None
+        self._rescan_pending = False
+        self._result_text = ""
         self.cache_path, self.ffprobe, self.opener = cache_path, ffprobe, opener
         self.stats: lib.LibraryStats | None = None
         self.job: lib.ScanJob | None = None
@@ -131,6 +146,7 @@ class LibraryPanel:
         top.pack(fill="x")
         self.status = ttk.Label(top, text="Not scanned yet.")
         self.status.pack(side="left")
+        self.undo_btn = ttk.Button(top, text="Undo", command=lambda: self.mgr and self.mgr.undo_last())
 
         bar = ttk.Frame(frame)
         bar.pack(fill="x", pady=(8, 6))
@@ -168,7 +184,14 @@ class LibraryPanel:
         self.months = charts.ColumnChart(month_box, height=150, width=900)
         self.months.pack(fill="both", expand=True)
 
+        self.channels_tab = channels
         self._build_channels_tab(channels)
+        self.donut.on_click = self.donut.on_double = self.pick_site
+        self.bars.on_click = self.pick_channel
+        self.bars.on_double = lambda key: (self.pick_channel(key), self.open_selected_folder())
+        self.months.on_click = self.months.on_double = self.pick_month
+        if manage_ctx is not None:
+            self.mgr = manage.Manager(self, manage_ctx)
 
         frame.bind("<Destroy>", lambda e: self.shutdown() if e.widget is frame else None, add="+")
         self._sync_buttons()
@@ -194,14 +217,24 @@ class LibraryPanel:
         self.orphan_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(tool, text="Only channels not in my roster", variable=self.orphan_var,
                         command=self._fill_tree).pack(side="left")
-        self.open_btn = ttk.Button(tool, text="Open folder", command=self.open_selected_folder)
-        self.open_btn.pack(side="right")
-        ttk.Label(tab, foreground="gray", justify="left",
-                  text="Click a heading to sort. This list only shows sizes: nothing here deletes anything. "
-                       "Use Open folder and clean up in Explorer yourself.").pack(anchor="w", pady=(6, 4))
+        self.site_btn = ttk.Button(tool, text="", command=lambda: self.pick_site(None))
+        bar = ttk.Frame(tab)
+        bar.pack(fill="x", pady=(6, 4))
+        self.open_btn = ttk.Button(bar, text="Open folder", command=self.open_selected_folder)
+        self.open_btn.pack(side="left")
+        self.files_btn = ttk.Button(bar, text="Files\u2026", command=self.show_selected_files)
+        self.delete_btn = ttk.Button(bar, text="Delete\u2026", command=lambda: self.delete_selected())
+        if self.mgr_enabled:
+            self.files_btn.pack(side="left", padx=(6, 0))
+            self.delete_btn.pack(side="left", padx=(6, 0))
+            hint = ("Click a heading to sort. Select channels and press Delete\u2026 (or right-click, or the Delete key): "
+                    "you always get a preview first, and the default is a reversible move to PendingDeletion.")
+        else:
+            hint = "Click a heading to sort. This list only shows sizes; use Open folder to clean up in Explorer."
+        ttk.Label(tab, foreground="gray", justify="left", wraplength=820, text=hint).pack(anchor="w", pady=(0, 4))
         box = ttk.Frame(tab)
         box.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(box, columns=[c[0] for c in COLUMNS], show="headings", selectmode="browse", height=14)
+        self.tree = ttk.Treeview(box, columns=[c[0] for c in COLUMNS], show="headings", selectmode="extended", height=14)
         for cid, heading, width, anchor, _k, _t in COLUMNS:
             self.tree.heading(cid, text=heading, command=lambda c=cid: self.sort_by(c))
             self.tree.column(cid, width=width, anchor=anchor, stretch=(cid == "name"))
@@ -211,6 +244,24 @@ class LibraryPanel:
         scroll.pack(side="right", fill="y")
         self.tree.bind("<Double-1>", lambda _e: self.open_selected_folder())
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._sync_buttons())
+        self.tree.bind("<Control-a>", lambda _e: (self.tree.selection_set(self.tree.get_children()), "break")[1])
+        self.tree.bind("<Button-3>", self._channel_menu)
+        self.menu = tk.Menu(self.tree, tearoff=0)
+        self.menu.add_command(label="Open folder", command=self.open_selected_folder)
+        self.menu.add_command(label="Copy summary of selection", command=self.copy_selection_summary)
+        if self.mgr_enabled:
+            self.tree.bind("<Delete>", lambda _e: (self.delete_selected(), "break")[1])
+            self.menu.insert_command(1, label="Show files\u2026", command=self.show_selected_files)
+            self.menu.add_separator()
+            self.menu.add_command(label="Delete content\u2026", command=lambda: self.delete_selected())
+            self.menu.add_command(label="Move to PendingDeletion\u2026",
+                                  command=lambda: self.delete_selected(act.ACTION_PENDING))
+            self.menu.add_command(label="Delete permanently\u2026",
+                                  command=lambda: self.delete_selected(act.ACTION_PERMANENT))
+
+    @property
+    def mgr_enabled(self) -> bool:
+        return self._manage_ctx is not None
 
     def sort_by(self, column: str) -> None:
         if column == self.sort_column:
@@ -225,7 +276,7 @@ class LibraryPanel:
         if self.stats is None:
             return
         for index, ch in enumerate(sorted_channels(self.stats.channels.values(), self.sort_column, self.sort_desc,
-                                                   self.filter_var.get(), self.orphan_var.get())):
+                                                   self.filter_var.get(), self.orphan_var.get(), self.site_filter)):
             iid = f"c{index}"
             self.rows[iid] = ch
             self.tree.insert("", "end", iid=iid, values=[c[5](ch) for c in COLUMNS])
@@ -237,6 +288,71 @@ class LibraryPanel:
     def selected_channel(self) -> lib.ChannelStat | None:
         picked = self.tree.selection()
         return self.rows.get(picked[0]) if picked else None
+
+    def selected_channels(self) -> list[lib.ChannelStat]:
+        return [self.rows[i] for i in self.tree.selection() if i in self.rows]
+
+    # -- clicking the charts / the table
+    def pick_site(self, platform: str | None) -> None:
+        """A donut slice was clicked: list only that site's channels (None: all sites)."""
+        self.site_filter = platform
+        if platform:
+            self.site_btn.configure(text=f"Site: {lib.platform_label(platform)}  \u2715")
+            self.site_btn.pack(side="left", padx=(12, 0))
+            self.tabs.select(self.channels_tab)
+        else:
+            self.site_btn.pack_forget()
+        self._fill_tree()
+
+    def pick_channel(self, key: str) -> None:
+        """A bar was clicked: show the Channels list with that channel selected."""
+        platform, _sep, name = key.partition("|")
+        self.site_filter = None
+        self.site_btn.pack_forget()
+        self.filter_var.set("")
+        self.orphan_var.set(False)
+        self._fill_tree()
+        for iid, ch in self.rows.items():
+            if ch.platform.lower() == platform and ch.name.lower() == name:
+                self.tree.selection_set(iid)
+                self.tree.see(iid)
+                break
+        self.tabs.select(self.channels_tab)
+
+    def pick_month(self, month: str) -> None:
+        """A month column was clicked: list that month's files."""
+        if self.mgr is not None:
+            self.mgr.files.set_month(month)
+            self.tabs.select(self.mgr.files.frame)
+
+    def _channel_menu(self, event) -> None:
+        iid = self.tree.identify_row(event.y)
+        if iid and iid not in self.tree.selection():
+            self.tree.selection_set(iid)
+        if self.tree.selection():
+            manage.popup(self.frame, self.menu, event)
+
+    def show_selected_files(self) -> None:
+        channel = self.selected_channel()
+        if channel is None or self.mgr is None:
+            return
+        self.mgr.files.set_channel(channel.platform, channel.name)
+        self.tabs.select(self.mgr.files.frame)
+
+    def delete_selected(self, method: str | None = None) -> None:
+        if self.mgr is not None and self.tree.selection():
+            self.mgr.delete_channels(self.selected_channels(), method)
+
+    def copy_selection_summary(self) -> None:
+        picked = self.selected_channels()
+        if not picked:
+            return
+        lines = [f"{c.name} ({lib.platform_label(c.platform)}): {lib.fmt_size(c.recordings_bytes)} in "
+                 f"{c.rec_files + c.raw_files:,} files" + (f", last {lib._day(c.last)}" if c.last else "")
+                 for c in picked]
+        self.win.clipboard_clear()
+        self.win.clipboard_append("\n".join(lines))
+        self.status.configure(text=f"Copied a summary of {len(picked)} channel(s)")
 
     # ------------------------------------------------------------ actions
     @property
@@ -252,6 +368,9 @@ class LibraryPanel:
         self.copy_btn.state(["!disabled"] if self.stats is not None else ["disabled"])
         channel = self.selected_channel() if hasattr(self, "tree") else None
         self.open_btn.state(["!disabled"] if channel and channel.best_folder() else ["disabled"])
+        picked = bool(self.tree.selection()) if hasattr(self, "tree") else False
+        for button in (self.files_btn, self.delete_btn):
+            button.state(["!disabled"] if picked and not busy and self.stats is not None else ["disabled"])
 
     def _start(self, job: lib.ScanJob, message: str) -> None:
         self.out = queue.Queue()
@@ -272,9 +391,24 @@ class LibraryPanel:
                 roster = list(self.get_roster())
             except Exception:
                 roster = None
-        job = lib.ScanJob(self.get_roots(), self.out, roster=roster, cache_path=self.cache_path, ffprobe=self.ffprobe)
+        job = lib.ScanJob(self.get_roots(), self.out, roster=roster, cache_path=self.cache_path, ffprobe=self.ffprobe,
+                          collect_files=self.mgr is not None)
         self._probe_offered = False
         self._start(job, "Scanning...")
+
+    def begin_action(self, job, message: str) -> None:
+        """Run a library_actions.ActionJob (delete / move / restore) with progress and Cancel; the
+        library is rescanned afterwards so the charts and lists show what is left."""
+        if self.busy:
+            return
+        self._rescan_pending = True
+        self._start(job, message)
+
+    def show_undo(self, show: bool) -> None:
+        if show:
+            self.undo_btn.pack(side="left", padx=(10, 0))
+        else:
+            self.undo_btn.pack_forget()
 
     def start_hours(self, probe: bool) -> None:
         if self.busy or self.stats is None:
@@ -351,7 +485,16 @@ class LibraryPanel:
                     self.render()
                     note = "cancelled (partial)" if self.stats.cancelled else \
                         f"scanned {self.stats.files_seen:,} files in {self.stats.elapsed:.1f} s"
-                    self.status.configure(text=note.capitalize() + time.strftime("  \u00b7  %H:%M"))
+                    text = note.capitalize() + time.strftime("  \u00b7  %H:%M")
+                    if self._result_text:  # what the action just did stays visible after the rescan
+                        text, self._result_text = f"{self._result_text}  \u00b7  rescanned", ""
+                    self.status.configure(text=text)
+                elif kind == "act_progress":
+                    self.status.configure(text=f"Working: {msg[1]:,} of {msg[2]:,} done ({lib.fmt_size(msg[3])})")
+                elif kind == "act_done":
+                    finished = True
+                    if self.mgr is not None:
+                        self.mgr.finished(msg[1])
                 elif kind == "hours_progress":
                     self.status.configure(text=f"Counting hours: {msg[1]:,} of {msg[2]:,} recordings")
                 elif kind == "hours_done":
@@ -369,6 +512,11 @@ class LibraryPanel:
         if finished or (self.job is not None and not self.job.is_alive() and self.out.empty()):
             self.progress.pack_forget()
             self._sync_buttons()
+        if self._rescan_pending and not self.busy and self.out.empty():
+            self._rescan_pending = False
+            keep = self.status.cget("text")
+            self.start_scan()
+            self._result_text = keep  # (shown again once the rescan has drawn the new numbers)
         if self.busy or not self.out.empty():
             # The busy bar is stepped from this poll (ttk's own animation timer would outlive the
             # widget if the app closes mid-scan).
@@ -394,6 +542,8 @@ class LibraryPanel:
         self.headline.configure(text="\n".join("\u2022 " + line for line in lib.summary_lines(stats)))
         self.donut.center_text = lib.fmt_size(stats.recordings_bytes) if stats.recordings_bytes else ""
         self.donut.set_data(donut_rows(stats))
+        if self.mgr is not None:
+            self.mgr.on_stats(stats)
         self.bars.set_data(bar_rows(stats))
         self.months.set_data(month_rows(stats))
         self._fill_tree()

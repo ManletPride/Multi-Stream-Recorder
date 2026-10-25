@@ -1034,6 +1034,17 @@ def open_local_path(path):
         subprocess.Popen(["xdg-open", path])
 
 
+def reveal_in_file_browser(path):
+    """Open the file browser with this file selected (Explorer /select, Finder -R; elsewhere its folder)."""
+    path = os.path.abspath(path)
+    if os.name == "nt":
+        subprocess.Popen(["explorer", f"/select,{path}"])
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", path])
+    else:
+        subprocess.Popen(["xdg-open", os.path.dirname(path)])
+
+
 def open_existing_folder(configured, default="", opener=None):
     """Open the folder named by a config value (blank = `default`) with the same helper as the
     Clips button. Creates nothing. Returns (opened, message): `message` explains a refusal in

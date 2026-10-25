@@ -84,6 +84,11 @@ def label_step(count: int, width: int, label_px: int = 44) -> int:
     return max(1, math.ceil(count * label_px / max(width, 1)))
 
 
+def row_key(row, index: int):
+    """The optional click key of a chart row (an extra last element), else None."""
+    return row[index] if len(row) > index else None
+
+
 # ------------------------------------------------------------------ theme
 def palette(win: tk.Misc) -> dict:
     dark = dialogs.is_dark(win)
@@ -116,11 +121,16 @@ class ChartCanvas(tk.Canvas):
         super().__init__(parent, height=height, width=width, highlightthickness=0, bd=0)
         self.data = None
         self._hits: dict[int, str] = {}
+        self._keys: dict[int, str] = {}
+        self.on_click: Callable[[str], None] | None = None   # called with the clicked item's key
+        self.on_double: Callable[[str], None] | None = None
         self._drawn_width = -1
         self._job = None
         self.bind("<Configure>", self._on_configure)
         self.bind("<Motion>", self._motion)
         self.bind("<Leave>", lambda _e: self.hide_tip())
+        self.bind("<Button-1>", lambda e: self._clicked(e, self.on_click))
+        self.bind("<Double-Button-1>", lambda e: self._clicked(e, self.on_double))
         self.bind("<Destroy>", self._cancel_job)
         self.redraw()
 
@@ -140,6 +150,7 @@ class ChartCanvas(tk.Canvas):
     def redraw(self) -> None:
         self.delete("all")
         self._hits = {}
+        self._keys = {}
         pal = palette(self)
         self.configure(bg=pal["bg"])
         w, h = self.size()
@@ -152,9 +163,23 @@ class ChartCanvas(tk.Canvas):
     def draw(self, w: int, h: int, pal: dict) -> None:  # pragma: no cover - overridden
         raise NotImplementedError
 
-    def hit(self, item: int, text: str) -> int:
+    def hit(self, item: int, text: str, key: str | None = None) -> int:
         self._hits[item] = text
+        if key is not None:
+            self._keys[item] = key
         return item
+
+    def key_at(self, x: int, y: int) -> str | None:
+        """The key (a site, channel or month) of the clickable item under the pointer."""
+        for item in reversed(self.find_overlapping(x, y, x, y)):
+            if item in self._keys:
+                return self._keys[item]
+        return None
+
+    def _clicked(self, event, handler) -> None:
+        key = self.key_at(event.x, event.y)
+        if key is not None and handler is not None:
+            handler(key)
 
     def _on_configure(self, event) -> None:
         if event.width != self._drawn_width and self._job is None:
@@ -183,6 +208,10 @@ class ChartCanvas(tk.Canvas):
         return None
 
     def _motion(self, event) -> None:
+        try:
+            self.configure(cursor="hand2" if (self._keys and self.key_at(event.x, event.y) is not None) else "")
+        except tk.TclError:
+            pass
         text = self.tooltip_at(event.x, event.y)
         if text:
             self.show_tip(event.x, event.y, text)
@@ -224,15 +253,17 @@ class BarChart(ChartCanvas):
         value_w = 78
         left, right = label_w + 10, max(label_w + 20, w - value_w - 8)
         widths = bar_widths([r[1] for r in self.data], right - left)
-        for i, (label, _value, value_text, tip, color) in enumerate(self.data):
+        for i, row in enumerate(self.data):
+            label, _value, value_text, tip, color = row[:5]
             y = 6 + i * self.ROW
             mid = y + self.ROW // 2
-            self.hit(self.create_rectangle(0, y, w, y + self.ROW, fill="", outline=""), tip)  # whole row hovers
+            key = row_key(self.data[i], 5)
+            self.hit(self.create_rectangle(0, y, w, y + self.ROW, fill="", outline=""), tip, key)  # whole row hovers
             self.create_text(label_w, mid, text=ellipsize(label, max(4, label_w // 7)), anchor="e",
                              fill=pal["fg"], font=FONT)
             self.create_rectangle(left, mid - 7, right, mid + 7, fill=pal["track"], outline="")
             if widths[i]:
-                self.hit(self.create_rectangle(left, mid - 7, left + widths[i], mid + 7, fill=color, outline=""), tip)
+                self.hit(self.create_rectangle(left, mid - 7, left + widths[i], mid + 7, fill=color, outline=""), tip, key)
             self.create_text(max(left + widths[i], left) + 6, mid, text=value_text, anchor="w",
                              fill=pal["muted"], font=FONT)
 
@@ -254,7 +285,7 @@ class DonutChart(ChartCanvas):
         for row, (start, extent) in zip(self.data, angles):
             item = self.create_arc(*box, start=start, extent=extent, style="pieslice", fill=row[4],
                                    outline=pal["bg"], width=2)
-            self.hit(item, row[3])
+            self.hit(item, row[3], row_key(row, 5))
         hole = size * 0.30
         cx, cy = x0 + size / 2, y0 + size / 2
         self.create_oval(cx - hole, cy - hole, cx + hole, cy + hole, fill=pal["bg"], outline=pal["bg"])
@@ -266,8 +297,8 @@ class DonutChart(ChartCanvas):
             sw = self.create_rectangle(lx, y + 3, lx + 12, y + 15, fill=row[4], outline="")
             txt = self.create_text(lx + 20, y + 9, text=ellipsize(row[2], max(8, (w - lx - 24) // 7)),
                                    anchor="w", fill=pal["fg"], font=FONT)
-            self.hit(sw, row[3])
-            self.hit(txt, row[3])
+            self.hit(sw, row[3], row_key(row, 5))
+            self.hit(txt, row[3], row_key(row, 5))
 
 
 class ColumnChart(ChartCanvas):
@@ -285,13 +316,15 @@ class ColumnChart(ChartCanvas):
         step = label_step(n, usable)
         self.create_line(left, base, w - left, base, fill=pal["track"])
         shown = -10 ** 6
-        for i, (label, value, tip) in enumerate(self.data):
+        for i, row in enumerate(self.data):
+            label, value, tip = row[0], row[1], row[2]
+            key = row_key(row, 3)
             x = left + slot * i + (slot - bar_w) / 2
             height = 0 if value <= 0 else max(2, (base - top) * value / peak)
             if value > 0:
-                self.hit(self.create_rectangle(x, base - height, x + bar_w, base, fill=pal["accent"], outline=""), tip)
+                self.hit(self.create_rectangle(x, base - height, x + bar_w, base, fill=pal["accent"], outline=""), tip, key)
             slot_left = left + slot * i  # the whole column slot hovers, not just the (maybe thin) bar
-            self.hit(self.create_rectangle(slot_left, top, slot_left + slot, base, fill="", outline=""), tip)
+            self.hit(self.create_rectangle(slot_left, top, slot_left + slot, base, fill="", outline=""), tip, key)
             if i % step == 0 or (i == n - 1 and i - shown >= step * 0.6):
                 shown = i
                 self.create_text(x + bar_w / 2, base + 11, text=label, fill=pal["muted"], font=("Segoe UI", 8))

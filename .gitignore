@@ -62,3 +62,6 @@ msr_history/
 # Remembered video lengths for the Library window (Count hours)
 library_cache.json
 library_cache.json.tmp
+library_actions.log
+library_moves.json
+library_moves.json.tmp
