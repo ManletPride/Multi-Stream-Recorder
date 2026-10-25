@@ -1,4 +1,4 @@
-"""The Library window (msr/library_window.py) on a hidden root with temporary folder trees."""
+"""The Library tab (msr/library_window.py) on a hidden root with temporary folder trees."""
 import os
 import tempfile
 import threading
@@ -7,6 +7,8 @@ import tkinter as tk
 import unittest
 from pathlib import Path
 from unittest import mock
+
+from tkinter import ttk
 
 from msr import dialogs
 from msr import library as lib
@@ -26,11 +28,6 @@ class Case(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
         self.streams = self.base / "streams"
-        for patcher in (mock.patch.object(dialogs, "_reveal", lambda win, on_top: None),
-                        mock.patch.object(dialogs.wintheme, "set_title_bar_dark", mock.Mock(return_value=True)),
-                        mock.patch.object(dialogs, "work_area", lambda win, x=0, y=0: (0, 0, 1920, 1040))):
-            patcher.start()
-            self.addCleanup(patcher.stop)
         r = self.streams
         put(r / "Processed/kick/alice/alice_20260101_120000.mp4", 4000, meta_seconds=3600)
         put(r / "Processed/kick/alice/alice_20260215_120000.mp4", 3000, meta_seconds=7200)
@@ -41,12 +38,17 @@ class Case(unittest.TestCase):
         self.cache = str(self.base / "data" / "library_cache.json")
         (self.base / "data").mkdir()
 
-    def make(self, **kw):
+    def make(self, activate=True, **kw):
         kw.setdefault("get_roots", lambda: lib.Roots(str(self.streams)))
         kw.setdefault("get_roster", lambda: ["alice", "twitch:bob"])
         kw.setdefault("cache_path", self.cache)
-        win = lw.LibraryWindow(self.root, **kw)
-        self.addCleanup(win.close)
+        holder = ttk.Frame(self.root)
+        holder.pack()
+        win = lw.LibraryPanel(holder, **kw)
+        win.frame.pack(fill="both", expand=True)
+        self.addCleanup(win.shutdown)
+        if activate:
+            win.activate()
         return win
 
     def pump(self, cond, timeout=20.0):
@@ -232,10 +234,24 @@ class WindowTests(Case):
             win = self.make()
             self.root.update()
             job = win.job
-            win.close()
+            win.frame.destroy()  # the window closing destroys the tab
             job.join(5)
+            self.root.update()
         self.assertFalse(job.is_alive())
         self.assertFalse(win.exists())
+
+    def test_nothing_is_scanned_until_the_tab_is_opened(self):
+        win = self.make(activate=False)
+        self.root.update()
+        self.assertIsNone(win.job)
+        self.assertIsNone(win.stats)
+        self.assertEqual(win.status.cget("text"), "Not scanned yet.")
+        self.assertIn("disabled", win.copy_btn.state())
+        win.activate()
+        self.pump(lambda: win.stats is not None and not win.busy)
+        first = win.job
+        win.activate()  # opening the tab again does not rescan
+        self.assertIs(win.job, first)
 
     def test_scan_errors_are_shown_not_raised(self):
         with mock.patch.object(lib, "scan_library", side_effect=RuntimeError("boom")), \
@@ -265,15 +281,8 @@ class WindowTests(Case):
         win = self.scanned()
         with mock.patch.object(dialogs, "is_dark", return_value=False):
             win.refresh_theme()
-        win.close()
+        win.frame.destroy()
         win.refresh_theme()  # after close: nothing happens, nothing raises
-
-    def test_remembers_its_size(self):
-        from msr import winstate
-        state = str(self.base / "window_state.json")
-        winstate.merge(state, {}, dialog=("library", "900x600+10+10"))
-        win = self.make(state_file=state, autostart=False)
-        self.assertEqual(win.win._msr_geometry, "900x600+10+10")
 
 
 if __name__ == "__main__":

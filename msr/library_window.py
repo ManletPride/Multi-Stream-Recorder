@@ -1,10 +1,10 @@
-"""The Library window: what is recorded, from which sites and channels, and how it grows.
+"""The Library tab: what is recorded, from which sites and channels, and how it grows.
 
-Built on msr/dialogs.py (themed, parented, centred, remembers its size) with the Canvas charts
-from msr/charts.py. The scan runs in a background thread (msr/library.py ScanJob) and talks
-to this window only through a queue that the window polls, so the UI never freezes and the
-thread never touches Tk. Nothing here deletes anything: the channel table only helps you
-decide what to clean up yourself.
+A panel that lives in the main window's notebook (next to Status and Logs), with the Canvas
+charts from msr/charts.py. The scan runs in a background thread (msr/library.py ScanJob) and
+talks to the panel only through a queue that the panel polls, so the UI never freezes and the
+thread never touches Tk. It starts the first time the tab is opened. Nothing here deletes
+anything: the channel table only helps you decide what to clean up yourself.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Callable
 
-from msr import charts, dialogs, winstate, wintheme
+from msr import charts, dialogs
 from msr import library as lib
 
 POLL_MS = 100
@@ -109,11 +109,13 @@ def month_rows(stats: lib.LibraryStats):
     return out
 
 
-class LibraryWindow:
-    def __init__(self, parent, get_roots: Callable[[], lib.Roots], get_roster: Callable[[], list[str]] | None = None,
+class LibraryPanel:
+    """Build with the notebook as `container`, then notebook.add(panel.frame, ...)."""
+
+    def __init__(self, container, get_roots: Callable[[], lib.Roots], get_roster: Callable[[], list[str]] | None = None,
                  cache_path: str | None = None, ffprobe: str | None = None,
-                 opener: Callable[[str], None] | None = None, state_file=None, autostart: bool = True):
-        self.parent, self.get_roots, self.get_roster = parent, get_roots, get_roster
+                 opener: Callable[[str], None] | None = None):
+        self.get_roots, self.get_roster = get_roots, get_roster
         self.cache_path, self.ffprobe, self.opener = cache_path, ffprobe, opener
         self.stats: lib.LibraryStats | None = None
         self.job: lib.ScanJob | None = None
@@ -123,15 +125,12 @@ class LibraryWindow:
         self.sort_column, self.sort_desc = "size", True
         self.rows: dict[str, lib.ChannelStat] = {}
 
-        self.win, frame = dialogs.new_dialog(parent, "Library", padding=12)
-        self.win.resizable(True, True)
-        self.win.minsize(760, 560)
+        frame = self.frame = self.win = ttk.Frame(container, padding=10)  # self.win: the widget used for after()/clipboard
 
         top = ttk.Frame(frame)
         top.pack(fill="x")
-        ttk.Label(top, text="Library", font=("Segoe UI", 14, "bold")).pack(side="left")
-        self.status = ttk.Label(top, text="")
-        self.status.pack(side="right")
+        self.status = ttk.Label(top, text="Not scanned yet.")
+        self.status.pack(side="left")
 
         bar = ttk.Frame(frame)
         bar.pack(fill="x", pady=(8, 6))
@@ -139,10 +138,8 @@ class LibraryWindow:
         self.cancel_btn = ttk.Button(bar, text="Cancel", command=self.cancel)
         self.hours_btn = ttk.Button(bar, text="Count hours", command=lambda: self.start_hours(False))
         self.copy_btn = ttk.Button(bar, text="Copy summary", command=self.copy_summary)
-        close_btn = ttk.Button(bar, text="Close", command=self.close)
         for b in (self.rescan_btn, self.cancel_btn, self.hours_btn, self.copy_btn):
             b.pack(side="left", padx=(0, 6))
-        close_btn.pack(side="right")
         self.progress = ttk.Progressbar(frame, mode="indeterminate", length=200)
 
         self.headline = ttk.Label(frame, text="", justify="left", anchor="nw")
@@ -173,15 +170,17 @@ class LibraryWindow:
 
         self._build_channels_tab(channels)
 
-        self.win.bind("<Escape>", lambda _e: self.close())
-        self.win.protocol("WM_DELETE_WINDOW", self.close)
+        frame.bind("<Destroy>", lambda e: self.shutdown() if e.widget is frame else None, add="+")
         self._sync_buttons()
-        self.win.update_idletasks()
-        if state_file:
-            winstate.attach(self.win, state_file, "library",
-                            (self.win.winfo_reqwidth() * 3 // 4, self.win.winfo_reqheight() * 3 // 4))
-        if autostart:
+
+    def activate(self) -> None:
+        """The tab was opened: scan the first time (later: use Rescan)."""
+        if self.stats is None and not self.busy:
             self.start_scan()
+
+    @property
+    def toplevel(self):
+        return self.frame.winfo_toplevel()
 
     # ------------------------------------------------------------ channels tab
     def _build_channels_tab(self, tab) -> None:
@@ -260,7 +259,6 @@ class LibraryWindow:
         self.job = job
         self.status.configure(text=message)
         self.progress.pack(fill="x", pady=(0, 6), before=self.headline)
-        self.progress.start(15)
         job.start()
         self._sync_buttons()  # after start(): the buttons follow job.is_alive()
         self._schedule_poll()
@@ -290,23 +288,16 @@ class LibraryWindow:
             self.job.cancel()
             self.status.configure(text="Cancelling...")
 
-    def close(self) -> None:
+    def shutdown(self) -> None:
+        """Stop the scan and the polling (the window is closing)."""
         if self.job is not None:
             self.job.cancel()
-        try:
-            self.progress.stop()  # its animation timer must not outlive the window
-        except tk.TclError:
-            pass
         if self._poll_id is not None:
             try:
                 self.win.after_cancel(self._poll_id)
             except tk.TclError:
                 pass
             self._poll_id = None
-        try:
-            self.win.destroy()
-        except tk.TclError:
-            pass
 
     def exists(self) -> bool:
         try:
@@ -329,12 +320,11 @@ class LibraryWindow:
         try:
             self.opener(folder)
         except Exception as exc:
-            dialogs.show_error(self.win, "Open folder", f"Could not open the folder: {exc}")
+            dialogs.show_error(self.toplevel, "Open folder", f"Could not open the folder: {exc}")
 
     def refresh_theme(self) -> None:
         if not self.exists():
             return
-        wintheme.set_title_bar_dark(self.win, dialogs.is_dark(self.win))
         for chart in (self.donut, self.bars, self.months):
             chart.redraw()
 
@@ -371,16 +361,18 @@ class LibraryWindow:
                 elif kind == "error":
                     finished = True
                     self.status.configure(text="Scan failed")
-                    dialogs.show_error(self.win, "Library", f"The scan failed: {msg[1]}")
+                    dialogs.show_error(self.toplevel, "Library", f"The scan failed: {msg[1]}")
         except queue.Empty:
             pass
         if self.job is not None and not self.job.is_alive() and self.out.empty():
             finished = True
         if finished or (self.job is not None and not self.job.is_alive() and self.out.empty()):
-            self.progress.stop()
             self.progress.pack_forget()
             self._sync_buttons()
         if self.busy or not self.out.empty():
+            # The busy bar is stepped from this poll (ttk's own animation timer would outlive the
+            # widget if the app closes mid-scan).
+            self.progress.step(8)
             self._schedule_poll()
 
     def _after_hours(self, known: int, missing: int) -> None:
@@ -388,7 +380,7 @@ class LibraryWindow:
         if missing and self.ffprobe and not self._probe_offered and not self.stats.cancelled:
             self._probe_offered = True
             if dialogs.ask_yes_no(
-                    self.win, "Count hours",
+                    self.toplevel, "Count hours",
                     f"{missing:,} recordings have no length saved by MSR.\n\nRead them with ffprobe? It looks at "
                     "one file at a time, gently, and can take a few minutes for a big library. You can cancel "
                     "any time and the results are remembered."):
@@ -406,9 +398,3 @@ class LibraryWindow:
         self.months.set_data(month_rows(stats))
         self._fill_tree()
 
-
-def open_library(parent, **kwargs) -> LibraryWindow:
-    """Open the Library window (non-modal, so the recorder stays usable)."""
-    window = LibraryWindow(parent, **kwargs)
-    dialogs.present(window.win, parent)
-    return window

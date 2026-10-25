@@ -21,6 +21,8 @@ from msr.deps import (
 from msr import channel_panel as cp
 from msr import dialogs as _dialogs
 from msr import history as _history
+from msr import library as _library
+from msr import library_window as _library_window
 from msr import winstate as _winstate
 from msr import restore_dialog as _restore_dialog
 from msr import logview
@@ -29,7 +31,7 @@ from msr.presence import PresencePoller, PresenceStore, combined_state
 from msr.recorder import StreamRecorder
 from msr.util import (
     application_dir, channel_file_stem, channel_key_to_dirs, channel_watch_url,
-    check_for_updates, coerce_channel_records, find_cookies_file,
+    check_for_updates, coerce_channel_records, ffprobe_from_ffmpeg, find_cookies_file,
     get_cookie_status_for_channel, kill_orphan_recording_processes,
     open_local_path, parse_custom_url,
     redact_for_log, validate_channel_name, validate_cookies,
@@ -370,6 +372,8 @@ def main_gui(config):
     # ── Apply theme ──
     style = ttk.Style()
 
+    _library_panel = [None]  # set when the Library tab is built (apply_theme can run first)
+
     def apply_theme(*_args):
         t = DARK if dark_mode.get() else LIGHT
         style.theme_use('clam')
@@ -498,6 +502,8 @@ def main_gui(config):
         log_text.tag_configure("find", background='#6b5900' if _dark_log else '#ffe58a',
                                foreground='#ffffff' if _dark_log else '#000000')
         log_text.tag_raise("find")
+        if _library_panel[0] is not None:
+            _library_panel[0].refresh_theme()  # the Library charts follow the dark/light switch
 
         # Status bar at bottom
         status_bar.configure(bg=t['bg'], fg=t['offline_fg'])
@@ -2024,6 +2030,28 @@ def main_gui(config):
     log_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 10), pady=(0, 10))
     log_text.pack(fill=tk.BOTH, expand=True, padx=(10, 0), pady=(0, 10))
 
+    # Library tab: size per site/channel, charts, per-month totals. Scans (read-only, in a
+    # background thread) the first time it is opened; remembered video lengths live in the
+    # app's own data folder (library_cache.json, git-ignored).
+    library_panel = _library_window.LibraryPanel(
+        notebook,
+        get_roots=lambda: _library.roots_from_config(config),
+        get_roster=lambda: [c["name"] for c in channels],
+        cache_path=os.path.join(os.path.dirname(os.path.abspath(config.config_file)), "library_cache.json"),
+        ffprobe=ffprobe_from_ffmpeg(config.get("Advanced", "ffmpeg_path", fallback="ffmpeg") or "ffmpeg"),
+        opener=open_local_path)
+    _library_panel[0] = library_panel
+    notebook.add(library_panel.frame, text="  Library  ")
+
+    def _library_tab_opened(_event=None):
+        try:
+            if notebook.select() == str(library_panel.frame):
+                library_panel.activate()
+        except tk.TclError:
+            pass
+
+    notebook.bind("<<NotebookTabChanged>>", _library_tab_opened, add="+")
+
     # ── Bottom bar — buttons and toggles ──
     bottom_bar = tk.Frame(root)
     bottom_bar.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
@@ -2209,6 +2237,8 @@ def main_gui(config):
     about_btn.pack(side=tk.RIGHT, padx=(0, 4))
     more_btn = ttk.Menubutton(toggle_frame, text="\u22ef", width=3)
     more_menu = tk.Menu(more_btn, tearoff=0)
+    more_menu.add_command(label="Library summary\u2026", command=lambda: notebook.select(library_panel.frame))
+    more_menu.add_separator()
     more_menu.add_command(label="Restore previous channel list\u2026", command=_restore_channels)
     more_menu.add_command(label="Restore previous settings (config.ini)\u2026", command=_restore_settings)
     more_btn.configure(menu=more_menu)
