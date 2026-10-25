@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import queue
+import subprocess
 import tempfile
 import threading
 import time
@@ -351,7 +352,7 @@ def main_gui(config):
     log_queue = stdlib_queue.Queue(maxsize=2000)
     gui_log_handler = QueueLogHandler(log_queue)
     gui_log_handler.setLevel(logging.INFO)
-    gui_log_handler.setFormatter(logging.Formatter(
+    gui_log_handler.setFormatter(logview.GuiFormatter(
         "%(asctime)s %(message)s", datefmt="%H:%M:%S"
     ))
     logging.root.addHandler(gui_log_handler)
@@ -486,6 +487,12 @@ def main_gui(config):
         log_text.configure(bg=t['log_bg'], fg=t['log_fg'], insertbackground=t['log_fg'],
                            highlightbackground=border_color, highlightcolor=border_color,
                            highlightthickness=1, relief='flat')
+        _dark_log = bool(dark_mode.get())
+        log_text.tag_configure("lvl_warning", foreground='#e5c07b' if _dark_log else '#8a5a00')
+        log_text.tag_configure("lvl_error", foreground='#ff7b7b' if _dark_log else '#b71c1c')
+        log_text.tag_configure("find", background='#6b5900' if _dark_log else '#ffe58a',
+                               foreground='#ffffff' if _dark_log else '#000000')
+        log_text.tag_raise("find")
 
         # Status bar at bottom
         status_bar.configure(bg=t['bg'], fg=t['offline_fg'])
@@ -1913,6 +1920,54 @@ def main_gui(config):
 
     ttk.Button(log_toolbar, text="Clear", command=clear_logs).pack(side=tk.RIGHT)
 
+    def _log_file_path():
+        """The file the app is logging to (the shared rotating handler), else the default."""
+        for handler in logging.root.handlers:
+            name = getattr(handler, "baseFilename", None)
+            if name:
+                return name
+        return os.path.join(config.get('Paths', 'streams_dir'), "stream_recorder.log")
+
+    def open_log_file():
+        def _notepad(path):
+            subprocess.Popen(["notepad.exe", path])  # .log has no program on some PCs
+        ok, why = logview.open_log_file(_log_file_path(), open_local_path,
+                                        _notepad if os.name == "nt" else None)
+        if not ok:
+            _dialogs.show_info(root, "Open log file", why)
+
+    ttk.Button(log_toolbar, text="Open log file", command=open_log_file).pack(side=tk.RIGHT, padx=(0, 6))
+
+    # Filter: words (all must match, any case) and a minimum level.
+    filter_var = tk.StringVar()
+    level_var = tk.StringVar(value=logview.level_label(logview.LEVEL_ALL))
+    filter_info = ttk.Label(log_toolbar, text="")
+    ttk.Label(log_toolbar, text="Filter:").pack(side=tk.LEFT, padx=(18, 4))
+    filter_entry = ttk.Entry(log_toolbar, textvariable=filter_var, width=24)
+    filter_entry.pack(side=tk.LEFT)
+    filter_clear = ttk.Button(log_toolbar, text="\u2715", width=3,
+                              command=lambda: (filter_var.set(""), filter_entry.focus_set()))
+    filter_clear.pack(side=tk.LEFT, padx=(2, 6))
+    level_box = ttk.Combobox(log_toolbar, textvariable=level_var, state="readonly", width=19,
+                             values=[label for _key, label in logview.LEVEL_CHOICES])
+    level_box.pack(side=tk.LEFT)
+    filter_info.pack(side=tk.LEFT, padx=(8, 0))
+    _filter_job = [None]
+
+    def _apply_filter(*_args):
+        _filter_job[0] = None
+        log_follow.set_filter(filter_var.get(), logview.level_key(level_var.get()))
+
+    def _filter_changed(*_args):
+        # Wait for a pause in typing, then re-render (up to 5000 lines).
+        if _filter_job[0] is not None:
+            root.after_cancel(_filter_job[0])
+        _filter_job[0] = root.after(250, _apply_filter)
+
+    filter_var.trace_add("write", _filter_changed)
+    level_box.bind("<<ComboboxSelected>>", lambda _e: (_apply_filter(), level_box.selection_clear()))
+    filter_entry.bind("<Escape>", lambda _e: filter_var.set(""))
+
     log_text = tk.Text(log_tab, wrap=tk.WORD, font=("Consolas", 9), state=tk.DISABLED,
                        borderwidth=0, relief="flat")
     log_scroll = ttk.Scrollbar(log_tab, orient=tk.VERTICAL, command=log_text.yview)
@@ -1928,7 +1983,11 @@ def main_gui(config):
         else:
             new_lines_btn.place_forget()
 
-    log_follow = logview.LogFollower(log_text, enabled=auto_scroll_var.get, on_behind=_show_new_lines)
+    def _filter_stats(shown, total):
+        filter_info.configure(text=f"{shown} of {total} lines" if log_follow.filtering else "")
+
+    log_follow = logview.LogFollower(log_text, enabled=auto_scroll_var.get, on_behind=_show_new_lines,
+                                     on_stats=_filter_stats)
     new_lines_btn.configure(command=log_follow.jump)
 
     def _log_yscroll(first, last):
@@ -1936,6 +1995,19 @@ def main_gui(config):
         log_follow.on_scroll(first, last)
 
     log_text.configure(yscrollcommand=_log_yscroll)
+
+    def _focus_log_filter(_event=None):
+        # Ctrl+F on the Logs tab goes to the filter box
+        try:
+            if notebook.select() == str(log_tab):
+                filter_entry.focus_set()
+                filter_entry.select_range(0, tk.END)
+                return "break"
+        except tk.TclError:
+            pass
+        return None
+
+    root.bind("<Control-f>", _focus_log_filter, add="+")
     log_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 10), pady=(0, 10))
     log_text.pack(fill=tk.BOTH, expand=True, padx=(10, 0), pady=(0, 10))
 
