@@ -1,39 +1,50 @@
 # Changelog
 
-## Unreleased
+## Unreleased (proposed v2.2.0)
 
-**Ten more themes**, drawn from the palettes of [Omarchy](https://omarchy.org/themes/) community themes (colours only; no wallpapers or configs). The Theme window now groups them: Built-in, Dark, Light, Your themes.
+A big interface release: a Library tab that shows (and can clean up) what your recordings take, sixteen themes, a calmer Logs tab, and a fix so recording starts at once after a crash. No new dependencies, and your `config.ini`, `channels.json`, cookies and recordings are used exactly as before.
 
-- Dark: **Arc Blueberry**, **Catppuccin Mocha OLED**, **Rose Pine**, **Gruvbox Material**, **Dracula**, **Flexoki Dark**, **Vesper**, **Tokyo Night OLED**. Light: **Tokyo Day**, **Solarized Light**. PowerShell Blue stays the default and the six existing themes are unchanged; saved theme names keep working.
-- Data-driven: the published palettes are listed in `msr/theme_palettes.py` and `themes.from_palette()` builds MSR's colour names from them. A colour that was too faint to read on its own background is lightened (dark themes) or darkened (light themes) until it meets the same contrast rules as every other theme (text 4.5:1, charts 3:1); Rose Pine's teal "green" is replaced by a true green so Start and OK do not look blue. Start/Stop, OK/Error and the six chart colours are tested to look clearly different in every theme.
-- Credits, sources and licences for each palette are in `THIRD_PARTY_NOTICES.md` and in the Theme window (Arc Blueberry credits Bearded Theme as well; its licence could not be confirmed).
+### Added
 
-**Themes.** The Dark Mode checkbox is replaced by a **Theme...** button in the bottom bar. Pick a theme in the list and the whole window changes as you click; **OK** keeps it, **Cancel** puts the old one back. No restart.
+**Library tab (new)**
+- Size of your recordings per site, channel and month: headline numbers, donut and bar charts with hover details, a sortable channel table with **Open folder**, **Copy summary**, and an optional **Count hours**. It scans on a background thread with Cancel, only lists folders and reads file sizes, and never changes anything. Extra folders can be added with `[Library] extra_dirs` in `config.ini`.
+- **File management**: click a donut slice, bar or month to drill in; select channels and press **Delete...** (button, right-click or Delete key) to get a preview with filters (older than N days, keep the newest N files or GB, date range). The default is a reversible **Move to PendingDeletion** with **Undo**; **Delete permanently** needs a typed confirmation; the Recycle Bin is offered when it is large enough. New **Files**, **PendingDeletion** (Empty now / Restore) and **Clean up** tabs.
+- Safety guards: only the Processed, Recorded, PendingDeletion and Clips folders are touched, never a channel that is recording, never a recent file, nothing while a scan is running, and every action is written to `library_actions.log`.
 
-- Built-in themes: **PowerShell Blue** (the default), Neutral Dark, Light, High Contrast, Midnight Purple and Paper.
-- Every colour in the app now comes from one place, `msr/themes.py` (semantic tokens: backgrounds, text, buttons, Start/Stop, log levels, status colours, chart series and per-site colours, tooltips, caption). A test scans the source and fails on any hard-coded colour elsewhere, and another checks WCAG contrast in every theme (text at least 4.5:1, chart colours at least 3:1 against their background).
-- The choice is saved as `[GUI] theme` in `config.ini`. Existing installs migrate on their own: `dark_mode = true` starts in PowerShell Blue, `false` in Light. The old key is still read and is kept in step when you pick a theme, so an older version keeps working.
-- The Library charts, hover tooltips, roster, log, dialogs, drop-down lists, menus and the Windows title bar (colours too on Windows 11) all follow the theme live.
-- Your own themes: put `*.json` files in a `themes` folder in the data folder (the Theme window has **Open themes folder** and **Reload**, and writes a how-to sample). Only known colour names with `#rrggbb` values are accepted; a bad file is ignored and listed in the window. A new built-in theme is one entry in `msr/themes.py`.
+**Themes (new)**
+- A **Theme...** button in the bottom bar opens a list; the whole window changes live as you click, **OK** keeps the choice and **Cancel** puts the old theme back. No restart.
+- Six built-in themes: **PowerShell Blue** (still the default), Neutral Dark, Light, High Contrast, Midnight Purple, Paper.
+- Ten more, built from the palettes of community themes on [Omarchy](https://omarchy.org/themes/) (colours only): dark **Arc Blueberry**, **Catppuccin Mocha OLED**, **Rose Pine**, **Gruvbox Material**, **Dracula**, **Flexoki Dark**, **Vesper**, **Tokyo Night OLED**; light **Tokyo Day**, **Solarized Light**. A colour that would be too faint to read is nudged until it meets the same contrast rules as every other theme (text 4.5:1, charts 3:1), and Start/Stop, OK/Error and the six chart colours are tested to stay clearly different. The Theme window shows each theme's credit; sources and licences are in `THIRD_PARTY_NOTICES.md`.
+- Your own themes: put `*.json` files in a `themes` folder in the data folder (the window has **Open themes folder** and **Reload**, and writes a sample). Only known colour names with `#rrggbb` values are accepted; a bad file is ignored and listed.
+- The Library charts, tooltips, roster, log, dialogs, drop-downs, menus and the Windows title bar follow the theme.
 
-UI overhaul: themed popups, calmer Logs tab, Restore previous, window memory, Library tab, status snapshot.
+**Logs and window**
+- Logs tab: filter box, level drop-down, search highlighting, coloured warnings and errors, **Ctrl+F**, **Open log file**.
+- Windows and dialogs remember their size and place (moved back on screen if a monitor is gone) and can be dragged by their background, including the empty part of the tab bar.
+- **Restore previous...** (the `...` button beside About) keeps the last 20 versions of `channels.json` and `config.ini` in `msr_history/` and restores one in a themed window. Passwords and other secrets are masked in the list.
+- **Streams** button beside Clips opens the recordings folder. It creates nothing and tells you if the folder does not exist yet.
 
-- Popups and dialogs are themed, parented to the window and centred; the native message boxes are gone. A test guards this.
-- **Streams** button beside Clips opens the recordings folder (`streams_dir`); it creates nothing and shows a themed message if the folder is missing. The disk/network meter moved to its own thin row under the Status header so the buttons fit at the default window width.
-- Logs tab follows new lines only while you are scrolled to the bottom; a **New lines** button appears when you are scrolled back.
-- Fixed a startup crash (the window flashed and vanished under `pythonw`) caused by the Log filter box reusing the roster filter's name; a hidden-window smoke test now launches the real UI in dark and light mode.
-- **Restore previous...**: the last 20 versions of `channels.json` and `config.ini` are kept in `msr_history/` (git-ignored) and can be restored from the `...` button beside About. Passwords and other secrets are masked in the list.
-- Windows and dialogs remember their size and place (clamped back on screen if a monitor is gone) and can be dragged by their background.
-- Log tab: filter box, level drop-down, search highlighting, coloured warnings/errors, Ctrl+F, **Open log file**.
-- **Library tab**: size of your recordings per site, channel and month (headline numbers, donut and bar charts with hover details, sortable channel table with **Open folder**, **Copy summary**, optional **Count hours**). Scans in a background thread with Cancel, only lists folders and reads file sizes, never changes or deletes anything. Optional `[Library] extra_dirs` in `config.ini`. `--json --library` adds the same numbers to the status snapshot.
-- Fixed: the window can now be dragged by the empty stretch of the tab bar (right of Status / Logs / Library and of the Library's own tabs), and by the empty margins of the Library charts and the roster / preview gaps. Tabs, buttons, entries, lists and the charts' clickable bars, slices and months behave as before. One whitelist in `msr/wintheme.py` decides; a hidden-window test walks every tab and fails on any widget class that has no decision.
-- **Library file management**: click a donut slice, bar or month to drill in; multi-select channels and **Delete...** (button, right-click, Delete key) with a preview and filters (older than N days, keep newest N files / GB, date range). Default is a reversible **Move to PendingDeletion** with **Undo**; **Delete permanently** needs a typed confirmation; the Recycle Bin is offered when it is big enough. New **Files**, **PendingDeletion** (Empty now / Restore) and **Clean up** tabs. Guards: only the Processed / Recorded / PendingDeletion / Clips folders, never a recording channel or a recent file, nothing while a scan runs, every action logged to `library_actions.log`.
-- `--json` prints a read-only status snapshot (no secrets, no personal paths); `llms.txt` is a manual for AI assistants.
+**For scripts and AI assistants**
+- `--json` prints a read-only status snapshot (settings, roster, tools, problems) and exits; no secrets and no personal paths. `--json --library` adds the Library numbers.
+- `llms.txt` is a manual for AI assistants.
 
-### Recording
-- **Recording starts immediately after a crash or abrupt close.** Leftover `.ts` files from the previous session used to be remuxed *before* any recorder launched, so a few big files meant minutes of missed stream. They are now snapshotted at start, the recorders launch, and the leftovers are remuxed afterwards on a background thread: one file at a time, below-normal CPU priority, serialized with the other cleanup passes. Only the files that existed before launch are touched. Stop / close cancels the remux and leaves the `.ts` for the next pass; a `.ts` is still only moved to PendingDeletion after its MP4 is verified. If `filename_pattern` has no timestamp (a new recording could reuse a leftover's name) the old clean-up-first order is used.
-- A partial MP4 from a remux that was interrupted by a crash is detected (marker file / size check) and redone instead of being trusted.
+### Changed
+- The **Dark Mode** checkbox is replaced by the Theme window. The choice is saved as `[GUI] theme`. Existing installs migrate by themselves (`dark_mode = true` becomes PowerShell Blue, `false` becomes Light) and the old key is kept in step, so an older version still works.
+- All popups and dialogs are themed, centred and attached to the window; the native Windows message boxes are gone.
+- The Logs tab follows new lines only while you are at the bottom; a **New lines** button appears when you have scrolled back.
+- The disk/network meter has its own thin row under the Status header so the buttons fit at the default width.
+- Leftover `.ts` files from a previous session are now remuxed in the background (see Fixed): one file at a time, at below-normal CPU priority, and cancelled cleanly when you stop or quit (the `.ts` is left for the next pass; a `.ts` is still only moved to PendingDeletion after its MP4 is verified).
+
+### Fixed
+- **Recording starts immediately after a crash or abrupt close.** Leftover `.ts` files used to be remuxed before any recorder launched, so a few big files meant minutes of missed stream. Recorders now start first and the leftovers are remuxed afterwards; only files that existed before launch are touched. If `filename_pattern` has no timestamp (a new recording could reuse a leftover's name) the old clean-up-first order is kept.
+- A partial MP4 left by a remux that a crash interrupted is detected and redone instead of being trusted.
 - Leftover `x.tsb.ts` style names map to `x.tsb.mp4` (only the extension is replaced).
+- Starting from a redirected Windows console (cp1252) no longer fails on characters the console cannot show.
+
+### Developer notes
+- Every colour comes from `msr/themes.py` (semantic tokens) and the palette data in `msr/theme_palettes.py`; a test fails on any hard-coded colour elsewhere. Adding a theme is one entry in `msr/theme_palettes.py`.
+- The test suite grew from 299 to 652 tests, including a hidden-window smoke test that launches the real UI in every theme. `AGENTS.md` documents the new modules.
+- New files that stay out of git: `themes/`, `msr_history/`, `library_cache.json`, `library_moves.json`, `library_actions.log`.
 
 ## v2.1.0 (2026-10)
 
