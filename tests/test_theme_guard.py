@@ -1,4 +1,5 @@
-"""No colour belongs in the code: every colour comes from msr/themes.py (the only file with hex values).
+"""No colour belongs in the code: every colour comes from msr/themes.py (and the data-only msr/theme_palettes.py,
+the published palettes it builds themes from); no other file may hold a hex value.
 This test reads the source, so a new hard-coded colour fails here instead of showing up as a
 dark-on-dark label in some theme."""
 import ast
@@ -18,6 +19,7 @@ COLOR_KWARGS = {"fg", "bg", "foreground", "background", "fill", "outline", "acti
 PACK_WORDS = {"both", "x", "y", "none"}  # pack(fill="both") is a layout word, not a colour
 # file name -> text prefixes that may contain a colour; keep this tiny. The one entry is the how-to
 # sample written next to the user's themes folder (documentation, never applied as a colour).
+HEX_HOMES = ("themes.py", "theme_palettes.py")
 ALLOWED: dict[str, tuple[str, ...]] = {"theme_dialog.py": ('{\n  "name": "My theme"',)}
 
 
@@ -49,7 +51,7 @@ def _raw(tree):
 def scan(source_dir: Path) -> list[str]:
     found = []
     for path in sorted(source_dir.glob("*.py")):
-        if path.name == "themes.py":
+        if path.name in HEX_HOMES:
             continue
         allowed = ALLOWED.get(path.name, ())
         for line, text in literals(path):
@@ -69,13 +71,15 @@ class ColourLiteralGuardTests(unittest.TestCase):
             (folder / "bad.py").write_text(
                 'import tkinter as tk\nw = tk.Label(fg="red")\nx = "#a1b2c3"\ny = {"k": "white"}\nz = "plain text"\n'
                 'ok = tk.Label(fg=theme["fg"])\nh = "#!shebang"\n', encoding="utf-8")
-            (folder / "themes.py").write_text('X = "#112233"\n', encoding="utf-8")  # the one allowed home
+            (folder / "themes.py").write_text('X = "#112233"\n', encoding="utf-8")  # the allowed homes
+            (folder / "theme_palettes.py").write_text('Y = "#445566"\n', encoding="utf-8")
             found = scan(folder)
         self.assertEqual(len(found), 3, found)
         self.assertTrue(all(item.startswith("bad.py:") for item in found))
 
-    def test_themes_py_is_the_only_home_for_hex_values(self):
-        self.assertTrue(HEX.search((ROOT / "msr" / "themes.py").read_text(encoding="utf-8")))
+    def test_themes_py_and_the_palette_data_are_the_only_homes_for_hex_values(self):
+        for home in HEX_HOMES:
+            self.assertTrue(HEX.search((ROOT / "msr" / home).read_text(encoding="utf-8")), home)
 
 
 if __name__ == "__main__":

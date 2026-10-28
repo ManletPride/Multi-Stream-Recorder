@@ -28,6 +28,16 @@ Rename this file to my-theme.json (remove the .txt), then press Reload in the Th
 """
 
 
+def theme_groups() -> list[tuple[str, list[themes.Theme]]]:
+    """The list as the window shows it: built-in, dark and light palettes from Omarchy themes, then the user's own.
+    Pure (no window), so a test can check that every theme appears once, in themes.THEME_NAMES order."""
+    own = [t for k, t in themes.THEMES.items() if k not in themes.THEME_NAMES]
+    return [("Built-in", [themes.THEMES[n] for n in themes.GROUP_BUILTIN]),
+            ("Dark, from Omarchy palettes", [themes.THEMES[n] for n in themes.GROUP_DARK]),
+            ("Light, from Omarchy palettes", [themes.THEMES[n] for n in themes.GROUP_LIGHT]),
+            ("Your themes", own)]
+
+
 def preview(canvas: tk.Canvas, t: themes.Theme) -> None:
     """A miniature of the app in theme t: caption, tabs, roster rows, buttons, log and chart colours."""
     canvas.delete("all")
@@ -87,9 +97,14 @@ class ThemeDialog:
                   text="Pick a theme. The whole window changes as you pick; Cancel puts the old one back.").pack(anchor="w")
         body = ttk.Frame(frame)
         body.pack(fill="both", expand=True, pady=(10, 0))
-        self.tree = ttk.Treeview(body, columns=("name",), show="tree", height=9, selectmode="browse")
+        left = ttk.Frame(body)
+        left.pack(side="left", fill="y")
+        self.tree = ttk.Treeview(left, columns=("name",), show="tree", height=13, selectmode="browse")
         self.tree.column("#0", width=200, stretch=False)
+        scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side="left", fill="y")
+        scroll.pack(side="left", fill="y")
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._selected())
         right = ttk.Frame(body)
         right.pack(side="left", fill="both", expand=True, padx=(12, 0))
@@ -119,9 +134,7 @@ class ThemeDialog:
     def fill(self) -> None:
         self.tree.delete(*self.tree.get_children())
         self.names = {}
-        builtin = [t for k, t in themes.THEMES.items() if k in themes.THEME_NAMES]
-        own = [t for k, t in themes.THEMES.items() if k not in themes.THEME_NAMES]
-        for label, group in (("Built-in", builtin), ("Your themes", own)):
+        for label, group in theme_groups():
             if not group:
                 continue
             parent = self.tree.insert("", "end", text=label, open=True, tags=("group",))
@@ -139,7 +152,10 @@ class ThemeDialog:
         text, graphic = themes.audit(t)
         kind = "Dark" if t.dark else "Light"
         if t.name in themes.THEME_NAMES:
-            self.info.configure(text=f"{kind} theme. Text contrast at least {text:.1f}:1, chart colours {graphic:.1f}:1.")
+            line = f"{kind} theme. Text contrast at least {text:.1f}:1, chart colours {graphic:.1f}:1."
+            if t.credit:
+                line += f"\n{t.credit_line()} Licences and credits: THIRD_PARTY_NOTICES.md."
+            self.info.configure(text=line)
         else:
             self.info.configure(text=f"{kind} theme from your themes folder. Text contrast at least {text:.1f}:1"
                                      + ("" if text >= 4.5 else " (below the 4.5:1 guideline)") + ".")

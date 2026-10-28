@@ -3,7 +3,8 @@
 Every colour the app draws comes from the current Theme (``themes.current()``): ttk styles,
 Tk widgets, Text tags, charts, dialogs, menus and the Windows title bar. To add a theme,
 add ONE entry to ``THEMES`` below (the tests then check that every token is present and that
-text and chart colours are readable). A user can also drop ``themes/*.json`` files in the data
+text and chart colours are readable). The Omarchy-inspired themes are not written by hand: their
+published palettes live in ``msr/theme_palettes.py`` and ``from_palette()`` below builds the tokens. A user can also drop ``themes/*.json`` files in the data
 folder (see ``load_user_themes``); those are validated token by token and bad files are ignored.
 
 Token groups (a "pair" in the contrast tests is a text colour on its background):
@@ -92,10 +93,11 @@ class Theme:
     """A named palette. ``theme['bg']`` and ``theme.bg`` both work; ``theme.dark`` is a bool
     (drives the Windows title-bar mode and nothing else)."""
 
-    def __init__(self, name: str, dark: bool, colors: dict[str, str]):
+    def __init__(self, name: str, dark: bool, colors: dict[str, str], credit: dict | None = None):
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "dark", bool(dark))
         object.__setattr__(self, "colors", dict(colors))
+        object.__setattr__(self, "credit", dict(credit) if credit else None)   # palette source, or None
 
     def __setattr__(self, key, value):
         raise AttributeError("themes are read-only; make a new Theme")
@@ -119,11 +121,18 @@ class Theme:
         token = SITE_TOKENS.get((platform or "").lower())
         return self.colors[token] if token else self.series()[index % len(SERIES)]
 
+    def credit_line(self) -> str:
+        """One line for the Theme window ("" for the themes MSR drew itself)."""
+        c = self.credit
+        if not c:
+            return ""
+        return f"Palette: {c['upstream']}, via the Omarchy theme {c['port']} ({c['port_license']})."
+
     def __repr__(self) -> str:
         return f"Theme({self.name!r}, dark={self.dark})"
 
 
-def _make(name: str, dark: bool, **given: str) -> Theme:
+def _make(name: str, dark: bool, credit: dict | None = None, **given: str) -> Theme:
     """Fill the tokens a theme does not spell out from the ones it does."""
     c = dict(given)
     black, white = "#000000", "#ffffff"
@@ -159,7 +168,138 @@ def _make(name: str, dark: bool, **given: str) -> Theme:
     c.setdefault("tip_bg", c["entry_bg"])
     c.setdefault("tip_fg", c["fg"])
     c.setdefault("tip_edge", c["accent"])
-    return Theme(name, dark, c)
+    return Theme(name, dark, c, credit)
+
+
+
+# ---------------------------------------------------------------- palette -> theme (Omarchy-inspired themes)
+def _srgb_to_lab(color: str) -> tuple[float, float, float]:
+    def lin(v: int) -> float:
+        v /= 255
+        return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+    r, g, b = (lin(v) for v in _rgb(color))
+    x = (0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / 0.95047
+    y = 0.2126729 * r + 0.7151522 * g + 0.0721750 * b
+    z = (0.0193339 * r + 0.1191920 * g + 0.9503041 * b) / 1.08883
+
+    def f(t: float) -> float:
+        return t ** (1 / 3) if t > 0.008856 else 7.787 * t + 16 / 116
+    fx, fy, fz = f(x), f(y), f(z)
+    return 116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)
+
+
+def color_distance(a: str, b: str) -> float:
+    """CIE76 colour difference (about 2.3 is just noticeable; 20+ is clearly a different colour)."""
+    la, lb = _srgb_to_lab(a), _srgb_to_lab(b)
+    return sum((x - y) ** 2 for x, y in zip(la, lb)) ** 0.5
+
+
+def hue_of(color: str) -> float:
+    """Hue in degrees (0-360) of a #rrggbb colour."""
+    import colorsys
+    r, g, b = (v / 255 for v in _rgb(color))
+    return colorsys.rgb_to_hls(r, g, b)[0] * 360
+
+
+def _hex(rgb: Iterable[float]) -> str:
+    return "#%02x%02x%02x" % tuple(max(0, min(255, round(v))) for v in rgb)
+
+
+def _mix(a: str, b: str, t: float) -> str:
+    """a moved a fraction t of the way to b."""
+    return _hex(x + (y - x) * t for x, y in zip(_rgb(a), _rgb(b)))
+
+
+def _nudge(color: str, backgrounds: Iterable[str], ratio: float, toward: str) -> str:
+    """The colour itself if it reaches `ratio` on every background, else the first 4 percent step toward
+    `toward` (white on dark themes, black on light ones) that does: hue kept, only readability changed."""
+    backgrounds = list(backgrounds)
+    color = color.lower()
+    for step in range(26):
+        candidate = _mix(color, toward, 0.04 * step)
+        if min(contrast_ratio(candidate, b) for b in backgrounds) >= ratio:
+            return candidate
+    return toward
+
+
+# Palette colours tried, in this order, for the six chart series; a colour too close to one already taken
+# is skipped (several palettes reuse one colour for cyan/orange/accent or have no orange at all).
+SERIES_ORDER = ("magenta", "cyan", "yellow", "blue", "green", "orange", "red", "accent")
+SERIES_DISTANCES = (20.0, 16.0, 13.0)   # CIE76 between any two series colours: tried in turn until six fit
+SERIES_MIN_DISTANCE = SERIES_DISTANCES[-1]   # the floor every palette theme must still meet
+STATUS_MIN_DISTANCE = 40.0     # Start vs Stop and ok vs error must differ at least this much
+GREEN_HUES = (60.0, 180.0)     # hue band for "green" (Start button, ok colour)
+
+
+def from_palette(spec: dict) -> Theme:
+    """Build a Theme from a published palette (see msr/theme_palettes.py).
+
+    Readability fixes, the only liberties taken with the published colours: the text colours, status colours
+    (red/green/yellow/blue/cyan/orange) and series colours are nudged toward white (dark theme) or black
+    (light theme) until they reach the same 4.5:1 / 3:1 contrast every built-in theme has; muted text, the
+    border and the chart track are derived from fg/bg (a palette's own 'comment' colour is deliberately
+    faint). Surfaces come from the palette's lighter/darker tints, else from bg blended toward fg."""
+    name, dark = spec["name"], bool(spec["dark"])
+    raw = {k: spec[k].lower() for k in ("bg", "fg", "selection", "accent", "red", "green", "yellow", "blue",
+                                        "magenta", "cyan")}
+    raw.update({k: v.lower() for k, v in (spec.get("fix") or {}).items()})
+    white, black = "#ffffff", "#000000"
+    toward = white if dark else black
+    bg, fg = raw["bg"], raw["fg"]
+    entry_bg = (spec.get("lighter") or (_mix(bg, fg, 0.08) if dark else _mix(bg, white, 0.55))).lower()
+    darker = (spec.get("darker") or (_mix(bg, black, 0.3) if dark else _mix(bg, black, 0.06))).lower()
+    listbox_bg = _mix(bg, entry_bg, 0.5)
+    surfaces = [bg, entry_bg, listbox_bg]
+    readable = surfaces + [darker]
+
+    def text(color: str, backgrounds=surfaces, ratio: float = 4.5) -> str:
+        return _nudge(color, backgrounds, ratio, toward)
+
+    fg_ = text(fg)
+    muted = text(_mix(fg, bg, 0.38))
+    offline = text(_mix(fg, bg, 0.45))
+    red, green, yellow, blue = (text(raw[k], readable) for k in ("red", "green", "yellow", "blue"))
+    cyan = text(raw["cyan"], readable)
+    orange = text(spec.get("orange") or raw["yellow"], readable)
+    accent = raw["accent"]
+    selection = raw["selection"]
+    if contrast_ratio(fg_, selection) >= 4.5:
+        btn_bg = selection
+    else:
+        btn_bg = _mix(entry_bg, fg, 0.12) if dark else _mix(entry_bg, black, 0.07)
+    log_bg = darker if dark else _mix(bg, white, 0.5)
+
+    pool = {"magenta": raw["magenta"], "cyan": cyan, "yellow": yellow, "blue": blue, "green": green,
+            "orange": orange if spec.get("orange") else None, "red": red, "accent": accent}
+    candidates = [_nudge(pool[key], [bg], 3.0, toward) for key in SERIES_ORDER if pool.get(key)]
+    series: list[str] = []
+    for distance in SERIES_DISTANCES:       # a pastel palette (Vesper) needs the looser distances to find six
+        series = []
+        for color in candidates:
+            if all(color_distance(color, other) >= distance for other in series):
+                series.append(color)
+            if len(series) == len(SERIES):
+                break
+        if len(series) == len(SERIES):
+            break
+    if len(series) != len(SERIES):
+        raise ValueError(f"palette {name!r} has fewer than six distinguishable colours for the charts")
+    sites = _SITES_DARK if dark else _SITES_LIGHT
+    colors = dict(
+        bg=bg, fg=fg_, muted=muted, hint=muted, disabled_fg=_mix(fg, bg, 0.62), border=_mix(bg, fg, 0.22),
+        accent=accent, title_bg=btn_bg if dark else darker, title_border=accent,
+        entry_bg=entry_bg, entry_fg=fg_, placeholder=muted, listbox_bg=listbox_bg, listbox_fg=fg_,
+        btn_bg=btn_bg, btn_fg=fg_, btn_hover=accent, start_bg=green, stop_bg=red,
+        tab_bg=entry_bg, tab_fg=fg_, tree_heading_bg=btn_bg,
+        log_bg=log_bg, log_fg=text(_mix(green, fg, 0.3), [log_bg]), log_warn=yellow, log_error=red,
+        find_bg=_mix(yellow, bg, 0.65),
+        ok=green, warn=yellow, error=red, link=blue, badge=orange,
+        rec_fg=green, completed_fg=cyan, offline_fg=offline, check_fg=muted, remux_fg=yellow,
+        chart_track=_mix(bg, fg, 0.14), chart_accent=blue, tip_bg=btn_bg, tip_fg=fg_, tip_edge=accent,
+        **sites)
+    for i, color in enumerate(series):
+        colors[f"series_{i + 1}"] = color
+    return _make(name, dark, spec.get("credit"), **colors)
 
 
 # Chart colours for dark and light surfaces (the sites keep their brand hue in every theme).
@@ -264,7 +404,17 @@ _add(_make(
     chart_track="#e6dccb", chart_accent="#8a4b08", tip_bg="#fffbe6", tip_fg="#2b2620", tip_edge="#a07c00",
     **_SITES_LIGHT))
 
+from msr import theme_palettes  # noqa: E402  (data only)
+
+# Omarchy-inspired themes: dark ones first, then light, after the six hand-made themes. PowerShell Blue stays first.
+for _spec in sorted(theme_palettes.PALETTES, key=lambda sp: not sp["dark"]):
+    _add(from_palette(_spec))
+del _spec
+
 THEME_NAMES = tuple(THEMES)
+GROUP_BUILTIN = tuple(n for n in THEME_NAMES if THEMES[n].credit is None)       # hand-made, MSR's own
+GROUP_DARK = tuple(n for n in THEME_NAMES if THEMES[n].credit and THEMES[n].dark)
+GROUP_LIGHT = tuple(n for n in THEME_NAMES if THEMES[n].credit and not THEMES[n].dark)
 
 # ---------------------------------------------------------------- current theme
 _current: Theme = THEMES[DEFAULT_THEME]

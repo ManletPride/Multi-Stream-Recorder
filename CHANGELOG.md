@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+**Ten more themes**, drawn from the palettes of [Omarchy](https://omarchy.org/themes/) community themes (colours only; no wallpapers or configs). The Theme window now groups them: Built-in, Dark, Light, Your themes.
+
+- Dark: **Arc Blueberry**, **Catppuccin Mocha OLED**, **Rose Pine**, **Gruvbox Material**, **Dracula**, **Flexoki Dark**, **Vesper**, **Tokyo Night OLED**. Light: **Tokyo Day**, **Solarized Light**. PowerShell Blue stays the default and the six existing themes are unchanged; saved theme names keep working.
+- Data-driven: the published palettes are listed in `msr/theme_palettes.py` and `themes.from_palette()` builds MSR's colour names from them. A colour that was too faint to read on its own background is lightened (dark themes) or darkened (light themes) until it meets the same contrast rules as every other theme (text 4.5:1, charts 3:1); Rose Pine's teal "green" is replaced by a true green so Start and OK do not look blue. Start/Stop, OK/Error and the six chart colours are tested to look clearly different in every theme.
+- Credits, sources and licences for each palette are in `THIRD_PARTY_NOTICES.md` and in the Theme window (Arc Blueberry credits Bearded Theme as well; its licence could not be confirmed).
+
 **Themes.** The Dark Mode checkbox is replaced by a **Theme...** button in the bottom bar. Pick a theme in the list and the whole window changes as you click; **OK** keeps it, **Cancel** puts the old one back. No restart.
 
 - Built-in themes: **PowerShell Blue** (the default), Neutral Dark, Light, High Contrast, Midnight Purple and Paper.
