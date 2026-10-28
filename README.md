@@ -177,7 +177,7 @@ python Multi-Stream-Recorder.py [--data-dir DIR] [--config FILE] [--headless] [-
 - **TikTok live but shown offline**: yt-dlp sometimes says "not currently live" for live rooms; MSR cross-checks TikTok's webcast API and logs when it overrides yt-dlp. If neither detects it, re-export TikTok cookies (`msToken`, `ttwid`).
 - **Rumble 403**: install `curl_cffi` and update yt-dlp. Public channels need no login.
 - **Fishtank "could not obtain JWT"**: add `[Fishtank]` email/password or fresh fishtank cookies.
-- **Leftover `.ts` in Recorded** after a crash: they are remuxed on the next start. By hand: `ffmpeg -i in.ts -c copy -movflags +faststart out.mp4`.
+- **Leftover `.ts` in Recorded** after a crash: they are remuxed on the next start, in the background (recording starts immediately). By hand: `ffmpeg -i in.ts -c copy -movflags +faststart out.mp4`.
 - **Changes don't show up**: fully quit (Ctrl+Q) and relaunch.
 
 ## Development

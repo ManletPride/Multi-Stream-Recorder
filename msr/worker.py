@@ -1382,8 +1382,33 @@ def _probe_duration(ffmpeg_path, raw_file):
     return None
 
 
+# Sentinel returncode from _run_remux_cmd when the caller's cancel_event fired
+# and the ffmpeg process was killed.  Real ffmpeg exit codes are never negative
+# on Windows (they are unsigned) and -1 is already the timeout sentinel.
+REMUX_CANCELLED = -2
+
+
+def _lower_priority_popen_kwargs():
+    """Popen kwargs that start a child at below-normal CPU priority.
+
+    Used for background remuxes (startup leftovers) so a multi-GB remux does
+    not starve live recordings.  Windows: BELOW_NORMAL_PRIORITY_CLASS;
+    POSIX: ``nice(10)``.
+    """
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)}
+
+    def _nice():
+        try:
+            os.nice(10)
+        except OSError:
+            pass
+    return {"preexec_fn": _nice}
+
+
 def _run_remux_cmd(ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file, logger, timeout,
-                   file_size, label="Remux", progress_cb=None):
+                   file_size, label="Remux", progress_cb=None,
+                   low_priority=False, cancel_event=None):
     """Run a single ffmpeg remux command, streaming progress to the logger.
 
     ffmpeg is invoked with ``-progress pipe:1 -stats_period 5`` so it writes
@@ -1394,6 +1419,10 @@ def _run_remux_cmd(ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file, logger, timeout,
     Progress log lines are emitted:
       • Every 10 percentage-points of completion (10 %, 20 %, … 90 %)
       • OR at least every 60 seconds if the file is very large and slow
+
+    ``low_priority`` starts ffmpeg at below-normal CPU priority.  If
+    ``cancel_event`` (a ``threading.Event``) becomes set, ffmpeg is killed at
+    the next progress line (<= ~5 s) and ``REMUX_CANCELLED`` is returned.
 
     Returns ``(returncode, stderr_text)``.
     """
@@ -1415,11 +1444,13 @@ def _run_remux_cmd(ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file, logger, timeout,
     stdout_lines = []
     stderr_lines = []
 
+    popen_kwargs = _lower_priority_popen_kwargs() if low_priority else {}
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        **popen_kwargs,
     )
 
     def _read_stream(stream, buf):
@@ -1496,6 +1527,18 @@ def _run_remux_cmd(ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file, logger, timeout,
 
     # ── Read stdout (ffmpeg progress blocks) ─────────────────────────────
     for line in proc.stdout:
+        if cancel_event is not None and cancel_event.is_set():
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+            proc.wait()
+            t_err.join(timeout=5)
+            return REMUX_CANCELLED, "\n".join(stderr_lines)
         line = line.rstrip()
         stdout_lines.append(line)
         if "=" in line:
@@ -1524,8 +1567,13 @@ def _run_remux_cmd(ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file, logger, timeout,
 
 
 def remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, timeout=600,
-                 progress_cb=None):
-    """Remux recorded .ts file to MP4 format."""
+                 progress_cb=None, low_priority=False, cancel_event=None):
+    """Remux recorded .ts file to MP4 format.
+
+    ``low_priority`` / ``cancel_event`` are for background remuxes: ffmpeg runs
+    at below-normal priority, and setting ``cancel_event`` aborts the remux
+    (returns ``(False, 0, "cancelled")``, raw file untouched).
+    """
     # Probe for timed_id3 codec (common in Twitch streams)
     has_timed_id3 = False
     try:
@@ -1562,7 +1610,12 @@ def remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, timeout=600,
             ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file,
             logger, timeout, file_size, label="Remux",
             progress_cb=progress_cb,
+            low_priority=low_priority, cancel_event=cancel_event,
         )
+
+        if returncode == REMUX_CANCELLED:
+            logger.warning("Remux cancelled")
+            return False, 0, "cancelled"
 
         if returncode == -1:
             logger.error("Remux timed out")
@@ -1597,7 +1650,11 @@ def remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, timeout=600,
                         fallback_cmd, ffmpeg_path, raw_file, mp4_file,
                         logger, timeout, file_size, label="Fallback remux",
                         progress_cb=progress_cb,
+                        low_priority=low_priority, cancel_event=cancel_event,
                     )
+                    if fb_code == REMUX_CANCELLED:
+                        logger.warning("Remux cancelled")
+                        return False, 0, "cancelled"
                     if fb_code == 0 and os.path.exists(mp4_file):
                         mp4_size = os.path.getsize(mp4_file)
                         if mp4_size > 5 * 1024**2:
