@@ -178,13 +178,72 @@ class CreditTests(unittest.TestCase):
             c = spec["credit"]
             for needle in (spec["name"], c["port"], c["upstream_url"], c["upstream"], c["port_license"], c["upstream_license"]):
                 self.assertIn(needle, self.notices, f"{spec['name']}: {needle}")
-        for needle in ("Omarchy", "David Heinemeier Hansson", "MIT", "Apache-2.0", "Bearded Theme", "could not be confirmed"):
+        for needle in ("Omarchy", "David Heinemeier Hansson", "MIT"):
             self.assertIn(needle, self.notices, needle)
 
-    def test_arc_blueberry_credits_bearded_theme_and_flags_the_licence(self):
-        c = next(p for p in theme_palettes.PALETTES if p["name"] == "Arc Blueberry")["credit"]
-        self.assertIn("Bearded", c["upstream"])
-        self.assertIn("could not be confirmed", c["upstream_license"])
+    def test_no_licence_is_left_unconfirmed(self):
+        for needle in ("could not be confirmed", "not checked", "unconfirmed", "Apache-2.0"):
+            self.assertNotIn(needle, self.notices, needle)
+        for spec in theme_palettes.PALETTES:
+            for text in spec["credit"].values():
+                self.assertNotIn("could not be confirmed", text)
+                self.assertNotIn("not checked", text)
+
+    def test_every_credit_names_an_author_and_a_licence(self):
+        for spec in theme_palettes.PALETTES:
+            c = spec["credit"]
+            self.assertRegex(c["upstream_license"], r"(MIT|GPL)", spec["name"])
+            self.assertIn("Copyright (c)", c["upstream_license"], spec["name"])
+
+    def credit_of(self, name):
+        return next(p for p in theme_palettes.PALETTES if p["name"] == name)["credit"]
+
+    def test_tokyo_themes_credit_enkia_with_the_full_mit_text(self):
+        for name in ("Tokyo Night OLED", "Tokyo Day"):
+            c = self.credit_of(name)
+            self.assertIn("Enkia", c["upstream"])
+            self.assertEqual(c["upstream_url"], "https://github.com/tokyo-night/tokyo-night-vscode-theme")
+            self.assertEqual(c["upstream_license"], "MIT, Copyright (c) 2018-present Enkia")
+            self.assertIn("Enkia", themes.THEMES[name].credit_line())
+        self.assertIn("Tokyo Night: color palette adapted from https://github.com/tokyo-night/tokyo-night-vscode-theme", self.notices)
+        self.assertIn("Copyright (c) 2018-present Enkia", self.notices)
+        self.assertIn("Alexey Konoplev", self.credit_of("Tokyo Day")["upstream"])
+
+    def test_arc_blueberry_credits_beardedbear_and_vale(self):
+        c = self.credit_of("Arc Blueberry")
+        self.assertIn("BeardedBear", c["upstream"])
+        self.assertEqual(c["upstream_url"], "https://github.com/BeardedBear/bearded-theme")
+        self.assertIn("MIT as of 2021 (Copyright (c) 2021 BeardedBear)", c["upstream_license"])
+        self.assertIn("GPL-3.0 since 2023-04-14", c["upstream_license"])
+        self.assertIn("Only color values are used; no code or images", c["upstream_license"])
+        self.assertEqual(c["port"], "https://github.com/vale-c/omarchy-arc-blueberry")
+        self.assertEqual(c["port_license"], "MIT, Copyright (c) 2025 Vale")
+        line = themes.THEMES["Arc Blueberry"].credit_line()
+        self.assertIn("BeardedBear", line)
+        self.assertIn("Vale", line)
+        self.assertIn("Copyright (c) 2021 BeardedBear", self.notices)
+        self.assertIn("Copyright (c) 2025 Vale", self.notices)
+        self.assertIn("src/variations/arc.ts", self.notices)
+
+    def test_omarchy_is_credited_once_with_its_licence_text(self):
+        self.assertIn("Omarchy theme system and palettes: MIT, Copyright (c) David Heinemeier Hansson", self.notices)
+        self.assertIn("https://github.com/omacom/omarchy", self.notices)
+        self.assertEqual(self.notices.count("### Omarchy (https://github.com/omacom/omarchy)"), 1)
+
+    def test_every_mit_notice_carries_the_full_permission_text(self):
+        holders = ("2018-present Enkia", "2025 Vale", "2021 BeardedBear", "2021 Catppuccin", "2023 Ros\u00e9 Pine",
+                   "2020 sainnhe", "2023 Dracula Theme", "2023 Steph Ango", "2023 Rauno Freiberg",
+                   "2011 Ethan Schoonover", "2025 Euan", "2026 Alexey Konoplev")
+        permission = "Permission is hereby granted, free of charge, to any person obtaining a copy"
+        flat = " ".join(self.notices.split())  # the projects wrap their licence text differently
+        self.assertGreaterEqual(flat.count(permission), len(holders) + 1)
+        for h in holders:
+            self.assertIn("Copyright (c) " + h, self.notices, h)
+        self.assertGreaterEqual(flat.count("THE SOFTWARE IS PROVIDED \"AS IS\""), len(holders) + 1)
+
+    def test_catppuccin_notice_is_honest_about_the_missing_licence_file(self):
+        self.assertIn("no LICENSE file", self.credit_of("Catppuccin Mocha OLED")["port_license"])
+        self.assertIn("has no LICENSE file", self.notices)
 
     def test_the_notices_file_holds_no_local_paths_or_secrets(self):
         for needle in ("C:\\", "E:\\", "config.ini", "cookie", "password"):

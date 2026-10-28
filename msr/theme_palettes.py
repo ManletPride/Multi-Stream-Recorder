@@ -13,6 +13,9 @@ Keys per palette:
   credit                   who made the palette and under which licence; shown in the Theme window and in
                            THIRD_PARTY_NOTICES.md (a test keeps the three in step)
 
+Credits: every ``credit`` names the original author and licence (read from each project's LICENSE file); the
+notices file spells the full licence texts out.
+
 Skipped on purpose (see docs): Artzen (no real status colours, no licence), Evergarden and Modus
 Operandi (GPL-3.0), Milky Matcha and Ristretto Light (palettes too faint to keep their look).
 """
@@ -25,9 +28,9 @@ PALETTES: tuple[dict, ...] = (
         red="#e35535", green="#3cec85", yellow="#eacd61", blue="#69c3ff", magenta="#f38cec", cyan="#22ecdb",
         orange="#e9954f", lighter="#1a1e33", darker="#0d101b",
         credit=dict(
-            port="https://github.com/vale-c/omarchy-arc-blueberry", port_license="MIT (c) 2025 Vale",
-            upstream="Bearded Theme Arc Blueberry by BeardedBear", upstream_url="https://github.com/BeardedBear/bearded-theme",
-            upstream_license="GitHub lists GPL-3.0 for the Bearded Theme repository; the licence of this one variant could not be confirmed",
+            port="https://github.com/vale-c/omarchy-arc-blueberry", port_license="MIT, Copyright (c) 2025 Vale",
+            upstream="Arc Blueberry from Bearded Theme by BeardedBear (src/variations/arc.ts)", upstream_url="https://github.com/BeardedBear/bearded-theme",
+            upstream_license="MIT as of 2021 (Copyright (c) 2021 BeardedBear); GPL-3.0 since 2023-04-14. Only color values are used; no code or images",
             file="colors.toml"),
     ),
     dict(
@@ -35,9 +38,10 @@ PALETTES: tuple[dict, ...] = (
         bg="#010101", fg="#cdd6f4", selection="#f5e0dc", accent="#89b4fa",
         red="#f38ba8", green="#a6e3a1", yellow="#f9e2af", blue="#89b4fa", magenta="#f5c2e7", cyan="#94e2d5",
         credit=dict(
-            port="https://github.com/Luquatic/omarchy-catppuccin-dark", port_license="none (README says MIT, no LICENSE file)",
+            port="https://github.com/Luquatic/omarchy-catppuccin-dark", port_license="none (the README says MIT, but the repository has no LICENSE file)",
             upstream="Catppuccin Mocha by the Catppuccin organisation", upstream_url="https://github.com/catppuccin/catppuccin",
-            upstream_license="MIT (c) 2021 Catppuccin", file="colors.toml"),
+            upstream_license="MIT, Copyright (c) 2021 Catppuccin",
+            file="colors.toml"),
     ),
     dict(
         name="Rose Pine", dark=True, group="dark",
@@ -51,7 +55,8 @@ PALETTES: tuple[dict, ...] = (
         credit=dict(
             port="https://github.com/guilhermetk/omarchy-rose-pine-dark", port_license="none (no LICENSE file)",
             upstream="Rose Pine by the Rose Pine project", upstream_url="https://github.com/rose-pine/rose-pine-theme",
-            upstream_license="MIT (c) 2023 Rose Pine", file="colors.toml"),
+            upstream_license="MIT, Copyright (c) 2023 Rosé Pine",
+            file="colors.toml"),
     ),
     dict(
         name="Gruvbox Material", dark=True, group="dark",
@@ -61,7 +66,8 @@ PALETTES: tuple[dict, ...] = (
         credit=dict(
             port="https://github.com/curbol/omarchy-gruvbox-material", port_license="none (no LICENSE file)",
             upstream="Gruvbox Material by sainnhe", upstream_url="https://github.com/sainnhe/gruvbox-material",
-            upstream_license="MIT (c) 2020 sainnhe", file="colors.toml"),
+            upstream_license="MIT, Copyright (c) 2020 sainnhe",
+            file="colors.toml"),
     ),
     dict(
         name="Dracula", dark=True, group="dark",
@@ -71,16 +77,18 @@ PALETTES: tuple[dict, ...] = (
         credit=dict(
             port="https://github.com/catlee/omarchy-dracula-theme", port_license="none (no LICENSE file)",
             upstream="Dracula Theme", upstream_url="https://github.com/dracula/dracula-theme",
-            upstream_license="MIT (c) 2023 Dracula Theme", file="colors.toml"),
+            upstream_license="MIT, Copyright (c) 2023 Dracula Theme",
+            file="colors.toml"),
     ),
     dict(
         name="Flexoki Dark", dark=True, group="dark",
         bg="#100f0f", fg="#cecdc3", selection="#403e3c", accent="#4385be",
         red="#d14d41", green="#879a39", yellow="#d0a215", blue="#4385be", magenta="#ce5d97", cyan="#3aa99f",
         credit=dict(
-            port="https://github.com/euandeas/omarchy-flexoki-dark-theme", port_license="MIT (c) 2025 Euan",
+            port="https://github.com/euandeas/omarchy-flexoki-dark-theme", port_license="MIT, Copyright (c) 2025 Euan",
             upstream="Flexoki by Steph Ango", upstream_url="https://github.com/kepano/flexoki",
-            upstream_license="MIT (c) 2023 Steph Ango", file="colors.toml (ANSI bright colours)"),
+            upstream_license="MIT, Copyright (c) 2023 Steph Ango",
+            file="colors.toml (ANSI bright colours)"),
     ),
     dict(
         name="Vesper", dark=True, group="dark",
@@ -90,7 +98,8 @@ PALETTES: tuple[dict, ...] = (
         credit=dict(
             port="https://github.com/thmoee/omarchy-vesper-theme", port_license="none (no LICENSE file)",
             upstream="Vesper by Rauno Freiberg", upstream_url="https://github.com/raunofreiberg/vesper",
-            upstream_license="MIT (c) 2023 Rauno Freiberg", file="alacritty.toml, hyprland.conf"),
+            upstream_license="MIT, Copyright (c) 2023 Rauno Freiberg",
+            file="alacritty.toml, hyprland.conf"),
     ),
     dict(
         name="Tokyo Night OLED", dark=True, group="dark",
@@ -99,8 +108,8 @@ PALETTES: tuple[dict, ...] = (
         orange="#ff9e64",
         credit=dict(
             port="https://github.com/Justin-De-Sio/omarchy-tokyoled-theme", port_license="none (no LICENSE file)",
-            upstream="Tokyo Night (colour scheme by enkia; see also folke/tokyonight.nvim)", upstream_url="https://github.com/folke/tokyonight.nvim",
-            upstream_license="folke/tokyonight.nvim is Apache-2.0; the original Tokyo Night licence was not checked",
+            upstream="Tokyo Night by Enkia", upstream_url="https://github.com/tokyo-night/tokyo-night-vscode-theme",
+            upstream_license="MIT, Copyright (c) 2018-present Enkia",
             file="colors.toml"),
     ),
     dict(
@@ -109,9 +118,9 @@ PALETTES: tuple[dict, ...] = (
         red="#ad3459", green="#456a27", yellow="#80601c", blue="#3760bf", magenta="#7848ab", cyan="#006b7d",
         orange="#a34d28", lighter="#f7f8fc", darker="#d2d9e9",
         credit=dict(
-            port="https://github.com/lexeko/omarchy-tokyo-day-theme", port_license="MIT (c) 2026 Alexey Konoplev, (c) David Heinemeier Hansson",
-            upstream="Tokyo Night (Omarchy's Tokyo Night theme, light companion)", upstream_url="https://github.com/folke/tokyonight.nvim",
-            upstream_license="folke/tokyonight.nvim is Apache-2.0; the original Tokyo Night licence was not checked",
+            port="https://github.com/lexeko/omarchy-tokyo-day-theme", port_license="MIT, Copyright (c) 2026 Alexey Konoplev, Copyright (c) David Heinemeier Hansson",
+            upstream="Tokyo Night by Enkia (light companion made by Alexey Konoplev)", upstream_url="https://github.com/tokyo-night/tokyo-night-vscode-theme",
+            upstream_license="MIT, Copyright (c) 2018-present Enkia",
             file="colors.toml"),
     ),
     dict(
@@ -122,6 +131,7 @@ PALETTES: tuple[dict, ...] = (
         credit=dict(
             port="https://github.com/dfrico/omarchy-solarized-light-theme", port_license="none (no LICENSE file)",
             upstream="Solarized by Ethan Schoonover", upstream_url="https://github.com/altercation/solarized",
-            upstream_license="MIT (c) 2011 Ethan Schoonover", file="alacritty.toml, btop.theme"),
+            upstream_license="MIT, Copyright (c) 2011 Ethan Schoonover",
+            file="alacritty.toml, btop.theme"),
     ),
 )

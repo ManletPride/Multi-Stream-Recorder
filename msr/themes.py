@@ -126,7 +126,8 @@ class Theme:
         c = self.credit
         if not c:
             return ""
-        return f"Palette: {c['upstream']}, via the Omarchy theme {c['port']} ({c['port_license']})."
+        return (f"Palette: {c['upstream']} ({c['upstream_license']}), "
+                f"via the Omarchy theme {c['port']} ({c['port_license']}).")
 
     def __repr__(self) -> str:
         return f"Theme({self.name!r}, dark={self.dark})"
