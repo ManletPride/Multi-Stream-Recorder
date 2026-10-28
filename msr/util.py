@@ -707,11 +707,12 @@ COOKIE_STATUS_MISSING = 'missing'   # no cookie for this domain at all
 COOKIE_STATUS_EXPIRED = 'expired'   # domain present but auth cookie expired
 COOKIE_STATUS_UNKNOWN = 'unknown'   # can't determine (no cookies file, etc.)
 
-COOKIE_DOT_COLORS = {
-    COOKIE_STATUS_PRESENT: '#4CAF50',   # green
-    COOKIE_STATUS_MISSING: '#F44336',   # red
-    COOKIE_STATUS_EXPIRED: '#FF9800',   # orange
-    COOKIE_STATUS_UNKNOWN: '#888888',   # grey
+# which theme token colours the cookie dot for each status (msr/themes.py has the colours)
+COOKIE_DOT_TOKENS = {
+    COOKIE_STATUS_PRESENT: 'ok',
+    COOKIE_STATUS_MISSING: 'error',
+    COOKIE_STATUS_EXPIRED: 'warn',
+    COOKIE_STATUS_UNKNOWN: 'muted',
 }
 
 
@@ -1032,6 +1033,34 @@ def open_local_path(path):
         subprocess.Popen(["open", path])
     else:
         subprocess.Popen(["xdg-open", path])
+
+
+def reveal_in_file_browser(path):
+    """Open the file browser with this file selected (Explorer /select, Finder -R; elsewhere its folder)."""
+    path = os.path.abspath(path)
+    if os.name == "nt":
+        subprocess.Popen(["explorer", f"/select,{path}"])
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", path])
+    else:
+        subprocess.Popen(["xdg-open", os.path.dirname(path)])
+
+
+def open_existing_folder(configured, default="", opener=None):
+    """Open the folder named by a config value (blank = `default`) with the same helper as the
+    Clips button. Creates nothing. Returns (opened, message): `message` explains a refusal in
+    words fit for a themed popup (the path is shown to the user on screen only)."""
+    path = (configured or "").strip() or (default or "").strip()
+    if not path:
+        return False, "No recordings folder is set. Choose one in config.ini ([Paths] streams_dir)."
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isdir(path):
+        return False, f"The recordings folder does not exist yet:\n{path}\n\nIt is created when the first recording starts."
+    try:
+        (opener or open_local_path)(path)
+    except OSError as exc:
+        return False, f"Could not open the recordings folder:\n{path}\n\n{exc}"
+    return True, path
 
 
 # ────────────────────────────────────────────────
@@ -1812,4 +1841,3 @@ def setup_child_logging(root_path, channel_key):
     return logging.LoggerAdapter(
         logging.getLogger(), {'channel': redact_for_log(channel_key)}
     )
-

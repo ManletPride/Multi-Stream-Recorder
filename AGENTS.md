@@ -10,7 +10,7 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 
 | Path | Role |
 | --- | --- |
-| `Multi-Stream-Recorder.py` | Thin launcher only (`main()`, `--headless`). Users still run this. |
+| `Multi-Stream-Recorder.py` | Thin launcher only (`main()`, `--headless`, `--json`, `--json --library`). Users still run this. |
 | `msr/gui.py` | Tkinter UI (`main_gui`) |
 | `msr/worker.py` | `record_worker` (multiprocessing target), clips, remux, monitor |
 | `msr/platforms.py` | Per-site live checks, Fishtank auth, ffmpeg/yt-dlp/streamlink command builders |
@@ -20,6 +20,21 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 | `msr/apply_update.py` | Temp helper: wait for PID, copy staged files, relaunch (no `msr` import) |
 | `msr/config.py` | `Config` / `config.ini` defaults (`default_streams_dir()`, coerce invalid numbers) |
 | `msr/deps.py` | `HAS_*` flags, tool versions, optional `psutil` / tray / plyer imports |
+| `msr/themes.py` | The ONLY file with colour values; no tkinter. `Theme` (name, dark flag, semantic tokens), the built-in list, `current()/set_current()`, `resolve_saved()` (config migration), WCAG helpers, user themes from `<data>/themes/*.json` |
+| `msr/themeui.py` | `apply_ttk(root, style, theme)`: every ttk style, drop-down lists, `menu_colors` |
+| `msr/theme_dialog.py` | The **Theme...** window (live preview, OK / Cancel, Open themes folder, Reload) |
+| `msr/dialogs.py` | Themed popups: `show_info/warning/error`, `ask_yes_no`, `ask_int/float`, `new_dialog` + `present` for custom ones. Always parented, centred, caption themed (via `wintheme`) before positioning. Never call `messagebox`/`simpledialog` directly; `tests/test_chrome_guards.py` fails on any call without `parent=` and on a Toplevel without the themed caption |
+| `msr/logview.py` | `LogFollower`: the Log tab only follows new lines while scrolled to the bottom; a New lines button appears when behind. Also the filter (words + minimum level; `GuiFormatter` tags WARNING/ERROR lines), search highlighting and `open_log_file` |
+| `msr/history.py` | Last-20 version history of `channels.json` / `config.ini` in git-ignored `msr_history/<file>/<stamp>.bak`, written by `snapshot()` before every overwrite (`Config._write`, `save_channels`). `summarize()` masks anything `is_sensitive` (passwords, e-mail, keys, cookies): never show raw ini values in a restore list. History failure must never block a save |
+| `msr/restore_dialog.py` | Themed "Restore previous..." window (the `\u22ef` menu beside About). Restore snapshots the current file first, so it can be undone; channel restore is refused while recording |
+| `msr/winstate.py` | Window size/place memory: main window geometry clamped to the current monitors, per-dialog geometry merged into `window_state.json["dialogs"]` (merge, never rewrite the file), negative places written `+-N` |
+| `msr/status.py` | `--json` snapshot. Read-only; no secrets, no absolute paths, custom URLs reduced to the host. `--json --library` adds the opt-in `library` section |
+| `msr/library.py` | Library statistics: `scan_library` (listing + file sizes only, never opens a video), `Roots`/`roots_from_config` (optional `[Library] extra_dirs`), `DurationCache` + `count_hours` (opt-in recorded time), `summary_text`, `to_dict`, `ScanJob` (background thread feeding a `queue.Queue`) |
+| `msr/charts.py` | Tk Canvas charts in the app theme: `BarChart`, `DonutChart`, `ColumnChart` with hover tooltips (no matplotlib) |
+| `msr/library_window.py` | `LibraryPanel`: the **Library** tab of the main notebook (headline, clickable charts, multi-select channel table, Count hours, Copy summary, Open folder, Delete...) |
+| `msr/library_actions.py` | File management logic, **no tkinter**: `Guard` (what may ever be touched), `build_plan` (dry run), `execute`/`ActionJob` (background, cancellable), movers (PendingDeletion, Recycle Bin via `SHFileOperationW`, permanent), `Manifest` (undo), `ActionLog`, `pending_info`, `build_suggestions` |
+| `msr/library_dialog.py` | `ActionDialog`: the review window every delete goes through (scope filters, ticks, method, typed confirmation) |
+| `msr/library_manage.py` | `Manager` + the **Files**, **PendingDeletion** and **Clean up** tabs; `ManageContext` is what `gui.py` hands over (busy callback, log paths, openers) |
 | `msr/iometer.py` | Status-header disk write / NIC download rates (`IoSampler`) |
 | `msr/__init__.py` | `__version__` (currently `2.1.0`) |
 | `SECURITY.md` | Vulnerability reporting; what is stored on disk |
@@ -29,6 +44,24 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 Do not fold these back into one file without an explicit request. On Windows, `mp.set_start_method('spawn')` pickles `msr.worker.record_worker` — that function **must stay top-level in `msr.worker`**.
 
 After editing Python, the running GUI does **not** reload modules. The user must fully quit and relaunch to pick up clip/worker changes.
+
+## Library tab (`msr/library.py`, `msr/charts.py`, `msr/library_window.py`)
+
+Size per site / channel / month of the recordings, and (since the manage feature) a way to clean up. **The scan and charts stay read-only**; everything that changes files lives in `msr/library_actions.py` and is reached only through the review window (`library_dialog.py`). Never add a one-click delete.
+
+- **Read-only and cheap by default.** The scan only lists folders (`os.scandir`) and reads sizes and times from the entries; it never opens a video and never runs ffprobe. Recorded time is opt-in (**Count hours**): `.meta.json` sidecars first, ffprobe only if the user agrees, one file at a time, rate-limited, cancellable.
+- **Background thread, never Tk.** `ScanJob` talks to the UI through a `queue.Queue` that `LibraryPanel._poll` drains with `after`. The tab scans the first time it is opened (`activate()`), not at startup. Do not add another header or bottom-bar button: both are already full at the minimum window width, which is why this is a tab.
+- **Where things live.** The only file written is the remembered-durations cache `library_cache.json` in the data folder (git-ignored, keyed by path + mtime + size). Nothing is ever written in the recordings folders. Tests use temp trees.
+- **Public repo.** `summary_text`, `to_dict` and `--json --library` carry channel names and sizes only: no absolute paths (extra folders are labelled "Other folder N"). Channel folder paths exist in memory only for **Open folder**.
+- **Layout it understands.** `<streams_dir>/Recorded|Processed|PendingDeletion/<platform>/<channel>/...` (folder names matched case-insensitively), the clips dir (`clips_dir` or `streams_dir/Clips`), custom URLs as `custom/<site>/<user>`. Reparse points (junctions, symlinks) are skipped, in-progress `.ts` / `.part` files are counted as raw, channels not in the roster are flagged, not hidden.
+- GUI names inside `main_gui` follow the rule above (`library_panel`, `_library_panel`, `_library_tab_opened`, `_library_busy`, `_library_purge_settings`, `library_data_dir`).
+
+### Managing files (the safety rules; do not weaken them)
+
+- **Default is reversible**: *Move to PendingDeletion*. MSR purges that folder only **at app start** (`purge_old_pending_files`, `Cleanup/auto_purge_days`), aging by `max(mtime, ctime)`; a rename keeps both, so the mover **resets mtime to now** and keeps the original in `library_moves.json` (restore puts the date back). Recycle Bin (`SHFileOperationW`, `FOF_ALLOWUNDO`, no new dependency) is offered only when the registry shows the bin's limit and the plan fits; **Delete permanently** needs the typed channel name or `DELETE`.
+- **`Guard.check` runs twice** per file: when the plan is built (dry run) and again right before each file. It refuses anything outside the Processed / Recorded / PendingDeletion / Clips folders (extra Library folders are scan-only), links/junctions on the way, files directly in a top folder, unknown file types (only recordings, raw/partial, clips, screenshots, `.meta.json`), files changed since the preview, files modified in the last 10 minutes, and **any channel or file the recorder is working on** (`busy_from_status` over `recorder.status_dict`; if that callback fails everything is blocked).
+- **No action while a scan or another action runs**, or if the action log cannot be written. Every action appends JSON lines to `library_actions.log` and a summary goes to the Log tab. `library_actions.log` and `library_moves.json` are in the data folder and git-ignored.
+- Tests use temp trees only and inject fake movers (`ManageContext.deleters`); `tests/test_gui_smoke.py` runs the real hidden app with a fake mover. Never point a test at a real library.
 
 ## Instant clips (`create_clip` in `msr/worker.py`)
 
@@ -54,6 +87,7 @@ Verified live 15s clips (video start is AAC/B-frame delay, not a freeze):
 Related UI:
 
 - **Clip Now** and **Screenshot** buttons on the Status header (same actions as right-click). Debounced per channel+kind.
+- **Streams** button (left of Clips) opens `streams_dir` (blank falls back to the default folder) through `msr.util.open_existing_folder`, which uses the same `open_local_path` as Clips, creates nothing, and shows a themed message if the folder is missing. Keep the header row's requested width under the 1060 px minimum window (`tests/test_gui_smoke.py::StreamsButtonTests` measures it); put anything more on a row of its own.
 - **Clips** button (left of Screenshot) opens that channel’s clips/screenshots folder (`clips_dir` or `streams_dir/Clips`). Does not need an active recording. Same action as right-click **Open Clips Folder**.
 - Clip/screenshot **filenames** use `channel_file_stem(username_dir)` (last folder only). Do not interpolate a nested `username_dir` (`chaturbate\\mode_bad`) into the filename — Windows treats the `\\` as another directory.
 - Status rows store the real channel key in a hidden `_key` column — never map selection by display name (`kick foo` vs `twitch:foo`).
@@ -88,6 +122,14 @@ Status-tab stills from the live `.ts`. Constants in `msr/gui.py`: `PREVIEW_W`/`P
 
 - **Dialog title bars:** `msr/wintheme.py` `set_title_bar_dark(win, dark)` (DWM attribute 20, then 19, on the `wm_frame()` HWND after `update_idletasks`, then SWP_FRAMECHANGED to repaint). The main window, the Add channel dialog, and the custom poll/clip `simpledialog` prompts (via `watch_new_dialogs` before the blocking call) use it; `apply_theme` re-themes open dialogs. Native `messagebox` dialogs are OS-owned and can't be themed.
 
+## Themes (`msr/themes.py`)
+- **Never write a colour in code.** Use `themes.current()["token"]` (or `Muted.TLabel` / `Warn.TLabel` / `Error.TLabel` / `Ok.TLabel` styles). A new colour need means a new token in `COLOR_TOKENS` and a value in every theme. `tests/test_theme_guard.py` scans `msr/*.py` for hex and named colours (one explained allowlist entry) and `tests/test_themes.py` checks every theme for completeness and WCAG contrast (`TEXT_PAIRS` at least 4.5:1, `GRAPHIC_PAIRS` chart colours at least 3:1).
+- **Add a theme:** one `_add(_make("Name", dark_flag, bg=..., ...))` entry in `msr/themes.py`. `_make` fills tokens you leave out (hover, selection, caption, chart tones); `**_SITES_DARK` / `_SITES_LIGHT` / `_SITES_HC` give the per-site chart colours. The Theme window, config migration and tests pick it up from the list.
+- Applying: `apply_theme()` in `main_gui` calls `themeui.apply_ttk`, recolours the classic Tk widgets, the log tags, the roster, menus, the caption (`wintheme.set_title_bar_dark` uses the theme's dark flag and, on Windows 11, its caption colours) and `LibraryPanel.refresh_theme()` (charts, site colours, tooltips). Code that draws with its own colours (canvases, tooltips, dialogs) must read `themes.current()` when it draws, not at import.
+- Config: `[GUI] theme = <name>` is written only when the user confirms a theme (it is deliberately not in `DEFAULT_CONFIG`, so migration can see it is unset). `dark_mode` is still read (window_state.json first, then config.ini) and kept in step. `true` migrates to PowerShell Blue, `false` to Light. An unknown saved name falls back the same way.
+- User themes: `<data>/themes/*.json` (git-ignored), max 20 files of 20 KB, `{"name", "base", "dark", "colors"}`; only known tokens with `#rrggbb`; a bad file is ignored and listed in the Theme window. Built-in names cannot be replaced.
+- `tests/test_theme_smoke.py` launches the real window hidden and applies every theme through the Theme window, checking widget and chart colours, the tooltip, the saved config and the bottom-bar width at 1100 and 1060 px.
+
 ## Other behavior that must not regress
 
 - **Remove channel** calls `StreamRecorder.remove_channel()` so the worker is killed; do not only delete the GUI list entry.
@@ -105,9 +147,9 @@ Status-tab stills from the live `.ts`. Constants in `msr/gui.py`: `PREVIEW_W`/`P
 - **Config coercion:** `Config._coerce_values` rewrites unparseable/out-of-range numbers and bools to defaults before workers spawn. Workers still use `parser_get*` so a bad dict cannot `ValueError` on `getfloat`. Do not warn “using default” without actually setting the value.
 - **Custom URL folders:** `custom_url_folder_names()` is the single mapping used by `record_worker` and `channel_key_to_dirs`. Chaturbate-style `https://site.com/user/` goes to `custom/site/user/`. No path username → keep the old `custom/site/` bag. TikTok custom URLs stay `custom/<handle>/` (do not nest under `tiktok/`, existing files live there). Background cleaner walks one extra directory level so both the bag and nested user folders are remuxed.
 - **Cookie dots** redraw from tree events / `yview`, not a 500ms idle loop.
-- **Disk / NIC meters** (Status header, left of Screenshot) are whole-disk write and whole-NIC download from `psutil`. MSR-only write rate uses worker `size_bytes` on the status dict — do **not** `listdir` the recordings folder on the GUI 1s tick. Tooltip holds stream Mbps from the status detail string. Hidden when `psutil` is missing. Sample with `root.after(1000)`. On Windows, map `streams_dir` to `PhysicalDriveN` via `IOCTL_STORAGE_GET_DEVICE_NUMBER`.
+- **Disk / NIC meters** (a thin right-aligned row under the Status header: the header's four buttons already fill it at the 1100 px default and the meter was being clipped to ~120 px) are whole-disk write and whole-NIC download from `psutil`. MSR-only write rate uses worker `size_bytes` on the status dict — do **not** `listdir` the recordings folder on the GUI 1s tick. Tooltip holds stream Mbps from the status detail string. Hidden when `psutil` is missing. Sample with `root.after(1000)`. On Windows, map `streams_dir` to `PhysicalDriveN` via `IOCTL_STORAGE_GET_DEVICE_NUMBER`.
 - **Stop Recording** / per-channel stop join process trees on a background thread. Do not call `recorder.stop()` or `stop_channel()` on the Tk thread (the GUI freezes for 10s×N). `_full_quit` may still stop synchronously before `os._exit`.
-- **Bottom toolbar** packs `side=RIGHT` (first = rightmost). Pack each combobox *before* its label so the caption sits to the left of *that* dropdown: `Clip Length: [combo]  Polling: [combo]  Dark Mode`. Do not pack the label first — that put “Clip Length:” on the poll combo and “Check Now” on the clip combo.
+- **Bottom toolbar** packs `side=RIGHT` (first = rightmost). Pack each combobox *before* its label so the caption sits to the left of *that* dropdown: `Clip Length: [combo]  Polling: [combo]  Theme...`. Do not pack the label first — that put “Clip Length:” on the poll combo and “Check Now” on the clip combo.
 - **GUI log queue** is bounded (`Queue(maxsize=2000)`, drop-oldest). Do not use an unbounded `Queue`.
 - **`check_disk_space`** fails closed when the path is not writable. Do not `return True, 0` on `disk_usage` errors.
 - **Kick records with streamlink.** Do not log “yt-dlp failed” on a missing Kick file; the retry is another streamlink argv.
@@ -122,6 +164,7 @@ Status-tab stills from the live `.ts`. Constants in `msr/gui.py`: `PREVIEW_W`/`P
 - **TikTok offline fallback** (`check_tiktok_live_webcast`): yt-dlp `"not currently live"` is not authoritative for 24/7 LIVEs. Try `/api-live/user/room?uniqueId=` first (no roomId needed), then `roomId` on the profile **and** `/@user/live`, then `webcast.us` / `webcast.tiktok.com`. Status 2 = live; leftover roomId with status 4 is not. Log misses at **info**, not debug.
 - **Cookies:** MSR never refreshes `cookies.txt`. It only reads it (roster dots every 5 minutes) and passes `--cookies` to tools. User re-exports from the browser. Do not replace the whole jar with a Rumble-only dump — merge would wipe YouTube/Twitch/Kick/TikTok rows.
 - **Git:** ignore `config.ini`, `cookies.txt`, `channels.json`, `window_state.json`, `kick_channel_ids.json`, recordings dirs, `.venv/`, `venv/`, `.msr_write_probe`. Do **not** ignore `msr/`, `tests/`, `AGENTS.md`, `CHANGELOG.md`, `SECURITY.md`, `.github/`, or `channels_fishtank.json`.
+- **`main_gui` is one closure.** A widget or function name bound twice there silently replaces the first for every other function (a second `filter_entry` made `apply_theme` crash on start; under `pythonw` that looks like a window that flashes and vanishes, with no log line). Give new widgets a unique prefix. `tests/test_gui_smoke.py` fails on duplicate names and launches the real window hidden (`MSR_SMOKE_TEST=1`, dark and light) against a temp data dir. To see a startup traceback, run with `python` (not `pythonw`) from a console.
 - Worker status while recording includes **`size_bytes`** (int) for the header meter. Do not drop that field; the GUI must not `listdir` recording folders on the 1s tick.
 
 ## Run

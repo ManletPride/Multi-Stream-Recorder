@@ -55,3 +55,16 @@ log_output*.txt
 
 # Cross-process log rotation lock
 *.rotating
+
+# Your own colour themes (themes/*.json in the data folder)
+themes/
+
+# Version history of channels.json / config.ini (Restore previous...)
+msr_history/
+
+# Remembered video lengths for the Library window (Count hours)
+library_cache.json
+library_cache.json.tmp
+library_actions.log
+library_moves.json
+library_moves.json.tmp

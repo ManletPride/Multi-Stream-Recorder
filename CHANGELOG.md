@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+**Themes.** The Dark Mode checkbox is replaced by a **Theme...** button in the bottom bar. Pick a theme in the list and the whole window changes as you click; **OK** keeps it, **Cancel** puts the old one back. No restart.
+
+- Built-in themes: **PowerShell Blue** (the default), Neutral Dark, Light, High Contrast, Midnight Purple and Paper.
+- Every colour in the app now comes from one place, `msr/themes.py` (semantic tokens: backgrounds, text, buttons, Start/Stop, log levels, status colours, chart series and per-site colours, tooltips, caption). A test scans the source and fails on any hard-coded colour elsewhere, and another checks WCAG contrast in every theme (text at least 4.5:1, chart colours at least 3:1 against their background).
+- The choice is saved as `[GUI] theme` in `config.ini`. Existing installs migrate on their own: `dark_mode = true` starts in PowerShell Blue, `false` in Light. The old key is still read and is kept in step when you pick a theme, so an older version keeps working.
+- The Library charts, hover tooltips, roster, log, dialogs, drop-down lists, menus and the Windows title bar (colours too on Windows 11) all follow the theme live.
+- Your own themes: put `*.json` files in a `themes` folder in the data folder (the Theme window has **Open themes folder** and **Reload**, and writes a how-to sample). Only known colour names with `#rrggbb` values are accepted; a bad file is ignored and listed in the window. A new built-in theme is one entry in `msr/themes.py`.
+
+UI overhaul: themed popups, calmer Logs tab, Restore previous, window memory, Library tab, status snapshot.
+
+- Popups and dialogs are themed, parented to the window and centred; the native message boxes are gone. A test guards this.
+- **Streams** button beside Clips opens the recordings folder (`streams_dir`); it creates nothing and shows a themed message if the folder is missing. The disk/network meter moved to its own thin row under the Status header so the buttons fit at the default window width.
+- Logs tab follows new lines only while you are scrolled to the bottom; a **New lines** button appears when you are scrolled back.
+- Fixed a startup crash (the window flashed and vanished under `pythonw`) caused by the Log filter box reusing the roster filter's name; a hidden-window smoke test now launches the real UI in dark and light mode.
+- **Restore previous...**: the last 20 versions of `channels.json` and `config.ini` are kept in `msr_history/` (git-ignored) and can be restored from the `...` button beside About. Passwords and other secrets are masked in the list.
+- Windows and dialogs remember their size and place (clamped back on screen if a monitor is gone) and can be dragged by their background.
+- Log tab: filter box, level drop-down, search highlighting, coloured warnings/errors, Ctrl+F, **Open log file**.
+- **Library tab**: size of your recordings per site, channel and month (headline numbers, donut and bar charts with hover details, sortable channel table with **Open folder**, **Copy summary**, optional **Count hours**). Scans in a background thread with Cancel, only lists folders and reads file sizes, never changes or deletes anything. Optional `[Library] extra_dirs` in `config.ini`. `--json --library` adds the same numbers to the status snapshot.
+- Fixed: the window can now be dragged by the empty stretch of the tab bar (right of Status / Logs / Library and of the Library's own tabs), and by the empty margins of the Library charts and the roster / preview gaps. Tabs, buttons, entries, lists and the charts' clickable bars, slices and months behave as before. One whitelist in `msr/wintheme.py` decides; a hidden-window test walks every tab and fails on any widget class that has no decision.
+- **Library file management**: click a donut slice, bar or month to drill in; multi-select channels and **Delete...** (button, right-click, Delete key) with a preview and filters (older than N days, keep newest N files / GB, date range). Default is a reversible **Move to PendingDeletion** with **Undo**; **Delete permanently** needs a typed confirmation; the Recycle Bin is offered when it is big enough. New **Files**, **PendingDeletion** (Empty now / Restore) and **Clean up** tabs. Guards: only the Processed / Recorded / PendingDeletion / Clips folders, never a recording channel or a recent file, nothing while a scan runs, every action logged to `library_actions.log`.
+- `--json` prints a read-only status snapshot (no secrets, no personal paths); `llms.txt` is a manual for AI assistants.
+
 ### Recording
 - **Recording starts immediately after a crash or abrupt close.** Leftover `.ts` files from the previous session used to be remuxed *before* any recorder launched, so a few big files meant minutes of missed stream. They are now snapshotted at start, the recorders launch, and the leftovers are remuxed afterwards on a background thread: one file at a time, below-normal CPU priority, serialized with the other cleanup passes. Only the files that existed before launch are touched. Stop / close cancels the remux and leaves the `.ts` for the next pass; a `.ts` is still only moved to PendingDeletion after its MP4 is verified. If `filename_pattern` has no timestamp (a new recording could reuse a leftover's name) the old clean-up-first order is used.
 - A partial MP4 from a remux that was interrupted by a crash is detected (marker file / size check) and redone instead of being trusted.

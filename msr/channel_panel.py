@@ -236,7 +236,7 @@ _AUTH_ERROR_RE = re.compile(
 )
 
 BADGE_GLYPH = "\u26A0"   # ⚠ (Segoe UI Symbol has it on every Windows)
-BADGE_COLOR = "#FFB300"  # amber
+# (the badge colour is the theme token "badge")
 
 
 def auth_error_in_status(status_entry):
@@ -324,8 +324,8 @@ def open_add_channel_dialog(root, theme, on_add, initial_text="",
 
     t = theme
     dlg = tk.Toplevel(root)
+    dlg.withdraw()  # shown by dialogs.present() once the caption is themed and it is centred
     dlg.title("Add channel")
-    dlg.transient(root)
     dlg.resizable(False, False)
     dlg.configure(bg=t["bg"], padx=14, pady=12)
 
@@ -344,9 +344,9 @@ def open_add_channel_dialog(root, theme, on_add, initial_text="",
                          values=[PLATFORM_LABELS[p] for p in ADD_PLATFORMS])
     combo.grid(row=1, column=1, padx=(8, 0), sticky="we")
     hint = tk.Label(dlg, text="Tip: paste a kick.com / twitch.tv URL or type twitch:name",
-                    bg=t["bg"], fg="#8a8a8a", font=("Segoe UI", 8))
+                    bg=t["bg"], fg=t["placeholder"], font=("Segoe UI", 8))
     hint.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
-    err = tk.Label(dlg, text="", bg=t["bg"], fg="#F44336", font=("Segoe UI", 9),
+    err = tk.Label(dlg, text="", bg=t["bg"], fg=t["error"], font=("Segoe UI", 9),
                    wraplength=320, justify="left")
     err.grid(row=3, column=0, columnspan=2, sticky="w")
     btns = tk.Frame(dlg, bg=t["bg"])
@@ -383,23 +383,17 @@ def open_add_channel_dialog(root, theme, on_add, initial_text="",
 
     for text, cmd, bg in (("Cancel", _cancel, t["btn_bg"]), ("Add", _submit, t["accent"])):
         tk.Button(btns, text=text, command=cmd, width=9, font=("Segoe UI", 9),
-                  bg=bg, fg="#ffffff" if text == "Add" else t["btn_fg"],
-                  activebackground=t["accent"], activeforeground="#ffffff",
+                  bg=bg, fg=t["accent_fg"] if text == "Add" else t["btn_fg"],
+                  activebackground=t["btn_hover"], activeforeground=t["btn_hover_fg"],
                   relief="flat", bd=0).pack(side=tk.LEFT, padx=(6, 0), ipady=2)
 
     dlg.bind("<Return>", _submit)
     dlg.bind("<KP_Enter>", _submit)
     dlg.bind("<Escape>", _cancel)
-    try:
-        root.update_idletasks()
-        x = root.winfo_rootx() + 60
-        y = root.winfo_rooty() + 80
-        dlg.geometry(f"+{x}+{y}")
-    except tk.TclError:
-        pass
+    from msr import dialogs
     if dark is not None:
-        from msr.wintheme import set_title_bar_dark
-        dlg.after(10, lambda: set_title_bar_dark(dlg, dark))
+        dialogs.apply_title_bar(dlg, dark)
+    dialogs.present(dlg, root)  # themed caption first, then centred over root, then shown
     ent.focus_set()
     ent.icursor(tk.END)
     return dlg

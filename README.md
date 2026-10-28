@@ -29,9 +29,23 @@ This is **v2.1.0**. See [CHANGELOG.md](CHANGELOG.md).
 - Per-channel status with measured resolution, fps and bitrate.
 - Live preview strip of every recording; click a tile to select, double-click to pin a larger preview.
 - **Clip Now** (last N seconds, stream copy, keyframe-aligned) and **Screenshot**, without interrupting the recording.
+- **Clips** and **Streams** buttons open the clips folder of the selected channel and the recordings folder.
 - Disk write and network meters.
 
+**Library tab**
+- How much space your recordings take: total, per site (donut), top channels (bars), per month, and a sortable channel table with **Open folder**. **Copy summary** gives plain text for pasting. **Count hours** (optional) adds recorded time.
+- The scan only reads folder listings and file sizes in a background thread (Cancel any time). `--json --library` prints the same numbers for scripts.
+- **Clean up from the tab.** Click a donut slice to list a site's channels, a bar to select a channel, a month to list its files. Select channels and press **Delete...** (or right-click, or the Delete key). You always get a preview with the files, sizes and dates first, and you can untick files or filter (older than N days, keep the newest N files / N GB, a date range).
+  - The default is **Move to PendingDeletion**: reversible (an **Undo** button appears, and the **PendingDeletion** tab has **Restore**), and MSR deletes those files itself after the PendingDeletion delay, when it next starts. **Delete permanently** needs you to type the channel name or `DELETE`. The Recycle Bin is offered only when Windows reports a bin big enough.
+  - The **Files** tab lists single files (search, sort, Play, Show in Explorer, delete). The **PendingDeletion** tab shows size, age and the next purge, with **Empty now** and **Restore**. **Clean up** suggests the largest files, the oldest, channels not in your roster, leftover raw files, duplicates and empty folders, with nothing ticked until you choose.
+  - MSR never touches a channel that is recording, files changed in the last 10 minutes, or anything outside the Processed / Recorded / PendingDeletion / Clips folders. Every action is written to `library_actions.log` in the data folder.
+
+**Logs tab**
+- Follows new lines only while you are at the bottom (a **New lines** button appears when you scrolled back), filter box and level drop-down, search highlighting, coloured warnings/errors, Ctrl+F, **Open log file**.
+
 **Housekeeping**
+- **Themes**: the **Theme...** button (bottom bar) opens a list with a live preview: PowerShell Blue (default), Neutral Dark, Light, High Contrast, Midnight Purple, Paper. Popups, charts and the Windows title bar follow. Add your own as `themes/*.json` in the data folder (the window can open the folder and writes a sample). Windows remember their size and place and can be dragged by their background.
+- **Restore previous...** (the `...` button beside About): the last 20 versions of `channels.json` and `config.ini`, with passwords masked in the list.
 - One instance per recordings folder; a second launch focuses the existing window.
 - `stream_recorder.log` rotates at a size limit (default 20 MB, 3 backups). Stream URLs, tokens and cookie headers are redacted from the log.
 - `--data-dir` / `MSR_HOME` keep config, cookies and channel list outside the code folder.
@@ -155,14 +169,15 @@ These are stored in plain text, which is one more reason `config.ini` is git-ign
 | `Cleanup/max_log_size_mb`, `log_backup_count` | 20, 3 | Log rotation |
 | `Clipping/clip_length_seconds`, `screenshot_format` | 30, jpg | Clip Now / Screenshot |
 | `Advanced/verbose` | false | Very noisy; only for diagnosing a failure |
-| `GUI/dark_mode`, `minimize_to_tray`, `notifications` | true | UI |
+| `GUI/theme` | PowerShell Blue | Colour theme (set from the **Theme...** button). Old `GUI/dark_mode` is still read: `true` = PowerShell Blue, `false` = Light |
+| `GUI/minimize_to_tray`, `notifications` | true | UI |
 
 Output layout: `streams_dir\Recorded\<platform>\<channel>\` (raw `.ts` while recording), `Processed\...` (final `.mp4`), `Clips\...`, `PendingDeletion\` (originals, purged after `auto_purge_days`).
 
 ## Command line
 
 ```
-python Multi-Stream-Recorder.py [--data-dir DIR] [--config FILE] [--headless] [--version]
+python Multi-Stream-Recorder.py [--data-dir DIR] [--config FILE] [--headless] [--json [--library]] [--version]
 ```
 
 `--headless` records the enabled channels in `channels.json` with no window; Ctrl+C stops cleanly.

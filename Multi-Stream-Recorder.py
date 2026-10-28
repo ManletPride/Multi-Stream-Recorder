@@ -132,8 +132,19 @@ def main_headless(config):
             recorder.stop()
 
 
+def _safe_console():
+    """A redirected stdout/stderr on Windows is cp1252: printing the arrows/bullets below
+    raised UnicodeEncodeError and killed the launch. Replace what the console can't show."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except Exception:  # pythonw (no stream) or a wrapper without reconfigure
+            pass
+
+
 def main():
     """Parse arguments and start the recorder."""
+    _safe_console()
     parser = argparse.ArgumentParser(
         description=f"Multi-Stream Recorder v{__version__}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -142,6 +153,8 @@ examples:
   %(prog)s                     Launch GUI (default)
   %(prog)s --headless          Run without GUI (Ctrl+C to stop)
   %(prog)s --config my.ini     Use a custom config file
+  %(prog)s --json              Print a read-only status snapshot as JSON and exit
+  %(prog)s --json --library    The same plus sizes per site/channel/month (lists folders, slower)
   %(prog)s --data-dir D:\\msr-data   Code here; config, channels, cookies from D:\\msr-data
         """,
     )
@@ -152,9 +165,17 @@ examples:
     parser.add_argument('--data-dir', default=None,
                         help=f'Folder holding config.ini, channels.json, window_state.json, '
                              f'kick_channel_ids.json (default: ${DATA_DIR_ENV} or the current directory)')
+    parser.add_argument('--json', action='store_true',
+                        help='Print a read-only status snapshot (settings, roster, tools, problems) '
+                             'as JSON and exit. Starts nothing; no secrets or personal paths')
+    parser.add_argument('--library', action='store_true',
+                        help='With --json: also scan the recordings folders (read-only, sizes only, '
+                             'nothing is written) and add a "library" section')
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
 
     args = parser.parse_args()
+    if args.library and not args.json:
+        parser.error('--library only works together with --json')
 
     if os.name == 'nt':
         mp.set_start_method('spawn', force=True)
@@ -166,6 +187,11 @@ examples:
         except FileNotFoundError as e:
             print(f"ERROR: {e}")
             sys.exit(2)
+
+    if args.json:
+        from msr.status import build_status, render
+        print(render(build_status(os.path.abspath(args.config), library=args.library)))
+        return
 
     config = Config(os.path.abspath(args.config))
 
@@ -208,6 +234,7 @@ examples:
                     "recordings folder.\n\n"
                     "If you do not see the window, check the system tray "
                     "or a --headless copy.",
+                    parent=_root,
                 )
                 _root.destroy()
             except Exception:
@@ -240,7 +267,8 @@ examples:
                 messagebox.showerror(
                     "Multi-Stream Recorder — Missing Dependencies",
                     f"The following critical issues were found:\n\n{detail}\n\n"
-                    "The program cannot start until these are resolved."
+                    "The program cannot start until these are resolved.",
+                    parent=_err_root,
                 )
                 _err_root.destroy()
             except Exception:
