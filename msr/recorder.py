@@ -1002,6 +1002,14 @@ class StreamRecorder:
         self._spawning: set = set()
         self._spawn_lock = threading.Lock()
         self.cleaner = BackgroundCleaner(config, status_dict=self.status_dict)
+        # Startup leftover cleanup runs on this thread AFTER the recorders are
+        # launched (see _plan_startup_cleanup / _launch_startup_cleanup).
+        # _startup_cleanup_cancel aborts it (Stop / close): the in-flight
+        # remux is killed and the .ts is left for the next pass.
+        self._startup_cleanup_thread = None
+        self._startup_cleanup_cancel = threading.Event()
+        # Pause between the two size samples of the "still growing?" check.
+        self._startup_settle_seconds = 1.0
         # Kick push notifications: one Pusher socket that wakes workers the
         # instant a Kick channel goes live (supplements polling, never
         # replaces it).  No-op if websocket-client isn't installed.
@@ -1295,6 +1303,10 @@ class StreamRecorder:
         self.is_running = False
         logging.info("Stop requested — shutting down processes...")
         self.should_stop.set()
+        # Abort a startup leftover cleanup that is still running in the
+        # background; its .ts stays put and BackgroundCleaner (below) or the
+        # next start picks it up.
+        self._startup_cleanup_cancel.set()
 
         # Stop the Kick push listener first — no point waking workers that
         # are about to be killed
@@ -1323,6 +1335,12 @@ class StreamRecorder:
                     proc.join(timeout=5)
 
         self.processes = {}
+
+        startup_thread = self._startup_cleanup_thread
+        if startup_thread is not None and startup_thread.is_alive():
+            startup_thread.join(timeout=10)
+            if startup_thread.is_alive():
+                logging.warning("Startup cleanup: still stopping - leaving its remaining .ts files for the next pass")
 
         logging.info("Checking for orphaned recording processes...")
         kill_orphan_recording_processes(logging.getLogger(), streams_dir=self.root_path)
@@ -1365,8 +1383,11 @@ class StreamRecorder:
         self.is_running = True
         self.should_stop.clear()
 
-        # Quick synchronous cleanup of leftover files from previous sessions
-        self._quick_startup_cleanup()
+        # Snapshot the leftover .ts files from previous sessions NOW (before
+        # any recorder exists), but do not process them yet: recording must
+        # start immediately, so the remuxing runs in the background after the
+        # recorders are launched.  Returns the files to process later.
+        startup_leftovers = self._plan_startup_cleanup()
 
         logging.info(f"Launching {len(self.channels)} recording processes")
 
@@ -1392,6 +1413,10 @@ class StreamRecorder:
         # or without websocket-client installed)
         self._sync_kick_push()
         self.kick_push.start()
+
+        # Recorders are up: now remux the leftovers (low priority, one file at
+        # a time, in the background).
+        self._launch_startup_cleanup(startup_leftovers)
 
         # Monitor processes — restart any that exit unexpectedly
         while self.is_running and not self.should_stop.is_set():
@@ -1457,18 +1482,38 @@ class StreamRecorder:
         # Loop exited — stop() was already called or should_stop was set
         # Don't call stop() here to avoid double-stop race condition
 
-    def _quick_startup_cleanup(self):
-        logging.info("Startup cleanup: checking for leftover .ts files from previous sessions...")
+    # ------------------------------------------------------------------
+    # Startup cleanup of leftover .ts files from a previous session
+    #
+    # A crash / abrupt close leaves .ts files in Recorded/.  They are remuxed
+    # to Processed/ and the raw file moved to PendingDeletion.  This used to
+    # run synchronously before any recorder launched, so a few big leftovers
+    # cost minutes of recording.  Now the files are SNAPSHOTTED before launch
+    # and processed afterwards on a background thread (below-normal priority,
+    # one file at a time).  Only snapshot files are ever touched, so a file
+    # written by a freshly launched recorder is never picked up.
+    # ------------------------------------------------------------------
 
-        ffmpeg_path = self.config.get('Advanced', 'ffmpeg_path')
-        ffmpeg_timeout = self.config.getint('Timeouts', 'ffmpeg_timeout')
-        min_file_size_mb = self.config.getfloat('Recording', 'min_file_size_mb')
-        processed_count = 0
+    def _recording_names_are_unique(self):
+        """True if new recordings always get a fresh, timestamped filename.
 
+        Background cleanup relies on the new recorders never reusing a
+        leftover's filename.  A user pattern without a timestamp (e.g.
+        ``{username}``) could, so that case cleans up synchronously first.
+        """
+        try:
+            pattern = self.config.get('Recording', 'filename_pattern',
+                                      fallback='{username}_{timestamp}')
+        except Exception:
+            pattern = '{username}_{timestamp}'
+        pattern = pattern or '{username}_{timestamp}'
+        return '{timestamp}' in pattern or ('{date}' in pattern and '{time}' in pattern)
+
+    def _snapshot_leftover_ts_files(self):
+        """List the .ts files in Recorded/ right now (fast: no sizing/sleeping)."""
+        entries = []
         if not os.path.exists(self.recorded_base):
-            logging.info("Startup cleanup: No leftover files found")
-            return
-
+            return entries
         # Scan recorded_base dynamically so new platforms are picked up
         # automatically without needing a hardcoded list.
         # One extra nesting level covers custom/chaturbate/alice.
@@ -1477,66 +1522,243 @@ class StreamRecorder:
             pending_dir = os.path.join(self.pending_base, platform, username_dir)
             os.makedirs(processed_path, exist_ok=True)
             os.makedirs(pending_dir, exist_ok=True)
+            try:
+                names = os.listdir(username_path)
+            except OSError:
+                continue
+            for filename in names:
+                if filename.endswith('.ts'):
+                    entries.append({
+                        "raw_file": os.path.join(username_path, filename),
+                        "processed_path": processed_path,
+                        "pending_dir": pending_dir,
+                    })
+        return entries
 
-            for filename in os.listdir(username_path):
-                if not filename.endswith('.ts'):
-                    continue
+    def _plan_startup_cleanup(self):
+        """Snapshot leftovers before the recorders launch.
 
-                raw_file = os.path.join(username_path, filename)
+        Returns ``{"files": [...], "snapshot_time": float}`` to be processed
+        in the background by ``_launch_startup_cleanup``, or an empty plan if
+        there is nothing to do / it was already handled synchronously.
+        """
+        empty = {"files": [], "snapshot_time": time.time()}
+        logging.info("Startup cleanup: checking for leftover .ts files from previous sessions...")
 
+        # A previous session's background pass must not overlap this one.
+        previous = self._startup_cleanup_thread
+        if previous is not None and previous.is_alive():
+            self._startup_cleanup_cancel.set()
+            previous.join(timeout=30)
+            if previous.is_alive():
+                logging.warning(
+                    "Startup cleanup: previous background pass is still running - "
+                    "skipping this one (leftover files are handled when the session stops)")
+                return empty
+        self._startup_cleanup_cancel.clear()
+
+        try:
+            snapshot_time = time.time()
+            files = self._snapshot_leftover_ts_files()
+        except Exception as e:
+            logging.warning(f"Startup cleanup: could not scan for leftover files: {e}")
+            return empty
+        plan = {"files": files, "snapshot_time": snapshot_time}
+        if not files:
+            logging.info("Startup cleanup: No leftover files found")
+            return empty
+
+        if not self._recording_names_are_unique():
+            logging.warning(
+                "Startup cleanup: filename_pattern has no timestamp, so a new recording "
+                "could reuse a leftover's name - cleaning up BEFORE recording starts")
+            self._process_startup_leftovers(plan, background=False)
+            return empty
+
+        logging.info(
+            f"Startup cleanup: {len(files)} leftover .ts file(s) found - running in the "
+            "background so recording starts now")
+        return plan
+
+    def _launch_startup_cleanup(self, plan):
+        """Start the background pass for a plan from _plan_startup_cleanup."""
+        if not plan or not plan.get("files"):
+            return
+        thread = threading.Thread(
+            target=self._startup_cleanup_thread_main, args=(plan,),
+            daemon=True, name="StartupCleanup")
+        self._startup_cleanup_thread = thread
+        thread.start()
+
+    def _startup_cleanup_thread_main(self, plan):
+        try:
+            self._process_startup_leftovers(plan, background=True)
+        except Exception:
+            # Never let cleanup affect the recorders.
+            logging.exception(
+                "Startup cleanup: background pass failed - recording is unaffected; "
+                "unprocessed .ts files stay for the next pass")
+
+    def _acquire_cleanup_lock_or_cancel(self):
+        """Wait for _cleanup_lock; give up (False) if the pass is cancelled."""
+        while not self._startup_cleanup_cancel.is_set():
+            if _cleanup_lock.acquire(timeout=1):
+                return True
+        return False
+
+    def _process_startup_leftovers(self, plan, background):
+        """Remux the snapshotted leftovers, one at a time.
+
+        background=True: below-normal ffmpeg priority, serialized with the
+        other cleanup passes via _cleanup_lock (per file), cancellable.
+        background=False: the legacy synchronous behaviour.
+        """
+        processed_count = 0
+        cancelled = False
+        for entry in plan["files"]:
+            if self._startup_cleanup_cancel.is_set():
+                cancelled = True
+                break
+            if background:
+                if not self._acquire_cleanup_lock_or_cancel():
+                    cancelled = True
+                    break
+            try:
+                result = self._process_one_startup_file(entry, plan["snapshot_time"], background)
+            except Exception as e:
+                logging.error(
+                    f"Startup cleanup: unexpected error on {os.path.basename(entry['raw_file'])}: {e}")
+                result = "error"
+            finally:
+                if background:
+                    _cleanup_lock.release()
+            if result == "done":
+                processed_count += 1
+            elif result == "cancelled":
+                cancelled = True
+                break
+
+        if cancelled:
+            logging.info(
+                "Startup cleanup: stopped early - remaining .ts files are left in place "
+                "for the next pass")
+        if processed_count > 0:
+            logging.info(f"Startup cleanup: Processed {processed_count} leftover file(s)")
+        elif not cancelled:
+            logging.info("Startup cleanup: No leftover files found")
+
+    def _process_one_startup_file(self, entry, snapshot_time, background):
+        """Process one snapshotted .ts.  Returns 'done', 'skipped',
+        'cancelled' or 'error'."""
+        ffmpeg_path = self.config.get('Advanced', 'ffmpeg_path')
+        ffmpeg_timeout = self.config.getint('Timeouts', 'ffmpeg_timeout')
+        min_file_size_mb = self.config.getfloat('Recording', 'min_file_size_mb')
+
+        raw_file = entry["raw_file"]
+        processed_path = entry["processed_path"]
+        pending_dir = entry["pending_dir"]
+        filename = os.path.basename(raw_file)
+
+        if not os.path.exists(raw_file):
+            return "skipped"  # already handled by another cleanup pass
+
+        try:
+            size1 = os.path.getsize(raw_file)
+            # Written after the snapshot => a live recorder owns it, not a leftover.
+            if os.path.getmtime(raw_file) > snapshot_time + 2:
+                logging.warning(f"Startup cleanup: {filename} was modified after startup, skipping")
+                return "skipped"
+            if self._startup_cleanup_cancel.wait(self._startup_settle_seconds):
+                return "cancelled"
+            size2 = os.path.getsize(raw_file)
+            if size2 != size1:
+                logging.warning(f"Startup cleanup: {filename} still growing, skipping")
+                return "skipped"
+            file_size = size2
+        except Exception:
+            return "skipped"
+
+        if file_size < min_file_size_mb * 1024 * 1024:
+            logging.info(f"Startup cleanup: Removing tiny file {filename} ({human_size(file_size)})")
+            try:
+                os.remove(raw_file)
+            except Exception:
+                pass
+            return "skipped"
+
+        logging.info(f"Startup cleanup: Processing {filename} ({human_size(file_size)})")
+
+        mp4_filename = filename[:-len('.ts')] + '.mp4'
+        mp4_file = os.path.join(processed_path, mp4_filename)
+        # Present only while a remux of this file was in progress; if the app
+        # died mid-remux the marker survives and the partial MP4 is redone.
+        marker = mp4_file + ".remuxing"
+
+        mp4_ok = False
+        if os.path.exists(mp4_file) and not os.path.exists(marker):
+            try:
+                mp4_size = os.path.getsize(mp4_file)
+                mp4_ok = mp4_size > 5 * 1024**2 and mp4_size >= 0.8 * file_size
+                if mp4_size > 5 * 1024**2 and not mp4_ok:
+                    logging.warning(
+                        f"Startup cleanup: existing MP4 for {filename} is only "
+                        f"{human_size(mp4_size)} vs {human_size(file_size)} raw "
+                        "- treating as stale partial, re-remuxing")
+            except Exception:
+                mp4_ok = False
+
+        if mp4_ok:
+            logging.info("Startup cleanup: MP4 already exists, moving raw file")
+        else:
+            mp4_preexisting = os.path.exists(mp4_file)
+            try:
+                open(marker, "w").close()
+            except Exception:
+                pass
+            file_size_gb = file_size / (1024**3)
+            scaled_timeout = max(ffmpeg_timeout, int(file_size_gb * 60) + 120)
+            if background:
+                success, mp4_size, error = remux_to_mp4(
+                    raw_file, mp4_file, ffmpeg_path, logging.getLogger(), scaled_timeout,
+                    low_priority=True, cancel_event=self._startup_cleanup_cancel)
+            else:
+                success, mp4_size, error = remux_to_mp4(
+                    raw_file, mp4_file, ffmpeg_path, logging.getLogger(), scaled_timeout)
+            if success:
                 try:
-                    size1 = os.path.getsize(raw_file)
-                    time.sleep(1)
-                    size2 = os.path.getsize(raw_file)
-                    if size2 != size1:
-                        logging.warning(f"Startup cleanup: {filename} still growing, skipping")
-                        continue
-                    file_size = size2
-                except Exception:
-                    continue
-
-                if file_size < min_file_size_mb * 1024 * 1024:
-                    logging.info(f"Startup cleanup: Removing tiny file {filename} ({human_size(file_size)})")
-                    try:
-                        os.remove(raw_file)
-                    except Exception:
-                        pass
-                    continue
-
-                logging.info(f"Startup cleanup: Processing {filename} ({human_size(file_size)})")
-
-                mp4_filename = filename.replace('.ts', '.mp4')
-                mp4_file = os.path.join(processed_path, mp4_filename)
-
-                if os.path.exists(mp4_file) and os.path.getsize(mp4_file) > 5 * 1024**2:
-                    logging.info("Startup cleanup: MP4 already exists, moving raw file")
-                else:
-                    file_size_gb = file_size / (1024**3)
-                    scaled_timeout = max(ffmpeg_timeout, int(file_size_gb * 60) + 120)
-                    success, mp4_size, error = remux_to_mp4(
-                        raw_file, mp4_file, ffmpeg_path,
-                        logging.getLogger(), scaled_timeout
-                    )
-                    if not success:
-                        logging.error(f"Startup cleanup: Failed to process {filename}: {error}")
+                    os.remove(marker)
+                except OSError:
+                    pass
+            elif error == "cancelled":
+                # Leave the .ts for the next pass; drop the half-written MP4
+                # if this remux created it.
+                if not mp4_preexisting:
+                    for leftover in (mp4_file, marker):
                         try:
-                            pending_path = os.path.join(pending_dir, filename)
-                            shutil.move(raw_file, pending_path)
-                            logging.info(f"Startup cleanup: Moved unprocessable {filename} to PendingDeletion")
-                        except Exception as move_err:
-                            logging.warning(f"Startup cleanup: Could not move {filename} to PendingDeletion: {move_err}")
-                        continue
-
+                            os.remove(leftover)
+                        except OSError:
+                            pass
+                logging.info(f"Startup cleanup: {filename} left in place for the next pass")
+                return "cancelled"
+            else:
+                try:
+                    os.remove(marker)
+                except OSError:
+                    pass
+                logging.error(f"Startup cleanup: Failed to process {filename}: {error}")
                 try:
                     pending_path = os.path.join(pending_dir, filename)
                     shutil.move(raw_file, pending_path)
-                    processed_count += 1
-                    logging.info(f"Startup cleanup: Done with {mp4_filename}")
-                except Exception as e:
-                    logging.warning(f"Startup cleanup: Could not move {filename}: {e}")
+                    logging.info(f"Startup cleanup: Moved unprocessable {filename} to PendingDeletion")
+                except Exception as move_err:
+                    logging.warning(f"Startup cleanup: Could not move {filename} to PendingDeletion: {move_err}")
+                return "error"
 
-        if processed_count > 0:
-            logging.info(f"Startup cleanup: Processed {processed_count} leftover file(s)")
-        else:
-            logging.info("Startup cleanup: No leftover files found")
-
+        try:
+            pending_path = os.path.join(pending_dir, filename)
+            shutil.move(raw_file, pending_path)
+            logging.info(f"Startup cleanup: Done with {mp4_filename}")
+            return "done"
+        except Exception as e:
+            logging.warning(f"Startup cleanup: Could not move {filename}: {e}")
+            return "error"

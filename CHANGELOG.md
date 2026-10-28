@@ -24,6 +24,11 @@ UI overhaul: themed popups, calmer Logs tab, Restore previous, window memory, Li
 - **Library file management**: click a donut slice, bar or month to drill in; multi-select channels and **Delete...** (button, right-click, Delete key) with a preview and filters (older than N days, keep newest N files / GB, date range). Default is a reversible **Move to PendingDeletion** with **Undo**; **Delete permanently** needs a typed confirmation; the Recycle Bin is offered when it is big enough. New **Files**, **PendingDeletion** (Empty now / Restore) and **Clean up** tabs. Guards: only the Processed / Recorded / PendingDeletion / Clips folders, never a recording channel or a recent file, nothing while a scan runs, every action logged to `library_actions.log`.
 - `--json` prints a read-only status snapshot (no secrets, no personal paths); `llms.txt` is a manual for AI assistants.
 
+### Recording
+- **Recording starts immediately after a crash or abrupt close.** Leftover `.ts` files from the previous session used to be remuxed *before* any recorder launched, so a few big files meant minutes of missed stream. They are now snapshotted at start, the recorders launch, and the leftovers are remuxed afterwards on a background thread: one file at a time, below-normal CPU priority, serialized with the other cleanup passes. Only the files that existed before launch are touched. Stop / close cancels the remux and leaves the `.ts` for the next pass; a `.ts` is still only moved to PendingDeletion after its MP4 is verified. If `filename_pattern` has no timestamp (a new recording could reuse a leftover's name) the old clean-up-first order is used.
+- A partial MP4 from a remux that was interrupted by a crash is detected (marker file / size check) and redone instead of being trusted.
+- Leftover `x.tsb.ts` style names map to `x.tsb.mp4` (only the extension is replaced).
+
 ## v2.1.0 (2026-10)
 
 New roster panel, Kick realtime fix, reconnect fix, install cleanup.
