@@ -6,6 +6,12 @@ A big interface release: a Library tab that shows (and can clean up) what your r
 
 ### Added
 
+**MSR's own environment (new)**
+- The launchers create `.venv` in the MSR folder on first launch (small progress window, no console, about a minute), install `requirements.txt` into it and start MSR from it; later launches use it at once.
+- If setup fails (offline, no `venv` module, no write access) MSR runs on the current Python, says why and retries next launch. A damaged or half-built `.venv`, a removed base Python or a moved MSR folder leads to a rebuild; a changed `requirements.txt` to a reinstall.
+- Opt out with `MSR_NO_VENV=1` or `[Advanced] use_venv = false`. Package updates (Updates dialog, `msr_ctl.py deps update`) only install into a venv; on a system Python they are refused unless `--system`.
+- `msr_ctl.py deps` uses `.venv`'s Python automatically; shortcuts from `create_shortcut.py` point at the base pythonw + `run_msr.pyw` so they survive a rebuild.
+
 **Updates dialog for tools and packages (new)**
 - Click the version at the bottom left or **Updates…** next to About: MSR, yt-dlp, streamlink, ffmpeg and the Python packages with installed version, latest version and status; Check now, Update selected, Update all.
 - pip updates run hidden in the background; running recordings are not touched and the next recording uses the new version. A failed update puts the previous version back; offline, pip and permission errors get a clear message.

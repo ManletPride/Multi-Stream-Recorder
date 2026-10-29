@@ -71,11 +71,12 @@ def tray_image(recording: bool = False, size: int = 64):
 
 # ------------------------------------------------------------------ shortcuts
 def pythonw() -> str:
-    venv = os.path.join(ROOT, ".venv", "Scripts", "pythonw.exe")
-    if os.path.isfile(venv):
-        return venv
-    cand = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-    return cand if os.path.isfile(cand) else sys.executable
+    """The base Python's pythonw (not .venv's): run_msr.pyw then picks or rebuilds .venv itself,
+    so the shortcut keeps working when .venv is recreated."""
+    from msr.venv import base_python
+    base = base_python()
+    cand = os.path.join(os.path.dirname(base), "pythonw.exe")
+    return cand if os.path.isfile(cand) else base
 
 
 def _ps_quote(text: str) -> str:
@@ -132,7 +133,7 @@ def set_icon_script(lnk: str) -> str:
 
 def desktop_entry(python: str = "python3", data_dir: str | None = None) -> str:
     """A freedesktop .desktop file for Linux menus/docks."""
-    cmd = f'{python} "{os.path.join(ROOT, "Multi-Stream-Recorder.py")}"'
+    cmd = f'{python} "{os.path.join(ROOT, "run_msr.pyw")}"'
     if data_dir:
         cmd += f' --data-dir "{data_dir}"'
     return ("[Desktop Entry]\nType=Application\nName=Multi-Stream Recorder\n"

@@ -2484,6 +2484,12 @@ def main_gui(config):
             _dialogs.show_info(root, "Update installed", msg)
 
     root.after(400, _warn_if_last_update_failed)
+
+    def _show_venv_notice():
+        from msr import venv as _venv
+        if _venv.LAUNCH_NOTICE:
+            _dialogs.show_warning(root, "Multi-Stream Recorder environment", _venv.LAUNCH_NOTICE)
+    root.after(2500, _show_venv_notice)   # after recording has started; never blocks it
     root.after(500, _show_update_notice)
 
     # ── Refresh functions ──

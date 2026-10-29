@@ -23,6 +23,11 @@ import urllib.error
 import urllib.request
 
 from msr.nowindow import no_window_kwargs
+from msr.venv import in_venv
+
+SYSTEM_REFUSED = ("MSR is not running in its own environment (.venv), so pip would change the Python "
+                  "that other programs on this computer use. Start MSR with run_msr.pyw (it sets up .venv), "
+                  "or update with pip yourself. (msr_ctl.py deps update --system overrides this.)")
 
 # (distribution name on PyPI, label, kind) - kind "tool" = runs as a program while recording
 PACKAGES = (
@@ -137,7 +142,7 @@ def rows(check: bool = False, *, ffmpeg_path: str = "ffmpeg", opener=None, versi
         ver = version_of(dist)
         row = {"name": dist.lower(), "label": label, "kind": kind, "installed": ver, "latest": None,
                "status": "unchecked" if ver else "not_installed",
-               "source": f"pip ({os.path.basename(sys.executable)})", "updatable": False, "note": ""}
+               "source": python_label(), "updatable": False, "note": ""}
         if check:
             try:
                 latest = latest_pypi(dist, opener)
@@ -148,6 +153,10 @@ def rows(check: bool = False, *, ffmpeg_path: str = "ffmpeg", opener=None, versi
                                                                           and row["latest"] is not None)
         out.append(row)
     return out
+
+
+def python_label() -> str:
+    return "MSR .venv" if in_venv() else "system Python (updates off)"
 
 
 def _why(e: Exception) -> str:
@@ -186,9 +195,12 @@ def classify_pip_error(text: str) -> str:
 
 
 def update_packages(names, *, python: str | None = None, run=subprocess.run, version_of=installed_version,
-                    log=None) -> list[dict]:
-    """pip-upgrade each named package (PyPI names, any case). Puts the old version back when an
-    update fails or leaves the package unimportable. Returns one result per name."""
+                    log=None, allow_system: bool = False) -> list[dict]:
+    """pip-upgrade each named package (PyPI names, any case) in this interpreter's venv. Refused
+    outside a venv unless allow_system. Puts the old version back when an update fails or leaves
+    the package unimportable. Returns one result per name."""
+    if not in_venv() and not allow_system:
+        return [{"name": str(n).lower(), "ok": False, "error": SYSTEM_REFUSED, "code": "not_venv"} for n in names]
     python = python or sys.executable
     known = {p[0].lower(): p[0] for p in PACKAGES}
     results = []

@@ -159,6 +159,8 @@ class Config:
             'verbose': 'false',
             'streamlink_debug': 'false',
             'ffmpeg_path': 'ffmpeg',
+            # false = do not create/use MSR's own .venv (you manage the Python environment)
+            'use_venv': 'true',
             'concurrent_fragments': '3',
             # yt-dlp --extractor-args youtube:player_client value.
             # Blank = let yt-dlp choose (recommended).  Its defaults favour

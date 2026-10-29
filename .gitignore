@@ -37,6 +37,8 @@ msr_update_notice.txt
 msr_update_backup/
 # Why a start failed under pythonw (traceback without values; written by msr/startup_error.py)
 msr_startup_error.log
+# why setting up MSR's own .venv failed (msr/venv.py; retried next launch)
+msr_venv_error.txt
 # config.ini copies kept when it could not be parsed (they hold the same secrets as config.ini)
 config.ini.broken-*
 

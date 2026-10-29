@@ -82,24 +82,31 @@ These steps were tested on a clean clone with Python 3.12.
    ffmpeg -version
    deno --version
    ```
-3. Get the code and install the packages into a virtual environment:
+3. Get the code:
    ```
    git clone https://github.com/ManletPride/Multi-Stream-Recorder.git
    cd Multi-Stream-Recorder
-   py -3.12 -m venv .venv
-   .venv\Scripts\python -m pip install -r requirements.txt
    ```
-4. Run it:
-   ```
-   .venv\Scripts\python Multi-Stream-Recorder.py
-   ```
-   or double-click `run_msr.pyw` / `run_msr.bat` (they use `.venv` automatically when it exists).
+4. Double-click `run_msr.pyw` (or `run_msr.bat`). The first launch creates MSR's own environment, `.venv` in the MSR folder, and installs `requirements.txt` into it. A small window shows the progress (about a minute, no console). Later launches start straight from `.venv`.
+
+   By hand instead: `py -3.12 -m venv .venv`, `.venv\Scripts\python -m pip install -r requirements.txt`, `.venv\Scripts\python Multi-Stream-Recorder.py`.
 
 You don't need to activate the venv: MSR puts its own interpreter's `Scripts` folder first on PATH, so it finds the yt-dlp and streamlink installed there.
 
 On first launch MSR writes `config.ini`. Recordings go to `%USERPROFILE%\Videos\Multi-Stream Recorder` unless you set `streams_dir`.
 
 Linux/macOS: same steps with `python3 -m venv .venv`, `.venv/bin/python`, and ffmpeg from your package manager (`apt install ffmpeg python3-tk`, `brew install ffmpeg`).
+
+### MSR's own environment (.venv)
+
+MSR keeps its packages (yt-dlp, streamlink, curl_cffi, ...) in `.venv` inside the MSR folder, so updating them from MSR never changes the Python other programs on your computer use.
+
+- The launchers (`run_msr.pyw`, `run_msr.bat`, shortcuts from `create_shortcut.py`) create `.venv` on first launch and use it afterwards.
+- If that fails (offline, Python without the `venv` module, no write access to the folder), MSR still starts on the Python that opened it, shows why (window and log; details in `msr_venv_error.txt`) and tries again next launch.
+- A damaged `.venv`, one left half-finished, one whose Python was uninstalled, or one in a folder that was moved is rebuilt automatically. When `requirements.txt` changes (after an MSR update) the packages are installed again on the next launch.
+- Manage your own environment instead: set `MSR_NO_VENV=1`, or `[Advanced] use_venv = false` in `config.ini` (or point `MSR_PYTHON` in `run_msr.local.bat` at your own pythonw).
+- Linux/macOS: the same, with `.venv/bin/python` (`python3 run_msr.pyw`).
+- `msr_ctl.py` works with any Python; for `deps` it hands over to `.venv\Scripts\python` automatically. You can also run it directly: `.venv\Scripts\python msr_ctl.py deps check`.
 
 ### Where settings live
 
@@ -115,9 +122,9 @@ set "MSR_DATA=D:\MSR"
 
 ### Updating
 
-From the app: click **vX available** in the status bar. It downloads that release, replaces `Multi-Stream-Recorder.py`, `msr\`, `requirements.txt` and `channels_fishtank.json`, and restarts. Your config, cookies, channels and recordings are not touched. After an update that changes `requirements.txt`, run `pip install -r requirements.txt` again.
+From the app: click **vX available** in the status bar. It downloads that release, replaces `Multi-Stream-Recorder.py`, `msr\`, `requirements.txt` and `channels_fishtank.json`, and restarts. Your config, cookies, channels and recordings are not touched. When an update changes `requirements.txt`, the next launch installs the new packages into `.venv`.
 
-From git: `git pull`, then `pip install -r requirements.txt`. Fully quit and relaunch; a running MSR does not reload its code.
+From git: `git pull` (the launcher refreshes `.venv` when `requirements.txt` changed). Fully quit and relaunch; a running MSR does not reload its code.
 
 ### Desktop shortcut and icon
 
@@ -298,6 +305,7 @@ Click the version text at the bottom left, or **Updates…** next to About. The 
 
 - Recordings that are running keep the version they started with; the next recording uses the new one. If Windows reports a file in use (a recording is running that tool), try again when nothing records.
 - If an update fails, the previous version is installed again. Offline and permission problems are explained in the dialog.
+- Updates only go into MSR's `.venv`. When MSR runs on a system Python (not a venv) package updates are refused, so other programs are never affected; `msr_ctl.py deps update --system` overrides that.
 - MSR itself is updated by its own updater (the same as the update banner); it stops recordings and restarts.
 - ffmpeg is shown with its version and where it comes from (PATH or `[Advanced] ffmpeg_path`). MSR never installed it, so MSR does not update it.
 - Once a day (about a minute after start, in the background) MSR checks for updates and shows **Updates •** when there are some. Turn it off in the dialog or with `[Updates] daily_check = false`.

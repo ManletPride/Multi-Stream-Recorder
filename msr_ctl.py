@@ -33,6 +33,7 @@ import argparse
 import json
 import os
 import socket
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -40,6 +41,7 @@ sys.path.insert(0, HERE)
 
 import msr.nowindow  # noqa: F401,E402  (hide child console windows, as everywhere else)
 from msr import control  # noqa: E402
+from msr.nowindow import no_window_kwargs  # noqa: E402
 from msr.agent_status import EVENT_KINDS  # noqa: E402
 
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_NOT_RUNNING, EXIT_AUTH, EXIT_CONFIRM, EXIT_TIMEOUT = range(7)
@@ -223,6 +225,8 @@ def build_parser():
     p.add_argument("action", choices=["list", "check", "update"])
     p.add_argument("names", nargs="*", help="update: package names (yt-dlp, streamlink, pillow, ...)")
     p.add_argument("--all", action="store_true", help="update: every package with an update")
+    p.add_argument("--system", action="store_true",
+                   help="update: allow pip outside MSR's .venv (changes the Python other programs use)")
     p = sub.add_parser("update", help="check / install an update")
     usub = p.add_subparsers(dest="action", required=True)
     usub.add_parser("check")
@@ -339,7 +343,10 @@ def to_request(a):
             return "deps", {"action": a.action}
         if a.all == bool(a.names):
             raise SystemExit("deps update: name packages or use --all (not both)")
-        return "deps", ({"action": "update", "all": True} if a.all else {"action": "update", "names": a.names})
+        req = {"action": "update", "all": True} if a.all else {"action": "update", "names": a.names}
+        if a.system:
+            req["system"] = True
+        return "deps", req
     if c == "update":
         return ("update_check", {}) if a.action == "check" else ("update_install", {"confirm": a.yes})
     if c == "library":
@@ -546,6 +553,10 @@ def main(argv=None):
         print(f"bad JSON args: {e}", file=sys.stderr)
         return EXIT_USAGE
     data_dir = data_dir_from(a)
+    if cmd == "deps":
+        handed = _deps_in_venv(argv)
+        if handed is not None:
+            return handed
     exit_code = None
     try:
         timeout = a.timeout
@@ -569,6 +580,24 @@ def main(argv=None):
         pass
     print(out, file=stream)
     return exit_code
+
+
+def _deps_in_venv(argv, run=subprocess.run):
+    """deps from a Python that is not MSR's: run the same command with .venv's Python (versions
+    and pip updates belong to the environment MSR records with). None = handle it here."""
+    from msr import venv
+    root = os.path.dirname(os.path.abspath(__file__))
+    if venv.in_venv() or os.environ.get("MSR_CTL_VENV_HANDOFF") or venv.check(root)[0] != "ready":
+        return None
+    env = dict(os.environ, MSR_CTL_VENV_HANDOFF="1")
+    argv = list(sys.argv[1:] if argv is None else argv)
+    r = run([venv.venv_python(root), os.path.abspath(__file__)] + argv, capture_output=True, text=True,
+            env=env, stdin=subprocess.DEVNULL, **no_window_kwargs())
+    if r.stdout:
+        print(r.stdout, end="")
+    if r.stderr:
+        print(r.stderr, end="", file=sys.stderr)
+    return r.returncode
 
 
 def _warn_if_nothing_to_finish(data_dir, args):

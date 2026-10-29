@@ -14,6 +14,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from msr import appicon  # noqa: E402
 from msr.nowindow import no_window_kwargs  # noqa: E402
+from msr.venv import base_python  # noqa: E402
 
 
 def main(argv=None):
@@ -24,7 +25,7 @@ def main(argv=None):
     p.add_argument("--linux", action="store_true", help="print a .desktop file")
     a = p.parse_args(argv)
     if a.linux or sys.platform != "win32":
-        print(appicon.desktop_entry(sys.executable, a.data_dir), end="")
+        print(appicon.desktop_entry(base_python(), a.data_dir), end="")
         return 0
     if a.set_icon:
         r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",

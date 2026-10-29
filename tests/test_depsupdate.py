@@ -151,6 +151,20 @@ class FfmpegTests(unittest.TestCase):
 
 
 class UpdateTests(unittest.TestCase):
+    def setUp(self):
+        p = mock.patch.object(depsupdate, "in_venv", return_value=True)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_refused_outside_a_venv(self):
+        pip = FakePip(INSTALLED)
+        with mock.patch.object(depsupdate, "in_venv", return_value=False):
+            res = depsupdate.update_packages(["yt-dlp"], run=pip.run, version_of=pip.version_of)
+            self.assertEqual(res[0]["code"], "not_venv")
+            self.assertIn("other programs", res[0]["error"])
+            self.assertEqual(pip.calls, [])
+            res = depsupdate.update_packages(["yt-dlp"], run=pip.run, version_of=pip.version_of, allow_system=True)
+            self.assertTrue(res[0]["ok"])
     def test_success_hidden_and_this_python(self):
         pip = FakePip(INSTALLED)
         res = depsupdate.update_packages(["YT-DLP"], python="py.exe", run=pip.run, version_of=pip.version_of)
@@ -236,6 +250,9 @@ class ControlTests(unittest.TestCase):
         with open(path, "w") as fh:
             fh.write(f"[Paths]\nstreams_dir = {os.path.join(self.tmp.name, 's')}\n")
         self.ctl = control.Controller(control.OfflineApp(Config(path)))
+        p = mock.patch.object(depsupdate, "in_venv", return_value=True)
+        p.start()
+        self.addCleanup(p.stop)
         for target, new in (("ffmpeg_row", no_ffmpeg),):
             p = mock.patch.object(depsupdate, target, new)
             p.start()
@@ -254,8 +271,19 @@ class ControlTests(unittest.TestCase):
             with mock.patch.object(depsupdate, "update_packages",
                                    return_value=[{"name": "yt-dlp", "ok": True, "old": "1", "new": "2"}]) as up:
                 r = self.ctl.handle("deps", {"action": "update", "all": True})
-        up.assert_called_once_with(["yt-dlp"])          # msr is left to its own updater
+        up.assert_called_once_with(["yt-dlp"], allow_system=False)          # msr is left to its own updater
         self.assertTrue(r["result"]["ok_all"])
+
+    def test_refused_outside_venv(self):
+        with mock.patch.object(depsupdate, "in_venv", return_value=False), \
+             mock.patch.object(depsupdate, "update_packages") as up:
+            r = self.ctl.handle("deps", {"action": "update", "names": ["yt-dlp"]})
+            self.assertEqual(r["code"], "not_venv")
+            up.assert_not_called()
+            up.return_value = [{"name": "yt-dlp", "ok": True}]
+            r = self.ctl.handle("deps", {"action": "update", "names": ["yt-dlp"], "system": True})
+            self.assertTrue(r["ok"])
+            self.assertTrue(up.call_args.kwargs["allow_system"])
 
     def test_bad_requests(self):
         self.assertEqual(self.ctl.handle("deps", {"action": "zap"})["code"], "bad_request")
@@ -278,6 +306,8 @@ class CliTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 self.req(*bad)
         self.assertNotIn("deps", msr_ctl.LIVE_ONLY)
+        self.assertEqual(self.req("deps", "update", "pillow", "--system"),
+                         ("deps", {"action": "update", "names": ["pillow"], "system": True}))
 
     def test_human(self):
         out = msr_ctl.human("deps", {"ok": True, "result": {"results": [

@@ -1187,7 +1187,9 @@ class Controller:
         else:
             rows = depsupdate.rows(True, ffmpeg_path=ffmpeg)
             names = [r["name"] for r in rows if r.get("updatable") and r["name"] != "msr"]
-        results = depsupdate.update_packages(names) if names else []
+        if not depsupdate.in_venv() and not _truthy(args.get("system")):
+            raise ControlError(depsupdate.SYSTEM_REFUSED, "not_venv")
+        results = depsupdate.update_packages(names, allow_system=_truthy(args.get("system"))) if names else []
         for r in results:
             logging.info(f"Dependency update (control) {r['name']}: "
                          + (f"{r.get('old')} -> {r.get('new')}" if r.get("ok") else str(r.get("error"))))

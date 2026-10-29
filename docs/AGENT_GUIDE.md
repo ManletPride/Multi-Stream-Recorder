@@ -82,7 +82,8 @@ python msr_ctl.py --json status   # per channel: error, last_error, errors, rest
 python msr_ctl.py --json deps check     # installed vs latest for msr, yt-dlp, streamlink, ffmpeg, packages
 python msr_ctl.py deps update yt-dlp    # pip, hidden; restores the old version on failure; next recording uses it
 ```
-`deps update` changes the user's Python packages: ask first unless the user asked for it. ffmpeg and MSR itself are never updated by `deps` (MSR: `update install --yes`).
+MSR keeps its packages in `.venv` in the MSR folder; `deps` runs there automatically (or call `.venv\Scripts\python msr_ctl.py ...`, Linux `.venv/bin/python`). Outside a venv `deps update` is refused (`not_venv`); never add `--system` without the user's OK, it changes the Python other programs use.
+`deps update` changes MSR's packages: ask first unless the user asked for it. ffmpeg and MSR itself are never updated by `deps` (MSR: `update install --yes`).
 
 ## 4. Output and exit codes
 

@@ -269,6 +269,10 @@ examples:
     logging.info(f"Notifications available: {HAS_NOTIFICATIONS}")
     logging.info(f"Streams directory: {config.get('Paths', 'streams_dir')}")
     logging.info(f"Data directory: {os.getcwd()} (config: {config.config_file})")
+    from msr import venv as _venv
+    logging.info(f"Environment: {_venv.describe()}")
+    if _venv.take_launch_notice():
+        logging.warning(_venv.LAUNCH_NOTICE)
 
     streams_dir = config.get('Paths', 'streams_dir')
     if not try_acquire_single_instance(streams_dir, logging.getLogger()):

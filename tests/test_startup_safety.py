@@ -219,6 +219,7 @@ class StartupErrorModuleTests(unittest.TestCase):
         """run_msr.pyw must not die silently when it cannot start the program."""
         code = (
             "import subprocess, runpy\n"
+            "import msr.nowindow\n"
             "import msr.startup_error as se\n"
             "se.show_dialog = lambda *a, **k: False\n"
             "def fail(*a, **k):\n"
@@ -226,7 +227,7 @@ class StartupErrorModuleTests(unittest.TestCase):
             "subprocess.Popen = fail\n"
             "runpy.run_path('run_msr.pyw', run_name='__main__')\n")
         with tempfile.TemporaryDirectory() as tmp:
-            env = dict(os.environ, MSR_DATA=tmp, PYTHONPATH=str(ROOT))
+            env = dict(os.environ, MSR_DATA=tmp, PYTHONPATH=str(ROOT), MSR_NO_VENV="1")  # never build .venv here
             done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                                   timeout=60, cwd=str(ROOT), env=env)
             self.assertEqual(done.returncode, 0, done.stderr[-1500:])
