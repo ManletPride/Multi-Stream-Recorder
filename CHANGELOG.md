@@ -6,6 +6,14 @@ A big interface release: a Library tab that shows (and can clean up) what your r
 
 ### Added
 
+**Clip Editor (new)**
+- A small DVR-style editor for cutting a clip out of a recording, also while it is still recording. Open it with **Shift+click on Clip Now**, **right-click a channel > Clip Editor…** (its recording in progress, or its newest finished recording), or **Library > Files > right-click > Clip Editor…** for any finished file.
+- Timeline over the whole recording so far (the live edge keeps growing; **Jump to live**), click or drag to scrub with a preview frame, **Play with sound** and a **Volume** slider so you can cut on dialogue, **Mark In / Mark Out** (I / O keys), nudge buttons, **Replay In / Out** (2 s around the point) and the clip length.
+- **Save Clip** makes a lossless stream copy into the Clips folder. It starts at the keyframe at or before your In point and tells you the real start; tick **Exact (re-encode)** for frame-exact edges. Names never overwrite.
+- It only reads the recording (shared access): the recorder keeps writing. When the recording ends the editor follows the finished `.mp4` (same timeline); if the file disappears (drive unplugged) your marks stay and Save waits until it is back. Nothing to install: sound uses ffmpeg and Windows' own audio output, and every ffmpeg runs hidden.
+- Agents: `msr_ctl.py clip CHANNEL --from T --to T` cuts from a recording in progress, `clip --file PATH --from T --to T [--exact]` from any finished file (no running copy needed). Times are seconds, M:SS or H:MM:SS; `--from=-60` counts back from the end and `--to end` is the live edge. The reply has the requested and actual start/end, `snapped` and the file. `api_version` stays 1.
+
+
 **Library tab (new)**
 - Size of your recordings per site, channel and month: headline numbers, donut and bar charts with hover details, a sortable channel table with **Open folder**, **Copy summary**, and an optional **Count hours**. It scans on a background thread with Cancel, only lists folders and reads file sizes, and never changes anything. Extra folders can be added with `[Library] extra_dirs` in `config.ini`.
 - **File management**: click a donut slice, bar or month to drill in; select channels and press **Delete...** (button, right-click or Delete key) to get a preview with filters (older than N days, keep the newest N files or GB, date range). The default is a reversible **Move to PendingDeletion** with **Undo**; **Delete permanently** needs a typed confirmation; the Recycle Bin is offered when it is large enough. New **Files**, **PendingDeletion** (Empty now / Restore) and **Clean up** tabs.

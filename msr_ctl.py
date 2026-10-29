@@ -79,7 +79,8 @@ CATALOG = {
     "sort": ("write", ["sort platform"]),
     "edit": ("write", ["edit twitch:old --name new"]),
     "check": ("read", ["check knut"]),
-    "clip": ("write", ["clip knut --seconds 30"]),
+    "clip": ("write", ["clip knut --seconds 30", "clip knut --from=-1:00 --to end",
+                       "clip --file D:/streams/Processed/kick/knut/knut.mp4 --from 1:02:03 --to 1:02:48 --exact"]),
     "screenshot": ("write", ["screenshot knut"]),
     "config get": ("read", ["config get Timeouts"]),
     "config set": ("write", ["config set Timeouts.poll_interval_minutes 1"]),
@@ -193,9 +194,13 @@ def build_parser():
     p.add_argument("--name", dest="new_name")
     p.add_argument("--platform")
     sub.add_parser("check", help="Check Now (all, or the named channels)").add_argument("channels", nargs="*")
-    p = sub.add_parser("clip", help="Clip Now")
-    p.add_argument("channel")
+    p = sub.add_parser("clip", help="Clip Now (last N seconds), or cut --from/--to like the Clip Editor")
+    p.add_argument("channel", nargs="?")
     p.add_argument("--seconds", type=int)
+    p.add_argument("--from", dest="from_", help="start: seconds, M:SS, H:MM:SS; --from=-T counts back from the end")
+    p.add_argument("--to", help="end (default: end = the live edge)")
+    p.add_argument("--file", help="a recording file (finished .mp4 or a .ts) instead of the channel")
+    p.add_argument("--exact", action="store_true", help="re-encode for frame-exact edges (default: keyframe)")
     sub.add_parser("screenshot", help="Screenshot Now").add_argument("channel")
 
     p = sub.add_parser("config", help="settings")
@@ -301,6 +306,11 @@ def to_request(a):
     if c == "check":
         return "check", ({"channels": a.channels} if a.channels else {})
     if c == "clip":
+        if a.from_ is not None or a.to is not None or a.file:
+            return "clip", {k: v for k, v in {"channel": a.channel, "file": a.file, "from": a.from_, "to": a.to,
+                                              "exact": a.exact or None}.items() if v is not None}
+        if not a.channel:
+            raise SystemExit("clip: give a channel (or --file with --from/--to)")
         return "clip", {"channel": a.channel, "seconds": a.seconds}
     if c == "screenshot":
         return "screenshot", {"channel": a.channel}
@@ -431,7 +441,7 @@ def run_offline(data_dir, cmd, args):
                     "error": "A copy is running for this recordings folder but its control channel does not "
                              "answer (an older version, or [Control] enabled = false). Nothing was changed."}, \
                 EXIT_NOT_RUNNING
-        if cmd in LIVE_ONLY:
+        if cmd in LIVE_ONLY and not (cmd == "clip" and args.get("file")):
             return {"ok": False, "code": "not_running", "error": "Multi-Stream Recorder is not running."}, \
                 EXIT_NOT_RUNNING
         reply = control.Controller(control.OfflineApp(config)).handle(cmd, args)

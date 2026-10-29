@@ -43,6 +43,7 @@ class ManageContext:
     deleters: dict = field(default_factory=dict)             # action -> deleter(item); tests inject fakes
     recycle_problem: Callable | None = None
     logger: object = None
+    clip_editor: Callable[[str], None] | None = None          # open the Clip Editor on a file
 
 
 def popup(win, menu: tk.Menu, event) -> None:
@@ -309,6 +310,8 @@ class FilesTab:
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._sync())
         self.menu = tk.Menu(self.tree, tearoff=0)
         self.menu.add_command(label="Play", command=self.play)
+        if self.mgr.ctx.clip_editor is not None:
+            self.menu.add_command(label="Clip Editor\u2026", command=self.clip_editor)
         self.menu.add_command(label="Show in Explorer", command=self.reveal)
         self.menu.add_separator()
         self.menu.add_command(label="Tick / untick selected", command=self.toggle_selected)
@@ -457,6 +460,15 @@ class FilesTab:
             opener(rec.path)
         except Exception as exc:
             dialogs.show_error(self.mgr.panel.toplevel, "Play", f"Could not open the file: {exc}")
+
+    def clip_editor(self) -> None:
+        rec = next(iter(self.selected_recs()), None)
+        if rec is None or self.mgr.ctx.clip_editor is None:
+            return
+        if not rec.path.lower().endswith((".mp4", ".ts", ".mkv", ".mov", ".m4v", ".flv", ".webm")):
+            dialogs.show_info(self.mgr.panel.toplevel, "Clip Editor", "Pick a video file.")
+            return
+        self.mgr.ctx.clip_editor(rec.path)
 
     def reveal(self) -> None:
         rec = next(iter(self.selected_recs()), None)

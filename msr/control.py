@@ -1050,7 +1050,65 @@ class Controller:
         return {"checking": "all"}
 
     def cmd_clip(self, args):
+        if any(args.get(k) not in (None, "") for k in ("from", "to", "file")):
+            return self._cut(args)
         return self._media(args, "clip")
+
+    def _cut(self, args):
+        """Clip Editor parity: cut [from, to] of a channel's recording in progress, or of any
+        recording file (file=, also without a running copy). Times: seconds, M:SS or H:MM:SS
+        from the file's start; a leading '-' counts back from the end; to may be 'end'."""
+        from msr import clip_core as core
+        config = self.app.config
+        src = args.get("file")
+        if src:
+            src = os.path.abspath(os.path.expanduser(str(src)))
+            if not os.path.isfile(src):
+                raise ControlError(f"No such file: {src}", "not_found")
+            if not src.lower().endswith(core.MEDIA_EXTS):
+                raise ControlError("That is not a recording (.ts / .mp4 / .mkv ...).", "invalid")
+        else:
+            if not args.get("channel"):
+                raise ControlError("Give a channel or file.", "bad_request")
+            from msr.worker import find_active_recording_file
+            rec = self._recorder()
+            recs = self.app.records()
+            key = recs[resolve_channel(recs, args.get("channel"))]["name"]
+            src = find_active_recording_file(rec, key)
+            if not src:
+                raise ControlError(f"{display_name(key)} has no recording in progress; pass file= for a "
+                                   "finished one.", "not_recording")
+        if args.get("from") in (None, ""):
+            raise ControlError("Give from= (and to=, default the end).", "bad_request")
+        ffmpeg = config.get("Advanced", "ffmpeg_path", fallback="ffmpeg") or "ffmpeg"
+        ffprobe = core.ffprobe_for(ffmpeg)
+        length = core.media_length(src, ffprobe)
+        if not length:
+            raise ControlError("Could not read the recording's length (is ffprobe installed?).", "failed")
+        try:
+            start = core.parse_time(args["from"], length)
+            end = core.parse_time(args.get("to") or "end", length)
+        except core.ClipError as e:
+            raise ControlError(str(e), "invalid") from None
+        if start >= length:
+            raise ControlError(f"from is past the end ({core.fmt_time(length)}).", "invalid")
+        base = (config.get("Clipping", "clips_dir", fallback="") or "").strip() or \
+            os.path.join(config.get("Paths", "streams_dir"), "Clips")
+        job = (os.path.normcase(src), "cut")
+        if job in self._media_jobs:
+            raise ControlError("A clip of this file is already being made.", "busy")
+        self._media_jobs.add(job)
+        try:
+            res = core.make_clip(ffmpeg, src, start, end, core.clips_folder_for(src, base),
+                                 exact=_truthy(args.get("exact")), length=length, ffprobe=ffprobe)
+        except core.ClipError as e:
+            raise ControlError(str(e), "failed") from None
+        finally:
+            self._media_jobs.discard(job)
+        logging.info(f"Clip saved (control): {res.path} ({res.duration:.1f} s)")
+        out = res.as_dict()
+        out.update(source=src, length=round(length, 3))
+        return out
 
     def cmd_screenshot(self, args):
         return self._media(args, "screenshot")

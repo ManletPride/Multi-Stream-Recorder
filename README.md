@@ -29,6 +29,7 @@ This is **v2.1.0**. See [CHANGELOG.md](CHANGELOG.md).
 - Per-channel status with measured resolution, fps and bitrate.
 - Live preview strip of every recording; click a tile to select, double-click to pin a larger preview.
 - **Clip Now** (last N seconds, stream copy, keyframe-aligned) and **Screenshot**, without interrupting the recording.
+- **Clip Editor**: Shift+click Clip Now (or right-click a channel, or a file in Library > Files) to scrub the recording so far, listen with a volume slider, mark In/Out and save a clip, while it keeps recording.
 - **Clips** and **Streams** buttons open the clips folder of the selected channel and the recordings folder.
 - Disk write and network meters.
 

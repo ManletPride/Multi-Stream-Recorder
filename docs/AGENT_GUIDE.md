@@ -20,6 +20,14 @@ Recording of the enabled channels starts at once. It runs until `python msr_ctl.
 
 ## 3. Core flows
 
+Cut a clip like the Clip Editor (stream copy from the keyframe at or before --from; the reply's `start`
+is the real start, `snapped` says if it moved; `--exact` re-encodes for frame-exact edges):
+```
+python msr_ctl.py --json clip knut --from=-1:00 --to end            # the last minute of the recording in progress
+python msr_ctl.py --json clip --file "D:\streams\Processed\kick\knut\knut.mp4" --from 1:02:03 --to 1:02:48
+```
+
+
 **Add a channel and record it**
 ```
 python msr_ctl.py add kick:knut twitch:someone      # platform:name, a bare Kick name or a channel URL

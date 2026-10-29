@@ -1672,6 +1672,60 @@ def main_gui(config):
             f"Screenshot Now: grabbing a frame for {_get_display_name(ch_name)}",
         )
 
+    def _clips_base():
+        return (config.get('Clipping', 'clips_dir', fallback='').strip()
+                or os.path.join(config.get('Paths', 'streams_dir'), 'Clips'))
+
+    def _open_clip_editor(path=None, ch_name=None, live=False):
+        """The Clip Editor on a recording in progress (live) or a finished file."""
+        from msr import clip_editor as _clip_editor
+        rec = recorder
+
+        def follow():
+            return find_active_recording_file(rec, ch_name) if (rec is not None and ch_name) else None
+        try:
+            _clip_editor.open_editor(
+                root, path, ffmpeg=config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg') or 'ffmpeg',
+                clips_base=_clips_base(), title_name=_get_display_name(ch_name) if ch_name else "",
+                live=live, follow=follow if live else None, state_file=state_file, logger=logging,
+                opener=open_local_path)
+        except Exception as e:
+            logging.error(f"Clip Editor: could not open: {e}")
+            _dialogs.show_error(root, "Clip Editor", f"Could not open the Clip Editor: {e}")
+
+    def _newest_processed(ch_name):
+        try:
+            platform, username_dir = channel_key_to_dirs(ch_name)
+            folder = os.path.join(config.get('Paths', 'streams_dir'), 'Processed', platform, username_dir)
+            mp4s = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith('.mp4')]
+            return max(mp4s, key=os.path.getmtime) if mp4s else None
+        except (OSError, ValueError):
+            return None
+
+    def _clip_editor_selected_channel(_event=None):
+        """Clip Editor for the selected channel: its recording in progress, else its newest
+        finished recording."""
+        ch_name = _get_selected_status_channel()
+        if not ch_name:
+            logging.info("Clip Editor: select a channel in the status list first")
+            return "break"
+        raw = None
+        if recorder and recorder.is_running:
+            st = recorder.status_dict.get(ch_name, {})
+            if channel_status_allows_clip(st.get("status", "")):
+                raw = find_active_recording_file(recorder, ch_name)
+        if raw:
+            _open_clip_editor(raw, ch_name, live=True)
+        else:
+            done = _newest_processed(ch_name)
+            if done:
+                _open_clip_editor(done, ch_name, live=False)
+            else:
+                _dialogs.show_info(root, "Clip Editor",
+                                   f"{_get_display_name(ch_name)} is not recording and has no finished "
+                                   "recording yet.")
+        return "break"
+
     def _open_clips_dir_for_channel(ch_name):
         """Open Explorer/Finder on this channel's clips & screenshots folder."""
         if not ch_name:
@@ -1713,10 +1767,12 @@ def main_gui(config):
     clip_now_btn = ttk.Button(status_header, text="Clip Now",
                               command=_clip_selected_channel, width=10)
     clip_now_btn.pack(side=tk.RIGHT)
+    clip_now_btn.bind("<Shift-Button-1>", _clip_editor_selected_channel)
     _Tooltip(clip_now_btn,
              "Cut a clip of the channel selected in the\n"
              "status list, using the Clip Length setting.\n"
-             "Right-click a recording for the same action.")
+             "Shift+click: open the Clip Editor (pick In/Out,\n"
+             "with sound). Right-click a recording for both.")
 
     screenshot_now_btn = ttk.Button(status_header, text="Screenshot",
                                     command=_screenshot_selected_channel, width=12)
@@ -1818,6 +1874,7 @@ def main_gui(config):
                         label=f"Clip Now ({clip_seconds}s)", command=_clip_selected_channel)
                     status_ctx_menu.add_command(
                         label="Screenshot Now", command=_screenshot_selected_channel)
+                status_ctx_menu.add_command(label="Clip Editor\u2026", command=_clip_editor_selected_channel)
 
             status_ctx_menu.add_separator()
 
@@ -1970,7 +2027,8 @@ def main_gui(config):
             log_path=os.path.join(library_data_dir, "library_actions.log"),
             manifest_path=os.path.join(library_data_dir, "library_moves.json"),
             get_busy=_library_busy, get_purge=_library_purge_settings,
-            revealer=reveal_in_file_browser, opener=open_local_path, logger=logging.getLogger("msr.library")),
+            revealer=reveal_in_file_browser, opener=open_local_path, logger=logging.getLogger("msr.library"),
+            clip_editor=lambda p: _open_clip_editor(p)),
         get_roots=lambda: _library.roots_from_config(config),
         get_roster=lambda: [c["name"] for c in channels],
         cache_path=os.path.join(os.path.dirname(os.path.abspath(config.config_file)), "library_cache.json"),
