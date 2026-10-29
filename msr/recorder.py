@@ -25,7 +25,7 @@ from msr.kick_realtime import (
     BROWSER_HEADERS, CENTRIFUGO_MAX_SUBS, cf_connect, cf_refresh, cf_subscribe,
     cf_unsubscribe, negotiate, new_client_id, parse_centrifugo_message, pusher_url,
 )
-from msr.worker import record_worker, remux_to_mp4, save_metadata
+from msr.worker import record_worker, remux_to_mp4, save_metadata, verify_remux_output
 
 # ────────────────────────────────────────────────
 #          Background Cleanup Thread
@@ -177,6 +177,7 @@ class BackgroundCleaner:
                 found_locked = True
                 continue
 
+            restore_stranded_probe_files(username_path)
             for filename in os.listdir(username_path):
                 if not filename.endswith('.ts'):
                     continue
@@ -204,7 +205,7 @@ class BackgroundCleaner:
                 # file.  This catches an in-progress recording BEFORE we
                 # waste a full remux on it, instead of discovering the
                 # lock at the move-to-PendingDeletion step afterwards.
-                probe_name = raw_file + ".cleanupprobe"
+                probe_name = raw_file + PROBE_SUFFIX
                 try:
                     os.rename(raw_file, probe_name)
                     os.rename(probe_name, raw_file)
@@ -250,28 +251,22 @@ class BackgroundCleaner:
                 found_any = True
                 logging.info(f"Cleanup: Processing {filename} ({human_size(file_size)})")
 
-                mp4_filename = filename.replace('.ts', '.mp4')
+                # Only the extension is replaced: 'a.tsunami.ts' -> 'a.tsunami.mp4'.
+                mp4_filename = filename[:-len('.ts')] + '.mp4'
                 mp4_file = os.path.join(processed_path, mp4_filename)
 
-                # Only take the "already remuxed" shortcut if the existing
-                # MP4 is plausibly complete.  A remux is roughly size-
-                # preserving, so an MP4 much smaller than its .ts is a
-                # stale partial (e.g. remuxed while the recording was
-                # still in progress) and must be redone — remux_to_mp4
-                # overwrites it (-y).
+                # Only take the "already remuxed" shortcut if the existing MP4 passes the same
+                # check a fresh remux must (readable, as long as the .ts).  Anything else is a
+                # stale partial: it is redone to a .part and replaces the old file only once the
+                # new one is verified, and the raw .ts is not touched before that.
                 existing_mp4_ok = False
                 if os.path.exists(mp4_file):
-                    try:
-                        mp4_size = os.path.getsize(mp4_file)
-                        existing_mp4_ok = (mp4_size > 5 * 1024**2
-                                           and mp4_size >= 0.8 * file_size)
-                        if mp4_size > 5 * 1024**2 and not existing_mp4_ok:
-                            logging.warning(
-                                f"Cleanup: existing MP4 for {filename} is only "
-                                f"{human_size(mp4_size)} vs {human_size(file_size)} raw "
-                                "— treating as stale partial, re-remuxing")
-                    except Exception:
-                        existing_mp4_ok = False
+                    existing_mp4_ok, why = verify_remux_output(
+                        raw_file, mp4_file, ffmpeg_path, logging.getLogger())
+                    if not existing_mp4_ok:
+                        logging.warning(
+                            f"Cleanup: existing MP4 for {filename} is not complete ({why}) "
+                            "— re-remuxing")
 
                 if existing_mp4_ok:
                     logging.info(f"Cleanup: MP4 already exists for {filename}, just moving raw file")
@@ -284,6 +279,13 @@ class BackgroundCleaner:
                     )
                     if not success:
                         logging.error(f"Cleanup: Failed to process {filename}: {error}")
+                        if error != "output too small":
+                            # A failed remux (ffmpeg missing, timeout, disk full, antivirus lock)
+                            # says nothing about the recording: keep it where it is and retry.
+                            logging.warning(
+                                f"Cleanup: {filename} kept in Recorded (not moved, not deleted); "
+                                "it is retried on the next pass")
+                            continue
                         try:
                             pending_path = os.path.join(pending_dir, filename)
                             shutil.move(raw_file, pending_path)
@@ -353,6 +355,64 @@ def finish_headless_session(recorder, say=print):
         recorder.manager.shutdown()
     except Exception:
         pass
+
+
+# ────────────────────────────────────────────────
+#          Leftovers of an interrupted cleanup / remux
+# ────────────────────────────────────────────────
+
+PROBE_SUFFIX = ".cleanupprobe"
+
+
+def restore_stranded_probe_files(folder, logger=None):
+    """Rename ``x.ts.cleanupprobe`` back to ``x.ts`` (the rename probe died between its two renames).
+
+    Such a file is invisible to every ``.ts`` scan, so the recording would be left forever.
+    Never overwrites: if ``x.ts`` exists too, both are left alone and a warning is logged.
+    Returns the number of files restored.
+    """
+    logger = logger or logging.getLogger()
+    restored = 0
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return 0
+    for name in names:
+        if not name.endswith('.ts' + PROBE_SUFFIX):
+            continue
+        stranded = os.path.join(folder, name)
+        original = os.path.join(folder, name[:-len(PROBE_SUFFIX)])
+        if os.path.exists(original):
+            logger.warning(f"Cleanup: both {name} and {os.path.basename(original)} exist - left alone")
+            continue
+        try:
+            os.rename(stranded, original)
+            restored += 1
+            logger.warning(f"Cleanup: restored {os.path.basename(original)} (a previous cleanup was interrupted)")
+        except OSError as e:
+            logger.warning(f"Cleanup: could not restore {name}: {e}")
+    return restored
+
+
+def remove_stale_remux_parts(processed_base, logger=None):
+    """Delete ``*.mp4.part`` files under Processed/: output of a remux that was cut off.
+
+    Only call this while no remux can be running (before the recorders start): a ``.part`` is
+    never footage, the raw ``.ts`` it came from is still in Recorded/ and is remuxed again.
+    Returns the number removed.
+    """
+    logger = logger or logging.getLogger()
+    removed = 0
+    for dirpath, _dirs, files in os.walk(processed_base):
+        for name in files:
+            if name.endswith(storage.REMUX_PART_SUFFIX):
+                try:
+                    os.remove(os.path.join(dirpath, name))
+                    removed += 1
+                    logger.info(f"Cleanup: removed the unfinished remux output {name}")
+                except OSError as e:
+                    logger.warning(f"Cleanup: could not remove {name}: {e}")
+    return removed
 
 
 # ────────────────────────────────────────────────
@@ -1771,6 +1831,7 @@ class StreamRecorder:
             pending_dir = os.path.join(self.pending_base, platform, username_dir)
             os.makedirs(processed_path, exist_ok=True)
             os.makedirs(pending_dir, exist_ok=True)
+            restore_stranded_probe_files(username_path)
             try:
                 names = os.listdir(username_path)
             except OSError:
@@ -1805,6 +1866,7 @@ class StreamRecorder:
                     "skipping this one (leftover files are handled when the session stops)")
                 return empty
         self._startup_cleanup_cancel.clear()
+        remove_stale_remux_parts(self.processed_base)
 
         try:
             snapshot_time = time.time()
@@ -1945,16 +2007,11 @@ class StreamRecorder:
 
         mp4_ok = False
         if os.path.exists(mp4_file) and not os.path.exists(marker):
-            try:
-                mp4_size = os.path.getsize(mp4_file)
-                mp4_ok = mp4_size > 5 * 1024**2 and mp4_size >= 0.8 * file_size
-                if mp4_size > 5 * 1024**2 and not mp4_ok:
-                    logging.warning(
-                        f"Startup cleanup: existing MP4 for {filename} is only "
-                        f"{human_size(mp4_size)} vs {human_size(file_size)} raw "
-                        "- treating as stale partial, re-remuxing")
-            except Exception:
-                mp4_ok = False
+            mp4_ok, why = verify_remux_output(raw_file, mp4_file, ffmpeg_path, logging.getLogger())
+            if not mp4_ok:
+                logging.warning(
+                    f"Startup cleanup: existing MP4 for {filename} is not complete ({why}) "
+                    "- re-remuxing")
 
         if mp4_ok:
             logging.info("Startup cleanup: MP4 already exists, moving raw file")
@@ -1995,6 +2052,11 @@ class StreamRecorder:
                 except OSError:
                     pass
                 logging.error(f"Startup cleanup: Failed to process {filename}: {error}")
+                if error != "output too small":
+                    logging.warning(
+                        f"Startup cleanup: {filename} kept in Recorded (not moved, not deleted); "
+                        "it is retried on the next start")
+                    return "error"
                 try:
                     pending_path = os.path.join(pending_dir, filename)
                     shutil.move(raw_file, pending_path)

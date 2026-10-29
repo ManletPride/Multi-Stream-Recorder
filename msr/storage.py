@@ -24,6 +24,7 @@ from typing import NamedTuple, Optional
 
 PROBE_NAME = ".msr_write_probe"
 PART_SUFFIX = ".msrpart"
+REMUX_PART_SUFFIX = ".mp4.part"   # a remux in progress (msr.worker.remux_to_mp4); never footage to move
 FALLBACK_OFF = "off"
 MIN_AGE_SECONDS = 300      # a fallback file touched more recently than this may still be in use
 
@@ -177,11 +178,16 @@ class ReturnSummary(NamedTuple):
     moved_ts: list
 
 
+def remux_part_path(mp4_file):
+    """Where a remux writes before it is verified and renamed onto ``mp4_file`` (``a.mp4`` -> ``a.mp4.part``)."""
+    return mp4_file + ".part"
+
+
 def has_files(folder):
     """True if ``folder`` holds at least one file that is not just a leftover probe."""
     try:
         for _dir, _dirs, names in os.walk(folder):
-            if any(n != PROBE_NAME and not n.endswith(PART_SUFFIX) for n in names):
+            if any(n != PROBE_NAME and not n.endswith((PART_SUFFIX, REMUX_PART_SUFFIX)) for n in names):
                 return True
     except OSError:
         pass
@@ -239,7 +245,7 @@ def reconcile_fallback(fallback, primary, logger=None, min_age=MIN_AGE_SECONDS, 
     for folder, name in entries:
         if should_stop is not None and should_stop.is_set():
             break
-        if name == PROBE_NAME or name.endswith(PART_SUFFIX):
+        if name == PROBE_NAME or name.endswith((PART_SUFFIX, REMUX_PART_SUFFIX)):
             continue
         src = os.path.join(folder, name)
         try:

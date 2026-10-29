@@ -22,7 +22,7 @@ from msr.config import (
     parser_getint,
 )
 from msr import storage
-from msr.deps import HAS_CURL_CFFI, HAS_YTDLP
+from msr.deps import HAS_CURL_CFFI, HAS_PSUTIL, HAS_YTDLP
 from msr.preview_state import build_ladder
 from msr.platforms import (
     FishtankAuth,
@@ -1431,6 +1431,11 @@ def _probe_duration(ffmpeg_path, raw_file):
 # on Windows (they are unsigned) and -1 is already the timeout sentinel.
 REMUX_CANCELLED = -2
 
+MIN_MP4_BYTES = 5 * 1024**2       # a smaller remux output is junk ("output too small")
+DURATION_SLACK_SECONDS = 5.0      # an output may be this much (or DURATION_SLACK_FRACTION) shorter
+DURATION_SLACK_FRACTION = 0.02    # than its source and still count as complete
+SIZE_PLAUSIBLE_RATIO = 0.9        # a copy-remux is about the size of its source
+
 
 def _lower_priority_popen_kwargs():
     """Popen kwargs that start a child at below-normal CPU priority.
@@ -1570,9 +1575,38 @@ def _run_remux_cmd(ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file, logger, timeout,
         if pct is not None:
             last_log_pct = pct
 
+    # ── Watchdog ─────────────────────────────────────────────────────────
+    # The stdout loop below blocks until ffmpeg closes its output, so a hung ffmpeg (a stalled
+    # network share, a locked file) would never reach the ``wait(timeout)`` after it, and a
+    # cancel would never be seen.  The watchdog kills ffmpeg when it prints no progress for
+    # ``timeout`` seconds (progress arrives every 5 s while it works, however long the file is)
+    # or when ``cancel_event`` is set.
+    watch = {"last": time.monotonic(), "stalled": False, "cancelled": False}
+    watch_done = threading.Event()
+
+    def _watchdog():
+        while not watch_done.wait(0.5):
+            if cancel_event is not None and cancel_event.is_set():
+                watch["cancelled"] = True
+            elif time.monotonic() - watch["last"] > timeout:
+                watch["stalled"] = True
+            else:
+                continue
+            try:
+                if HAS_PSUTIL and getattr(proc, "pid", None):
+                    kill_process_tree(proc.pid)   # also the children of a wrapper script
+                proc.kill()
+            except Exception:
+                pass
+            return
+
+    threading.Thread(target=_watchdog, daemon=True, name="remux-watchdog").start()
+
     # ── Read stdout (ffmpeg progress blocks) ─────────────────────────────
     for line in proc.stdout:
+        watch["last"] = time.monotonic()
         if cancel_event is not None and cancel_event.is_set():
+            watch_done.set()
             try:
                 proc.kill()
             except Exception:
@@ -1597,6 +1631,14 @@ def _run_remux_cmd(ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file, logger, timeout,
                 else:
                     current_block = {}
     proc.stdout.close()
+    watch_done.set()
+    if watch["cancelled"] or watch["stalled"]:
+        proc.wait()
+        t_err.join(timeout=5)
+        if watch["cancelled"]:
+            return REMUX_CANCELLED, "\n".join(stderr_lines)
+        logger.error(f"{label}: ffmpeg gave no progress for {timeout}s - killed")
+        return -1, "\n".join(stderr_lines)
 
     # Wait for process with timeout
     try:
@@ -1611,14 +1653,93 @@ def _run_remux_cmd(ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file, logger, timeout,
     return proc.returncode, "\n".join(stderr_lines)
 
 
+def _remove_quietly(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def verify_media_output(sources, out_file, ffmpeg_path, logger, min_bytes=None):
+    """Is ``out_file`` a complete copy of ``sources`` (a list of files, played one after another)?
+
+    Returns ``(ok, reason)``.  Nothing may be deleted or replaced because of an output that
+    did not pass this:
+
+    * it exists and has at least ``min_bytes``;
+    * ffprobe/ffmpeg can read a duration from it (an interrupted +faststart MP4 has no moov atom);
+    * that duration is within max(5 s, 2 %) of the sources' total (shorter means truncated).
+      A source duration is unreliable on live captures (PTS jumps, ad splices), so a short
+      duration with an output at least ``SIZE_PLAUSIBLE_RATIO`` of the source size is accepted
+      with a warning; if the source duration cannot be read the same size rule decides.
+    """
+    min_bytes = MIN_MP4_BYTES if min_bytes is None else min_bytes
+    try:
+        size = os.path.getsize(out_file)
+    except OSError:
+        return False, "output missing"
+    if size < min_bytes:
+        return False, "output too small"
+    out_secs = _probe_duration(ffmpeg_path, out_file)
+    if not out_secs:
+        return False, "output unreadable (no duration)"
+    src_secs = 0.0
+    for src in sources:
+        d = _probe_duration(ffmpeg_path, src)
+        if not d:
+            src_secs = None
+            break
+        src_secs += d
+    if src_secs:
+        slack = max(DURATION_SLACK_SECONDS, DURATION_SLACK_FRACTION * src_secs)
+        if out_secs >= src_secs - slack:
+            return True, None
+        what = f"{format_elapsed(out_secs)} of {format_elapsed(src_secs)}"
+    else:
+        what = "source length unknown"
+    src_size = sum(os.path.getsize(s) for s in sources if os.path.exists(s))
+    if src_size and size < SIZE_PLAUSIBLE_RATIO * src_size:
+        return False, f"output truncated ({what}; {human_size(size)} of {human_size(src_size)})"
+    logger.warning(f"Output length differs from the source ({what}) but its size matches "
+                   f"({human_size(size)} of {human_size(src_size)}); accepted")
+    return True, None
+
+
+def verify_remux_output(raw_file, out_file, ffmpeg_path, logger, min_bytes=None):
+    """``verify_media_output`` for one raw recording."""
+    return verify_media_output([raw_file], out_file, ffmpeg_path, logger, min_bytes)
+
+
+def _publish_remux(part_file, mp4_file, logger):
+    """Atomically move a verified ``.mp4.part`` onto its final name (retries a brief AV/lock hold)."""
+    for attempt, wait in enumerate((0.5, 1, 2, 4, None)):
+        try:
+            os.replace(part_file, mp4_file)
+            return
+        except PermissionError as e:
+            if wait is None:
+                raise
+            logger.warning(f"Could not publish {os.path.basename(mp4_file)} ({e}); retrying in {wait}s")
+            time.sleep(wait)
+
+
 def remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, timeout=600,
                  progress_cb=None, low_priority=False, cancel_event=None):
     """Remux recorded .ts file to MP4 format.
+
+    The output is written to ``<mp4>.part``, checked (``verify_remux_output``: size, a readable
+    duration, no shorter than the source) and only then renamed onto ``mp4_file``, so ``mp4_file``
+    is either absent/untouched or a complete recording, never half of one, and an existing MP4 is
+    not overwritten by a failed attempt.  ``raw_file`` is never modified.  Every failure removes the
+    ``.part``.
 
     ``low_priority`` / ``cancel_event`` are for background remuxes: ffmpeg runs
     at below-normal priority, and setting ``cancel_event`` aborts the remux
     (returns ``(False, 0, "cancelled")``, raw file untouched).
     """
+    part_file = storage.remux_part_path(mp4_file)
+    _remove_quietly(part_file)   # left by a crash of an earlier attempt
+
     # Probe for timed_id3 codec (common in Twitch streams)
     has_timed_id3 = False
     try:
@@ -1638,22 +1759,35 @@ def remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, timeout=600,
             ffmpeg_path, "-i", raw_file,
             "-map", "0:v?", "-map", "0:a?",
             "-c", "copy", "-movflags", "+faststart",
-            "-loglevel", "error", mp4_file, "-y",
+            "-loglevel", "error", "-f", "mp4", part_file, "-y",
         ]
     else:
         ffmpeg_cmd = [
             ffmpeg_path, "-i", raw_file,
             "-c", "copy", "-map", "0",
             "-movflags", "+faststart",
-            "-loglevel", "error", mp4_file, "-y",
+            "-loglevel", "error", "-f", "mp4", part_file, "-y",
         ]
 
     file_size = os.path.getsize(raw_file) if os.path.exists(raw_file) else 0
     logger.info("Starting remux...")
 
+    def _accept(label):
+        """Verify and publish the ``.part``. Returns ``(result_tuple_or_None)``."""
+        ok, reason = verify_remux_output(raw_file, part_file, ffmpeg_path, logger)
+        if not ok:
+            size = os.path.getsize(part_file) if os.path.exists(part_file) else 0
+            logger.error(f"{label} output rejected ({reason}); the raw file {os.path.basename(raw_file)} is kept")
+            _remove_quietly(part_file)
+            return False, size, reason
+        _publish_remux(part_file, mp4_file, logger)
+        mp4_size = os.path.getsize(mp4_file)
+        logger.info(f"{label} successful: {human_size(mp4_size)}")
+        return True, mp4_size, None
+
     try:
         returncode, stderr_text = _run_remux_cmd(
-            ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file,
+            ffmpeg_cmd, ffmpeg_path, raw_file, part_file,
             logger, timeout, file_size, label="Remux",
             progress_cb=progress_cb,
             low_priority=low_priority, cancel_event=cancel_event,
@@ -1661,63 +1795,69 @@ def remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, timeout=600,
 
         if returncode == REMUX_CANCELLED:
             logger.warning("Remux cancelled")
+            _remove_quietly(part_file)
             return False, 0, "cancelled"
 
         if returncode == -1:
             logger.error("Remux timed out")
+            _remove_quietly(part_file)
             return False, 0, "timeout"
 
-        if returncode == 0 and os.path.exists(mp4_file):
-            mp4_size = os.path.getsize(mp4_file)
-            if mp4_size > 5 * 1024**2:
-                logger.info(f"Remux successful: {human_size(mp4_size)}")
-                return True, mp4_size, None
-            else:
-                logger.error(f"Remux produced small file: {human_size(mp4_size)}")
-                return False, mp4_size, "output too small"
+        if returncode == 0 and os.path.exists(part_file):
+            result = _accept("Remux")
+            if result[0] or result[2] == "output too small":
+                return result
+            failure, signed_code = result[2], 0      # exit 0 but a bad output: the fallback may do better
         else:
             import ctypes
             signed_code = ctypes.c_int32(returncode).value
+            failure = f"code {signed_code}"
             logger.error(f"Remux failed — returncode: {returncode} (signed: {signed_code})")
             if stderr_text:
                 logger.error(f"FFmpeg stderr: {stderr_text}")
+            _remove_quietly(part_file)
 
-            # Fallback: strip metadata streams
-            if signed_code == -22 or has_timed_id3 is False:
-                logger.warning("Attempting fallback remux without metadata streams")
-                fallback_cmd = [
-                    ffmpeg_path, "-i", raw_file,
-                    "-map", "0:v?", "-map", "0:a?",
-                    "-c", "copy", "-movflags", "+faststart",
-                    "-loglevel", "error", mp4_file, "-y",
-                ]
-                try:
-                    fb_code, fb_stderr = _run_remux_cmd(
-                        fallback_cmd, ffmpeg_path, raw_file, mp4_file,
-                        logger, timeout, file_size, label="Fallback remux",
-                        progress_cb=progress_cb,
-                        low_priority=low_priority, cancel_event=cancel_event,
-                    )
-                    if fb_code == REMUX_CANCELLED:
-                        logger.warning("Remux cancelled")
-                        return False, 0, "cancelled"
-                    if fb_code == 0 and os.path.exists(mp4_file):
-                        mp4_size = os.path.getsize(mp4_file)
-                        if mp4_size > 5 * 1024**2:
-                            logger.info(f"Fallback remux successful: {human_size(mp4_size)}")
-                            return True, mp4_size, None
+        # Fallback: strip metadata streams
+        if signed_code == -22 or has_timed_id3 is False:
+            logger.warning("Attempting fallback remux without metadata streams")
+            fallback_cmd = [
+                ffmpeg_path, "-i", raw_file,
+                "-map", "0:v?", "-map", "0:a?",
+                "-c", "copy", "-movflags", "+faststart",
+                "-loglevel", "error", "-f", "mp4", part_file, "-y",
+            ]
+            try:
+                fb_code, fb_stderr = _run_remux_cmd(
+                    fallback_cmd, ffmpeg_path, raw_file, part_file,
+                    logger, timeout, file_size, label="Fallback remux",
+                    progress_cb=progress_cb,
+                    low_priority=low_priority, cancel_event=cancel_event,
+                )
+                if fb_code == REMUX_CANCELLED:
+                    logger.warning("Remux cancelled")
+                    _remove_quietly(part_file)
+                    return False, 0, "cancelled"
+                if fb_code == 0 and os.path.exists(part_file):
+                    result = _accept("Fallback remux")
+                    if result[0]:
+                        return result
+                    failure = result[2]
+                else:
                     logger.error(f"Fallback remux also failed: {fb_code}")
                     if fb_stderr:
                         logger.error(f"Fallback stderr: {fb_stderr}")
-                except Exception as e:
-                    logger.error(f"Fallback remux error: {e}")
-            return False, 0, f"code {signed_code}"
+            except Exception as e:
+                logger.error(f"Fallback remux error: {e}")
+        _remove_quietly(part_file)
+        return False, 0, failure
 
     except FileNotFoundError:
         logger.error("ffmpeg not found in PATH")
+        _remove_quietly(part_file)
         return False, 0, "ffmpeg not found"
     except Exception as e:
         logger.error(f"Remux error: {e}")
+        _remove_quietly(part_file)
         return False, 0, str(e)
 
 
@@ -1887,7 +2027,13 @@ def finalize_recording_group(parts, group_base_name, processed_path, pending_dir
             **no_window_kwargs()
         )
 
-        if result.returncode != 0 or not os.path.exists(merge_tmp) or os.path.getsize(merge_tmp) == 0:
+        verified, why = (False, "no output")
+        if result.returncode == 0 and os.path.exists(merge_tmp) and os.path.getsize(merge_tmp) > 0:
+            verified, why = verify_media_output(
+                [p['mp4'] for p in parts], merge_tmp, ffmpeg_path, logger, min_bytes=1)
+        if not verified:
+            if result.returncode == 0:
+                logger.error(f"Stitched output rejected ({why})")
             logger.error(
                 f"Segment stitching failed (ffmpeg exit {result.returncode}) — "
                 f"leaving {len(parts)} segments as separate files. "
@@ -2618,11 +2764,6 @@ def record_worker(args):
                         else:
                             logger.error(f"Background remux failed: {error}")
                             if error == "output too small":
-                                if os.path.exists(mp4_file):
-                                    try:
-                                        os.remove(mp4_file)
-                                    except Exception:
-                                        pass
                                 try:
                                     shutil.move(
                                         raw_file,
@@ -3008,15 +3149,9 @@ def record_worker(args):
                 # worthless remux.  Delete the tiny mp4 artifact and back off
                 # instead of hammering the server in a tight 5-second loop.
                 if error == "output too small":
-                    # Delete the useless sub-threshold mp4 that was written
-                    if os.path.exists(mp4_file):
-                        try:
-                            os.remove(mp4_file)
-                            logger.info(f"Deleted undersized mp4 artifact: {os.path.basename(mp4_file)}")
-                        except Exception as del_err:
-                            logger.warning(f"Could not delete undersized mp4: {del_err}")
-
-                    # Also move the raw .ts to PendingDeletion so it doesn't
+                    # (remux_to_mp4 already discarded its undersized .part; an MP4 of the same
+                    # name that is there is an earlier, good recording and is left alone.)
+                    # Move the raw .ts to PendingDeletion so it doesn't
                     # accumulate in the Recorded directory
                     try:
                         pending_path = os.path.join(pending_dir, os.path.basename(raw_file))

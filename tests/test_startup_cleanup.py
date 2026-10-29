@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import msr.recorder as recorder_mod
 import msr.worker as worker_mod
 from msr.recorder import StreamRecorder, _cleanup_lock
+from tests.fake_ffmpeg import FakeFfmpeg, write_media
 
 
 class FakeConfig:
@@ -143,11 +144,13 @@ def processed_path(rec, platform, channel, name):
 class FakeRemux:
     """Replacement for remux_to_mp4 that records calls and writes a fake MP4."""
 
-    def __init__(self, events=None, block=None, honour_cancel=False, fail=False, mp4_bytes=6 * 1024**2):
+    def __init__(self, events=None, block=None, honour_cancel=False, fail=False, mp4_bytes=6 * 1024**2,
+                 error="code 1"):
         self.events = events if events is not None else []
         self.block = block              # threading.Event the remux waits on
         self.honour_cancel = honour_cancel
         self.fail = fail
+        self.error = error
         self.mp4_bytes = mp4_bytes
         self.calls = []
         self.entered = threading.Event()
@@ -177,7 +180,7 @@ class FakeRemux:
                         return False, 0, "cancelled"
             if self.fail:
                 self.events.append(f"remux:failed:{os.path.basename(raw_file)}")
-                return False, 0, "code 1"
+                return False, 0, self.error
             with open(mp4_file, "wb") as fh:
                 fh.write(b"\0" * self.mp4_bytes)
             self.events.append(f"remux:end:{os.path.basename(raw_file)}")
@@ -444,11 +447,11 @@ class BackgroundStartupTests(unittest.TestCase):
         self.assertTrue(os.path.exists(pending_path(rec, "kick", "chanA", "chanA_20260101_000100.ts")))
         self.assertEqual(len(remux.calls), 1)
 
-    def test_failed_remux_moves_raw_to_pending_deletion(self):
+    def test_junk_remux_moves_raw_to_pending_deletion(self):
         rec = make_recorder(self.tmp)
         make_ts(rec, "kick", "chanA", "chanA_20260101_000000.ts")
         plan = rec._plan_startup_cleanup()
-        remux = FakeRemux(fail=True)
+        remux = FakeRemux(fail=True, error="output too small")
         with mock.patch.object(recorder_mod, "remux_to_mp4", remux), self.assertLogs(level="INFO") as logs:
             rec._process_startup_leftovers(plan, background=True)
         text = "\n".join(logs.output)
@@ -456,15 +459,35 @@ class BackgroundStartupTests(unittest.TestCase):
         self.assertIn("Moved unprocessable chanA_20260101_000000.ts to PendingDeletion", text)
         self.assertTrue(os.path.exists(pending_path(rec, "kick", "chanA", "chanA_20260101_000000.ts")))
 
+    def test_failed_remux_keeps_raw_for_the_next_start(self):
+        """A failure says nothing about the recording: it stays in Recorded/ (see test_footage_safety)."""
+        rec = make_recorder(self.tmp)
+        raw = make_ts(rec, "kick", "chanA", "chanA_20260101_000000.ts")
+        plan = rec._plan_startup_cleanup()
+        remux = FakeRemux(fail=True)
+        with mock.patch.object(recorder_mod, "remux_to_mp4", remux), self.assertLogs(level="INFO") as logs:
+            rec._process_startup_leftovers(plan, background=True)
+        text = "\n".join(logs.output)
+        self.assertIn("Failed to process chanA_20260101_000000.ts", text)
+        self.assertIn("kept in Recorded", text)
+        self.assertTrue(os.path.exists(raw))
+        self.assertFalse(os.path.exists(pending_path(rec, "kick", "chanA", "chanA_20260101_000000.ts")))
+
     def test_complete_existing_mp4_skips_remux(self):
         rec = make_recorder(self.tmp)
-        make_ts(rec, "kick", "chanA", "chanA_20260101_000000.ts", size=2048)
-        plan = rec._plan_startup_cleanup()
+        raw = make_ts(rec, "kick", "chanA", "chanA_20260101_000000.ts", size=2048)
         out = processed_path(rec, "kick", "chanA", "chanA_20260101_000000.mp4")
-        with open(out, "wb") as fh:
-            fh.write(b"\0" * (6 * 1024**2))
+        # A real check now: the existing MP4 must probe to the .ts's length (scripted fake ffprobe).
+        fake = FakeFfmpeg(os.path.join(self.tmp, "fake"))
+        write_media(raw, 8 * 1024, 600)
+        write_media(out, 8 * 1024, 600)
+        old = time.time() - 3600
+        os.utime(raw, (old, old))
+        rec.config.config.set("Advanced", "ffmpeg_path", fake.ffmpeg)
+        plan = rec._plan_startup_cleanup()
         remux = FakeRemux()
-        with mock.patch.object(recorder_mod, "remux_to_mp4", remux):
+        with fake.installed(), mock.patch.object(worker_mod, "MIN_MP4_BYTES", 1024), \
+                mock.patch.object(recorder_mod, "remux_to_mp4", remux):
             rec._process_startup_leftovers(plan, background=True)
         self.assertEqual(remux.calls, [])
         self.assertTrue(os.path.exists(pending_path(rec, "kick", "chanA", "chanA_20260101_000000.ts")))
@@ -698,14 +721,14 @@ class RemuxPriorityAndCancelTests(unittest.TestCase):
                 fh.write(b"\0" * 1024)
             seen = {}
 
-            def fake_run(*a, **k):
+            def fake_run(cmd, ffmpeg_path, raw_file, out_file, *a, **k):
                 seen.update(k)
-                out = os.path.join(tmp, "x.mp4")
-                with open(out, "wb") as fh:
+                with open(out_file, "wb") as fh:    # the .mp4.part the remux writes
                     fh.write(b"\0" * (6 * 1024**2))
                 return 0, ""
 
             with mock.patch.object(worker_mod, "_run_remux_cmd", fake_run), \
+                    mock.patch.object(worker_mod, "verify_remux_output", lambda *a, **k: (True, None)), \
                     mock.patch.object(worker_mod.subprocess, "run", side_effect=OSError("no ffmpeg")):
                 ok, size, err = worker_mod.remux_to_mp4(
                     raw, os.path.join(tmp, "x.mp4"), "ffmpeg", logging.getLogger(), 30)
