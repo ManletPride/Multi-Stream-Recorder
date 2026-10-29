@@ -32,6 +32,9 @@ venv/
 .msr_write_probe
 .msr_instance.lock
 msr_update_error.txt
+msr_update_notice.txt
+# previous program files kept by the in-app updater for rollback
+msr_update_backup/
 # Why a start failed under pythonw (traceback without values; written by msr/startup_error.py)
 msr_startup_error.log
 # config.ini copies kept when it could not be parsed (they hold the same secrets as config.ini)

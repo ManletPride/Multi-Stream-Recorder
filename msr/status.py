@@ -15,7 +15,7 @@ import shutil
 import sys
 
 from msr import __version__
-from msr.config import Config, default_streams_dir, new_parser
+from msr.config import Config, default_streams_dir, fishtank_password, new_parser
 from msr.history import is_sensitive
 
 # Shown from config.ini; Paths, Fishtank and anything that looks secret are never copied.
@@ -240,7 +240,7 @@ def build_status(config_path: str = "config.ini", tools: dict | None = None, lib
                                   "drive_available": drive_ok,
                                   "fallback": _fallback_mode(parser.get("Paths", "fallback_dir", fallback=""))},
             "fishtank_login_set": bool(parser.get("Fishtank", "email", fallback="").strip()
-                                       and parser.get("Fishtank", "password", fallback="").strip()),
+                                       and fishtank_password(parser).strip()),
             "cookies_file_set": bool(parser.get("Paths", "cookies_file", fallback="").strip()),
         },
         "channels": channels,

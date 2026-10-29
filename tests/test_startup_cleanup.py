@@ -554,15 +554,20 @@ class BackgroundStartupTests(unittest.TestCase):
         rec = make_recorder(self.tmp)
         ts = make_ts(rec, "kick", "chanA", "chanA_20260101_000000.ts")
 
-        def boom(*a, **k):
-            raise RuntimeError("ffmpeg exploded")
+        class CrashingRemux(FakeRemux):
+            def __call__(self, *a, **k):
+                self.calls.append(a[0])
+                raise RuntimeError("ffmpeg exploded")
 
-        remux = FakeRemux()
+        # The crash is installed before run() starts: patching it in afterwards raced the
+        # background pass, which sometimes remuxed with the working fake first (no error).
+        remux = CrashingRemux()
         with self.assertLogs(level="ERROR") as logs:
             with RunHarness(self, rec, remux) as h:
-                with mock.patch.object(recorder_mod, "remux_to_mp4", boom):
-                    self.assertTrue(wait_for(lambda: "launch:chanB" in h.events))
-                    self.assertTrue(wait_for(lambda: not rec._startup_cleanup_thread.is_alive()))
+                self.assertTrue(wait_for(lambda: "launch:chanB" in h.events))
+                self.assertTrue(wait_for(lambda: rec._startup_cleanup_thread is not None
+                                         and not rec._startup_cleanup_thread.is_alive()))
+                self.assertEqual(remux.calls, [ts])
                 self.assertTrue(rec.is_running)
                 self.assertTrue(h.thread.is_alive(), "run() loop must keep going")
         self.assertIn("ffmpeg exploded", "\n".join(logs.output))

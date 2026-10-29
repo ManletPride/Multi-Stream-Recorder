@@ -7,7 +7,9 @@ failure never blocks a save: it is logged and the save goes on.
 
 config.ini can hold the Fishtank email and password, so version *summaries* never print
 the value of a sensitive key (password, email, token, cookie, secret, key, auth): they
-only say it changed. The history copies themselves are full copies, as a restore needs.
+only say it changed. Passwords and other secrets are not written into the history copies
+of a ``.ini`` file at all (``KEPT_OUT`` stands in); a restore keeps the current value.
+On POSIX the copies are readable by the owner only.
 """
 
 from __future__ import annotations
@@ -27,6 +29,62 @@ HISTORY_DIRNAME = "msr_history"
 _STAMP = "%Y%m%d-%H%M%S-%f"
 _SENSITIVE = re.compile(r"pass|secret|token|cookie|e-?mail|auth|key|session|login", re.IGNORECASE)
 MASK = "\u2022\u2022\u2022\u2022"
+# Values never copied into history: a restore takes them from the current file.
+KEPT_OUT = "<not kept in history>"
+_SECRET_KEY = re.compile(r"pass|secret|token|cookie", re.IGNORECASE)
+_INI_SECTION = re.compile(r"^\s*\[([^\]]+)\]\s*$")
+_INI_VALUE = re.compile(r"^(\s*([^=:#;\s][^=:]*?)\s*[=:][ \t]*)(.*)$")
+
+
+def _ini_lines(text):
+    """Yield (line, section, key, prefix, value) for each line; key is None for non-values."""
+    section = ""
+    for line in text.splitlines(keepends=True):
+        m = _INI_SECTION.match(line)
+        if m:
+            section = m.group(1).strip().lower()
+            yield line, section, None, None, None
+            continue
+        body = line.rstrip("\r\n")
+        m = _INI_VALUE.match(body)
+        if m:
+            yield line, section, m.group(2).strip().lower(), m.group(1), m.group(3)
+        else:
+            yield line, section, None, None, None
+
+
+def strip_secrets(data: bytes) -> bytes:
+    """An ``.ini`` copy with every password/secret/token value replaced by ``KEPT_OUT``."""
+    text = data.decode("utf-8-sig", errors="replace")
+    out = []
+    for line, _section, key, prefix, value in _ini_lines(text):
+        if key and value.strip() and _SECRET_KEY.search(key):
+            ending = line[len(line.rstrip("\r\n")):]
+            line = f"{prefix}{KEPT_OUT}{ending}"
+        out.append(line)
+    return "".join(out).encode("utf-8")
+
+
+def fill_secrets(data: bytes, current: bytes | None) -> bytes:
+    """Put the current file's values back where a history copy has ``KEPT_OUT`` (else blank)."""
+    if KEPT_OUT.encode() not in data:
+        return data
+    known = {}
+    if current:
+        for _line, section, key, _prefix, value in _ini_lines(current.decode("utf-8-sig", errors="replace")):
+            if key:
+                known[(section, key)] = value
+    out = []
+    for line, section, key, prefix, value in _ini_lines(data.decode("utf-8", errors="replace")):
+        if key and value.strip() == KEPT_OUT:
+            ending = line[len(line.rstrip("\r\n")):]
+            line = f"{prefix}{known.get((section, key), '')}{ending}"
+        out.append(line)
+    return "".join(out).encode("utf-8")
+
+
+def _history_bytes(path: Path, data: bytes) -> bytes:
+    return strip_secrets(data) if path.suffix.lower() == ".ini" else data
 
 
 @dataclass(frozen=True)
@@ -78,6 +136,7 @@ def snapshot(path, *, keep: int = KEEP, min_interval: float = 0, now: datetime |
         data = path.read_bytes()
         if not data:
             return None
+        data = _history_bytes(path, data)
         now = now or datetime.now()
         versions = list_versions(path)
         if versions:
@@ -93,6 +152,8 @@ def snapshot(path, *, keep: int = KEEP, min_interval: float = 0, now: datetime |
             now = now.replace(microsecond=(now.microsecond + 1) % 1_000_000)
             target = folder / f"{now.strftime(_STAMP)}.bak"
         target.write_bytes(data)
+        if os.name != "nt":
+            os.chmod(target, 0o600)  # owner only (Windows: the folder's ACL applies)
         for old in list_versions(path)[keep:]:
             try:
                 old.path.unlink()
@@ -122,7 +183,11 @@ def atomic_write(path, data: bytes) -> None:
 
 def restore(path, version: Version, *, keep: int = KEEP) -> None:
     """Put `version` back as `path`. The file as it is now is kept in the history first."""
-    data = version.read()
+    try:
+        current = Path(path).read_bytes()
+    except OSError:
+        current = None
+    data = fill_secrets(version.read(), current)
     snapshot(path, keep=keep + 1)  # the pre-restore state, so a restore can itself be undone
     atomic_write(path, data)
     # the restored copy stays in the list too; trim to the limit
@@ -187,7 +252,7 @@ def summarize(name: str, version: bytes, current: bytes | None) -> str:
         keys = sorted(set(old) | set(new))
         parts = []
         for key in keys:
-            if old.get(key) == new.get(key):
+            if old.get(key) == new.get(key) or old.get(key) == KEPT_OUT:
                 continue
             if is_sensitive(key.split(".", 1)[-1]):
                 parts.append(f"{key} {MASK} (differs)")

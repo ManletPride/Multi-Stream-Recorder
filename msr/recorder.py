@@ -10,7 +10,7 @@ import signal
 import threading
 import time
 
-from msr import storage
+from msr import history, storage
 from msr.deps import HAS_CURL_CFFI, HAS_WEBSOCKET
 from msr.util import (
     PENDING_DELETION_FOLDER,
@@ -1030,8 +1030,7 @@ class KickPushListener:
 
     def _save_id_cache(self):
         try:
-            with open(self._cache_path, "w", encoding="utf-8") as f:
-                json.dump(self._ids, f, indent=2)
+            history.atomic_write(self._cache_path, json.dumps(self._ids, indent=2).encode("utf-8"))
         except OSError as e:
             storage.write_failed("the Kick channel id cache", self._cache_path, e)
 

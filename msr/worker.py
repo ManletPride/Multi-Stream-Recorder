@@ -16,6 +16,7 @@ import time
 from msr import __version__
 from msr.config import (
     default_streams_dir,
+    fishtank_password,
     new_parser,
     parser_getboolean,
     parser_getfloat,
@@ -2349,7 +2350,7 @@ def record_worker(args):
     fishtank_auth = None
     if platform == "fishtank":
         ft_email = config.get('Fishtank', 'email', fallback='')
-        ft_password = config.get('Fishtank', 'password', fallback='')
+        ft_password = fishtank_password(config)
         fishtank_auth = FishtankAuth(cookies_file, logger,
                                      email=ft_email, password=ft_password)
         auth_method = "email+password" if (ft_email and ft_password) else "cookie jar"

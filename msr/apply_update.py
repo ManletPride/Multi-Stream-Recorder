@@ -38,32 +38,118 @@ def wait_for_pid(pid, timeout=120):
     return not pid_alive(pid)
 
 
-def copy_staged_tree(src, dst):
-    """Copy *src* over *dst*, skipping bytecode caches."""
-    os.makedirs(dst, exist_ok=True)
-    for dirpath, dirnames, filenames in os.walk(src):
+BACKUP_DIR = "msr_update_backup"     # the previous program files, kept until the next update
+NOTICE_FILE = "msr_update_notice.txt"
+ROOT_FILES = ("Multi-Stream-Recorder.py", "requirements.txt", "channels_fishtank.json")
+
+
+def _program_files(root):
+    """Relative paths of the program files under *root* (launcher, extras, ``msr/``)."""
+    out = [name for name in ROOT_FILES if os.path.isfile(os.path.join(root, name))]
+    msr_dir = os.path.join(root, "msr")
+    for dirpath, dirnames, filenames in os.walk(msr_dir):
         dirnames[:] = [d for d in dirnames if d != "__pycache__"]
-        rel = os.path.relpath(dirpath, src)
-        dest_dir = dst if rel == os.curdir else os.path.join(dst, rel)
-        os.makedirs(dest_dir, exist_ok=True)
         for name in filenames:
-            if name.endswith((".pyc", ".pyo")):
-                continue
-            shutil.copy2(os.path.join(dirpath, name), os.path.join(dest_dir, name))
+            if not name.endswith((".pyc", ".pyo")):
+                out.append(os.path.relpath(os.path.join(dirpath, name), root))
+    return out
+
+
+def _same_bytes(a, b):
+    try:
+        if os.path.getsize(a) != os.path.getsize(b):
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            return fa.read() == fb.read()
+    except OSError:
+        return False
+
+
+def _requirement_lines(path):
+    """The requirements in a file, ignoring line endings, blank lines and comments."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return sorted({line.split("#", 1)[0].strip() for line in fh} - {""})
+    except OSError:
+        return None
+
+
+def check_staging(staging):
+    """Refuse a staged tree that is incomplete or has a broken Python file."""
+    if not os.path.isfile(os.path.join(staging, "Multi-Stream-Recorder.py")) or \
+            not os.path.isfile(os.path.join(staging, "msr", "__init__.py")):
+        raise RuntimeError("staging folder is missing Multi-Stream-Recorder.py or msr/")
+    for rel in _program_files(staging):
+        if rel.endswith(".py"):
+            path = os.path.join(staging, rel)
+            try:
+                with open(path, "rb") as fh:
+                    compile(fh.read(), path, "exec")
+            except (SyntaxError, ValueError) as exc:
+                raise RuntimeError(f"the downloaded update is damaged ({rel}: {exc})")
+
+
+def _copy_files(src_root, dst_root, rels):
+    for rel in rels:
+        dest = os.path.join(dst_root, rel)
+        os.makedirs(os.path.dirname(dest) or dst_root, exist_ok=True)
+        shutil.copy2(os.path.join(src_root, rel), dest)
 
 
 def apply_staged_update(staging, target):
-    launcher_src = os.path.join(staging, "Multi-Stream-Recorder.py")
-    msr_src = os.path.join(staging, "msr")
-    if not os.path.isfile(launcher_src) or not os.path.isdir(msr_src):
-        raise RuntimeError("staging folder is missing Multi-Stream-Recorder.py or msr/")
-    shutil.copy2(launcher_src, os.path.join(target, "Multi-Stream-Recorder.py"))
-    for extra in ("requirements.txt", "channels_fishtank.json"):
-        src = os.path.join(staging, extra)
-        if os.path.isfile(src):
-            shutil.copy2(src, os.path.join(target, extra))
+    """Copy the staged program files over *target*, all or nothing.
+
+    The current program files are copied to ``msr_update_backup/`` first. Every copied file
+    is compared byte for byte afterwards; on any error the backup is put back and files the
+    update added are removed, so a failed update never leaves a half-updated install.
+    User files (config, channels, cookies, recordings) are never touched.
+    """
+    check_staging(staging)
+    new_files = _program_files(staging)
+    old_files = _program_files(target)
+    backup = os.path.join(target, BACKUP_DIR)
+    shutil.rmtree(backup, ignore_errors=True)
+    _copy_files(target, backup, old_files)
+    for rel in old_files:
+        if not _same_bytes(os.path.join(target, rel), os.path.join(backup, rel)):
+            raise RuntimeError(f"could not back up {rel}; nothing was changed")
+    old_requirements = os.path.join(backup, "requirements.txt")
+    try:
+        shutil.rmtree(os.path.join(target, "msr", "__pycache__"), ignore_errors=True)
+        _copy_files(staging, target, new_files)
+        bad = [rel for rel in new_files
+               if not _same_bytes(os.path.join(staging, rel), os.path.join(target, rel))]
+        if bad:
+            raise RuntimeError(f"copied files differ from the update: {', '.join(bad[:3])}")
+    except Exception as exc:
+        rollback(target, backup, old_files, new_files)
+        raise RuntimeError(f"the update could not be applied and was rolled back ({exc})") from exc
+    new_requirements = os.path.join(target, "requirements.txt")
+    if os.path.isfile(new_requirements) and \
+            _requirement_lines(old_requirements) != _requirement_lines(new_requirements):
+        _write_text(os.path.join(target, NOTICE_FILE),
+                    "This update changed requirements.txt. If MSR reports a missing module, run:\n"
+                    "  pip install -r requirements.txt\n"
+                    f"in {target}")
+
+
+def rollback(target, backup, old_files, new_files):
+    """Put the backed-up program files back and remove files only the update brought."""
+    for rel in set(new_files) - set(old_files):
+        try:
+            os.remove(os.path.join(target, rel))
+        except OSError:
+            pass
     shutil.rmtree(os.path.join(target, "msr", "__pycache__"), ignore_errors=True)
-    copy_staged_tree(msr_src, os.path.join(target, "msr"))
+    _copy_files(backup, target, old_files)
+
+
+def _write_text(path, text):
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    except OSError:
+        pass
 
 
 def relaunch(python_exe, launcher, cwd):
@@ -97,11 +183,7 @@ def main(argv=None):
         apply_staged_update(args.staging, args.target)
         relaunch(args.python, args.launcher, args.target)
     except Exception as exc:
-        try:
-            with open(err_path, "w", encoding="utf-8") as fh:
-                fh.write(str(exc))
-        except Exception:
-            pass
+        _write_text(err_path, str(exc))
         return 1
     return 0
 

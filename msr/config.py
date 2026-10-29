@@ -88,6 +88,21 @@ def _coerce_specs():
     )
 
 
+FISHTANK_PASSWORD_ENV = "MSR_FISHTANK_PASSWORD"
+
+
+def fishtank_password(config):
+    """The Fishtank password: ``MSR_FISHTANK_PASSWORD`` if set, else ``[Fishtank] password``.
+
+    The environment variable lets the password stay out of config.ini (and its history).
+    ``config`` is anything with ``get(section, option, fallback=...)``.
+    """
+    from_env = os.environ.get(FISHTANK_PASSWORD_ENV, "")
+    if from_env.strip():
+        return from_env
+    return str(config.get('Fishtank', 'password', fallback='') or '')
+
+
 class Config:
     """Manages application configuration from config.ini"""
 
@@ -165,6 +180,8 @@ class Config:
             # the GET /v1/auth session-check endpoint returns null once the
             # 15-minute Supabase access token expires.
             # Leave blank to fall back to cookie-jar auth (requires fresh cookies).
+            # The password can instead be set in the MSR_FISHTANK_PASSWORD environment
+            # variable, which wins over this file and keeps it out of config.ini.
             'email': '',
             'password': '',
         },

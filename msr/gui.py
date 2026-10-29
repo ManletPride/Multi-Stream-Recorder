@@ -20,7 +20,7 @@ from msr.deps import (
 )
 from msr import channel_panel as cp
 from msr import deps as _deps  # read _deps.HAS_FFMPEG at use time: configure_ffmpeg updates it
-from msr.config import default_streams_dir
+from msr.config import default_streams_dir, fishtank_password
 from msr import dialogs as _dialogs
 from msr import history as _history
 from msr import library as _library
@@ -217,8 +217,7 @@ def load_window_state(state_file):
 def save_window_state(state_file, state):
     """Save window geometry and preferences."""
     try:
-        with open(state_file, 'w') as f:
-            json.dump(state, f, indent=2)
+        _history.atomic_write(state_file, json.dumps(state, indent=2).encode("utf-8"))
         _storage.write_ok("the window state", state_file)
     except OSError as e:
         _storage.write_failed("the window state", state_file, e)
@@ -573,7 +572,7 @@ def main_gui(config):
     _cookie_info_cache = [validate_cookies(find_cookies_file(config))]
     _fishtank_login = bool(
         str(config.get('Fishtank', 'email', fallback='') or '').strip()
-        and str(config.get('Fishtank', 'password', fallback='') or '').strip()
+        and fishtank_password(config).strip()
     )
 
     # ── Search + view toggle ──
@@ -2384,7 +2383,22 @@ def main_gui(config):
             pass
         _dialogs.show_error(root, "Update failed", msg)
 
+    def _show_update_notice():
+        from msr.apply_update import NOTICE_FILE
+        path = os.path.join(application_dir(), NOTICE_FILE)
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path, encoding="utf-8") as fh:
+                msg = fh.read().strip()
+            os.remove(path)
+        except OSError:
+            return
+        if msg:
+            _dialogs.show_info(root, "Update installed", msg)
+
     root.after(400, _warn_if_last_update_failed)
+    root.after(500, _show_update_notice)
 
     # ── Refresh functions ──
     def _get_platform_label(ch_name):
