@@ -1391,7 +1391,7 @@ class FishtankAuth:
             padding = 4 - len(payload_b64) % 4
             if padding != 4:
                 payload_b64 += "=" * padding
-            payload = json.loads(base64.b64decode(payload_b64).decode("utf-8"))
+            payload = json.loads(base64.urlsafe_b64decode(payload_b64).decode("utf-8"))  # JWTs are base64url
             return int(payload.get("exp", time.time() + 82800))
         except Exception:
             return int(time.time() + 82800)  # fallback: treat as valid for 23h
@@ -1496,7 +1496,21 @@ def check_stream_fishtank(stream_id, auth, logger, timeout=20):
             logger.info(
                 f"[fishtank] Stream '{resolved_id}' probe returned 404 — offline")
             return False, None, None
-        # Any other HTTP status (200, 206, 302…) means the stream exists
+        if e.code in (401, 403):
+            # Expired/rejected token: not live, and get a fresh JWT for the next check.
+            logger.warning(
+                f"[fishtank] Stream '{resolved_id}' probe HTTP {e.code} — token rejected, refreshing")
+            try:
+                auth.get_jwt(force_refresh=True)
+            except Exception as refresh_err:
+                logger.warning(f"[fishtank] JWT refresh failed: {refresh_err}")
+            return False, None, f"auth error (HTTP {e.code})"
+        if e.code == 429 or e.code >= 500:
+            # Rate limited / server trouble: an error, not a live stream.
+            logger.warning(
+                f"[fishtank] Stream '{resolved_id}' probe HTTP {e.code} — server error, not live")
+            return False, None, f"HTTP {e.code}"
+        # Any other HTTP status (e.g. 400, 405, 416) still means the stream URL exists
         logger.info(
             f"[fishtank] Stream '{resolved_id}' probe HTTP {e.code} — treating as live")
         return True, stream_name, None
@@ -1660,7 +1674,7 @@ def build_recording_command_rumble_hls(stream_url, raw_file, config, verbose):
     The channel page JSON already exposes the live playlist. Hitting that
     URL with a Rumble Referer avoids Cloudflare 403s on rumble.com/vXXXX.
     """
-    ffmpeg_path = config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg')
+    ffmpeg_path = config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg') or 'ffmpeg'
     loglevel = "verbose" if verbose else "warning"
     return [
         ffmpeg_path,
@@ -1690,7 +1704,7 @@ def build_recording_command_fishtank(stream_url, raw_file, config, verbose):
 
     ffmpeg follows the HLS playlist, fetches segments, and writes MPEG-TS (.ts).
     """
-    ffmpeg_path = config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg')
+    ffmpeg_path = config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg') or 'ffmpeg'
     loglevel = "verbose" if verbose else "warning"
     cmd = [
         ffmpeg_path,
@@ -1738,7 +1752,7 @@ def build_recording_command_ffmpeg_merge(video_url, audio_url, raw_file, config,
     Cloudflare rejections caused by mismatched header fingerprints.  Falls
     back to a plain browser UA if not provided.
     """
-    ffmpeg_path = config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg')
+    ffmpeg_path = config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg') or 'ffmpeg'
     loglevel = "verbose" if verbose else "warning"
 
     # Build the -headers string from yt-dlp's own http_headers dict so ffmpeg

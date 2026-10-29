@@ -169,12 +169,11 @@ def validate_startup(config):
             try:
                 with open(channels_file, 'r') as f:
                     ch_data = json.load(f)
+                # A bare name is a Kick channel, not YouTube.
+                records, _skipped = coerce_channel_records(ch_data)
                 youtube_enabled = any(
-                    ch.get('enabled', False) and
-                    (str(ch.get('name', '')).startswith('youtube:') or
-                     not any(str(ch.get('name', '')).startswith(p)
-                             for p in ('twitch:', 'custom:', 'rumble:')))
-                    for ch in ch_data if isinstance(ch, dict)
+                    rec["enabled"] and (parse_channel_key(rec["name"]) or ("",))[0] == "youtube"
+                    for rec in records
                 )
             except Exception:
                 pass
@@ -236,6 +235,16 @@ def parse_channel_key(channel_key):
     return "kick", key
 
 
+def channel_dedupe_key(channel_key):
+    """Key two channel entries collide on: Kick/Twitch names are case-insensitive, and
+    Windows folds case and trailing dots/spaces, so ``Foo``, ``foo`` and ``foo.`` are one
+    channel (one folder). Other platforms compare exactly."""
+    parsed = parse_channel_key(channel_key) if isinstance(channel_key, str) else None
+    if parsed and parsed[0] in ("kick", "twitch"):
+        return f"{parsed[0]}:{parsed[1].rstrip('. ').lower()}"
+    return channel_key
+
+
 def coerce_channel_records(loaded):
     """Normalize a channels.json list to ``({name, enabled}, …)``.
 
@@ -264,10 +273,10 @@ def coerce_channel_records(loaded):
         if parse_channel_key(name) is None:
             skipped.append(name)
             continue
-        if name in seen:
+        if channel_dedupe_key(name) in seen:
             skipped.append(name)
             continue
-        seen.add(name)
+        seen.add(channel_dedupe_key(name))
         records.append({"name": name, "enabled": bool(enabled)})
     return records, skipped
 
@@ -317,7 +326,8 @@ def validate_channel_name(name, platform, existing_channels):
 
     # Build full channel key and check for duplicate
     ch_key = f"{platform}:{name}" if platform != "kick" else name
-    if ch_key in existing_channels:
+    if ch_key in existing_channels or channel_dedupe_key(ch_key) in {
+            channel_dedupe_key(k) for k in existing_channels}:
         return False, f"'{ch_key}' is already in the list."
 
     # Platform-specific tool requirements
@@ -473,6 +483,25 @@ GITHUB_OWNER = "ManletPride"   # ← Author's GitHub username
 GITHUB_REPO = "Multi-Stream-Recorder"   # ← GitHub repo name
 
 
+def version_key(v):
+    """Sort key for release tags: ``3.2b`` < ``3.2b2`` < ``3.2`` == ``3.2.0`` < ``3.10``.
+
+    A pre-release (any suffix after the numbers: ``b``, ``rc1``, ``-beta.2``) sorts
+    before its final release, so someone on a beta is offered the final.
+    """
+    m = re.match(r'\s*[vV]?(\d+(?:\.\d+)*)(.*)$', str(v or ''))
+    if not m:
+        return ((0,), 1, '', ())
+    nums = tuple(int(n) for n in m.group(1).split('.'))
+    while len(nums) > 1 and nums[-1] == 0:
+        nums = nums[:-1]
+    rest = m.group(2).strip().lstrip('-._').lower()
+    if not rest:
+        return (nums, 1, '', ())
+    tag = re.match(r'[a-z]*', rest).group(0)
+    return (nums, 0, tag, tuple(int(n) for n in re.findall(r'\d+', rest)))
+
+
 def check_for_updates(current_version, callback=None):
     """Check GitHub releases for a newer version.  Runs in a background thread.
 
@@ -507,15 +536,8 @@ def check_for_updates(current_version, callback=None):
             if not latest_tag or not release_url:
                 return
 
-            # Compare versions: strip non-numeric suffixes for comparison
-            # "3.2b" → (3, 2), "3.10" → (3, 10)
-            def _version_tuple(v):
-                import re
-                nums = re.findall(r'\d+', v)
-                return tuple(int(n) for n in nums) if nums else (0,)
-
-            current_t = _version_tuple(current_version)
-            latest_t = _version_tuple(latest_tag)
+            current_t = version_key(current_version)
+            latest_t = version_key(latest_tag)
 
             if latest_t > current_t and callback:
                 try:
@@ -861,6 +883,20 @@ def build_filename(pattern, username, platform, title=None):
     return _sanitize_filename(result)
 
 
+_CONTROL_CHARS_RE = re.compile(r'[\x00-\x1f\x7f]')
+_WINDOWS_RESERVED_NAMES = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"COM{i}" for i in range(1, 10)] + [f"LPT{i}" for i in range(1, 10)]
+)
+
+
+def _avoid_reserved_name(name):
+    """Prefix Windows device names (``nul``, ``con.ts``, ``COM1``) so they can be created."""
+    if name.split('.', 1)[0].rstrip(' ').upper() in _WINDOWS_RESERVED_NAMES:
+        return '_' + name
+    return name
+
+
 def _sanitize_filename(name):
     """Remove characters that are invalid in filenames."""
     if not name:
@@ -868,12 +904,15 @@ def _sanitize_filename(name):
     # Replace common bad chars
     for ch in r'<>:"/\|?*':
         name = name.replace(ch, '_')
+    # Newlines/tabs/other control characters (stream titles) fail file creation
+    name = _CONTROL_CHARS_RE.sub('_', name)
     # Collapse multiple underscores
     while '__' in name:
         name = name.replace('__', '_')
     # Strip leading/trailing dots and spaces only — NOT underscores.
     # Usernames like _avamartinez are valid and should be preserved in filenames.
-    return name.strip('. ')[:200]  # cap length
+    name = name.strip('. ')[:200]  # cap length
+    return _avoid_reserved_name(name) if name else 'untitled'
 
 
 def sanitize_path_component(name):
@@ -888,10 +927,11 @@ def sanitize_path_component(name):
     # Replace Windows-forbidden folder name characters
     for ch in r'<>:"/\|?*':
         name = name.replace(ch, '_')
+    name = _CONTROL_CHARS_RE.sub('_', name)
     # Windows silently rejects or misbehaves with folder names ending in '.' or ' '
     name = name.rstrip('. ')
     # A name that became empty or just underscores after sanitization
-    return name[:100] if name.strip('_') else 'unknown'
+    return _avoid_reserved_name(name[:100]) if name.strip('_') else 'unknown'
 
 
 def custom_url_folder_names(url):
@@ -1748,6 +1788,7 @@ class RedactLogFilter(logging.Filter):
 
 
 def _ensure_redact_filter(logger):
+    """Attach one RedactLogFilter to a logger or a handler (both have ``filters``)."""
     if not any(isinstance(f, RedactLogFilter) for f in logger.filters):
         logger.addFilter(RedactLogFilter())
 
@@ -1926,6 +1967,10 @@ def setup_logging(root_path, config=None):
     logging.root.addHandler(file_handler)
     logging.root.addHandler(console_handler)
     _ensure_redact_filter(logging.root)
+    # Logger filters only see records made by that logger, not ones propagated from
+    # named child loggers, so the handlers carry the filter too.
+    _ensure_redact_filter(file_handler)
+    _ensure_redact_filter(console_handler)
     if log_problem:
         logging.warning(
             f"The recordings folder is not usable for the log file ({log_problem}); "
@@ -1960,6 +2005,10 @@ def setup_child_logging(root_path, channel_key):
     logging.root.addHandler(file_handler)
     logging.root.addHandler(console_handler)
     _ensure_redact_filter(logging.root)
+    # Logger filters only see records made by that logger, not ones propagated from
+    # named child loggers, so the handlers carry the filter too.
+    _ensure_redact_filter(file_handler)
+    _ensure_redact_filter(console_handler)
 
     return logging.LoggerAdapter(
         logging.getLogger(), {'channel': redact_for_log(channel_key)}

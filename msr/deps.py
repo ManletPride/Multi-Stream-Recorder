@@ -1,5 +1,5 @@
 """Optional/required tool detection (yt-dlp, streamlink, ffmpeg, …)."""
-import importlib
+import importlib.util
 import os
 import sys
 import subprocess
@@ -181,7 +181,7 @@ def configure_ffmpeg(path):
 # Check if curl_cffi is available for browser impersonation (needed for Cloudflare-protected sites)
 HAS_CURL_CFFI = False
 try:
-    import importlib
+    import importlib.util
     HAS_CURL_CFFI = importlib.util.find_spec("curl_cffi") is not None
 except Exception:
     pass
@@ -191,7 +191,7 @@ except Exception:
 # instead of waiting for the next poll).  pip install websocket-client
 HAS_WEBSOCKET = False
 try:
-    import importlib
+    import importlib.util
     HAS_WEBSOCKET = importlib.util.find_spec("websocket") is not None
 except Exception:
     pass

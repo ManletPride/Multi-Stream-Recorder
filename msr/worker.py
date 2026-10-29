@@ -1247,11 +1247,22 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                 # on_size_limit starts the next file and sees data (overlap,
                 # no hole). Then stop this process. If the callback is missing
                 # or fails, stop anyway so the file does not grow without bound.
-                if max_file_size_bytes > 0 and size >= max_file_size_bytes:
-                    logger.info(
-                        f"File reached {human_size(size)} — splitting "
-                        f"(limit: {max_file_size_gb:.1f} GB)"
-                    )
+                # Max-duration split (max_record_hours, 0 = off): same overlap
+                # hand-off as the size limit below, so a 24/7 stream is cut into
+                # parts of at most this length instead of running until 8 GB.
+                over_size = max_file_size_bytes > 0 and size >= max_file_size_bytes
+                over_time = max_record_hours > 0 and elapsed >= max_record_hours * 3600
+                if over_size or over_time:
+                    if over_size:
+                        logger.info(
+                            f"File reached {human_size(size)} — splitting "
+                            f"(limit: {max_file_size_gb:.1f} GB)"
+                        )
+                    else:
+                        logger.info(
+                            f"Segment reached {format_elapsed(elapsed)} — splitting "
+                            f"(limit: {max_record_hours:g} h)"
+                        )
                     split_requested = True
                     if on_size_limit is not None and not stop_event.is_set():
                         try:
@@ -2100,6 +2111,26 @@ def finalize_recording_group(parts, group_base_name, processed_path, pending_dir
 #          Recording Worker
 # ────────────────────────────────────────────────
 
+def _reap_capture(proc, logger):
+    """Kill a capture process (and its children) that is still running.
+
+    Used on the worker's error paths: without it an exception between spawn and
+    the normal kill left yt-dlp/streamlink running while the worker slept and
+    then spawned a second capture for the same stream.
+    """
+    if proc is None or proc.poll() is not None:
+        return
+    logger.warning("Stopping a capture process left running by an error")
+    kill_process_tree(proc.pid, logger)
+    try:
+        proc.wait(timeout=10)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
 def record_worker(args):
     """Worker process to record a single channel."""
     (channel_entry, config_dict, stop_event, status_queue, wake_event, runtime) = args
@@ -2335,6 +2366,8 @@ def record_worker(args):
         logger.info(f"Initial stagger: waiting {initial_delay:.0f}s before first check")
         time.sleep(initial_delay)
 
+    proc = None              # the running capture, reaped on every error path
+    overlap_handoff = {}     # a size/time split's next capture, if one was started
     while not stop_event.is_set():
         try:
             # Live-refresh the poll interval from the shared runtime dict so
@@ -2678,7 +2711,7 @@ def record_worker(args):
                 logger.info(f"Starting recording: {redact_cmd_for_log(record_cmd)}")
                 return subprocess.Popen(
                     record_cmd,
-                    stdout=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,  # never read: a full pipe would block the capture
                     stderr=subprocess.PIPE,
                     text=True,
                     bufsize=1,
@@ -3003,7 +3036,7 @@ def record_worker(args):
                 try:
                     proc = subprocess.Popen(
                         fallback_cmd,
-                        stdout=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL,  # never read: a full pipe would block the capture
                         stderr=subprocess.PIPE,
                         text=True,
                         bufsize=1,
@@ -3016,7 +3049,7 @@ def record_worker(args):
                         stop_event, last_status, file_creation_timeout,
                         tool_name_override="streamlink", verbose=verbose,
                         max_file_size_gb=max_file_size_gb,
-                        ffmpeg_path=config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg'),
+                        ffmpeg_path=config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg') or 'ffmpeg',
                         bg_remux_state=bg_remux_state,
                         remux_lock=remux_lock,
                     )
@@ -3040,6 +3073,7 @@ def record_worker(args):
                     logger.error("streamlink not found — cannot use as fallback for Kick")
                 except Exception as e:
                     logger.error(f"Streamlink fallback failed: {e}")
+                    _reap_capture(proc, logger)
 
             # Check if we actually recorded something
             if not os.path.exists(raw_file):
@@ -3195,6 +3229,8 @@ def record_worker(args):
             logger.info("KeyboardInterrupt received — exiting")
             break
         except Exception as e:
+            _reap_capture(proc, logger)
+            _reap_capture(overlap_handoff.get("proc"), logger)
             if isinstance(e, OSError) and storage.is_drive_error(e, root_path):
                 # The recordings drive went away under a recording. Not a crash: no long
                 # back-off; the loop top picks the fallback folder (or waits) and carries on.
@@ -3209,6 +3245,9 @@ def record_worker(args):
             logger.warning(f"Worker restarting in {_crash_backoff}s (backoff)")
             time.sleep(_crash_backoff)
             _crash_backoff = min(_crash_backoff * 2, CRASH_BACKOFF_MAX)
+
+    _reap_capture(proc, logger)
+    _reap_capture(overlap_handoff.get("proc"), logger)
 
     # Finish any size-split remux still running, then stitch reconnect
     # segments from the current session.

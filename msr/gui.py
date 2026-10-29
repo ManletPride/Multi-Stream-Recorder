@@ -43,7 +43,7 @@ from msr.util import (
     check_for_updates, coerce_channel_records, ffprobe_from_ffmpeg, find_cookies_file,
     get_cookie_status_for_channel, kill_orphan_recording_processes,
     open_existing_folder, open_local_path, parse_custom_url,
-    redact_for_log, reveal_in_file_browser, validate_channel_name, validate_cookies,
+    RedactLogFilter, redact_for_log, reveal_in_file_browser, validate_channel_name, validate_cookies,
 )
 from msr.iometer import (
     IoSampler, format_header, format_tooltip, meter_severity, sum_stream_mbps,
@@ -262,6 +262,7 @@ class QueueLogHandler(logging.Handler):
     def __init__(self, log_queue):
         super().__init__()
         self.log_queue = log_queue
+        self.addFilter(RedactLogFilter())  # child-logger records skip the root logger's filter
 
     def emit(self, record):
         try:
@@ -1622,7 +1623,7 @@ def main_gui(config):
         out_dir = _clips_output_dir(platform, username_dir)
         file_stem = channel_file_stem(username_dir)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        ffmpeg_path = config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg')
+        ffmpeg_path = config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg') or 'ffmpeg'
 
         if kind == "clip":
             clip_seconds = config.getint('Clipping', 'clip_length_seconds', fallback=30)
