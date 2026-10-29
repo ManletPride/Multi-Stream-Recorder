@@ -2061,7 +2061,7 @@ def record_worker(args):
     # folder while the main one is unreachable). It is re-checked before every new recording,
     # never in the middle of one.
     primary_root = root_path
-    fallback_root = storage.fallback_root(config.get('Paths', 'fallback_dir', fallback=''))
+    fallback_root = storage.fallback_root(config.get('Paths', 'fallback_dir', fallback=''), primary_root)
     storage_state = "ok"          # what was last logged: "ok", "fallback" or "down"
     storage_logged_at = 0.0
 

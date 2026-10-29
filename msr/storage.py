@@ -13,6 +13,7 @@ Standard library only, no Tk. The pieces:
   and one line when it works again) instead of a silent ``pass`` or a log line per failed write.
 """
 import errno
+import hashlib
 import logging
 import os
 import shutil
@@ -118,14 +119,20 @@ def is_drive_error(exc, path):
     return classify(exc) in UNAVAILABLE_KINDS and not quick_check(path).ok
 
 
-def fallback_root(setting):
-    """The fallback recording folder for a ``[Paths] fallback_dir`` value (None = disabled)."""
+def fallback_root(setting, primary=None):
+    """The fallback recording folder for a ``[Paths] fallback_dir`` value (None = disabled).
+
+    The default (blank) is one folder per main folder, so two instances with different recordings
+    folders never share a fallback (the orphan check treats a fallback as that instance's own).
+    """
     value = (setting or "").strip()
     if value.lower() == FALLBACK_OFF:
         return None
     if value:
         return os.path.abspath(os.path.expandvars(os.path.expanduser(value.strip('"'))))
-    return os.path.join(tempfile.gettempdir(), "MultiStreamRecorder", "Recordings")
+    key = os.path.normcase(os.path.abspath(primary or "default"))
+    tag = hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()[:8]
+    return os.path.join(tempfile.gettempdir(), "MultiStreamRecorder", f"Recordings-{tag}")
 
 
 def _inside(path, folder):

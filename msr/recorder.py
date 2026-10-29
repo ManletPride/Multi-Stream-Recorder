@@ -3,6 +3,7 @@ import json
 import logging
 import multiprocessing as mp
 import os
+import queue
 import random
 import shutil
 import signal
@@ -1022,7 +1023,7 @@ class StreamRecorder:
                             f"({storage.REASONS[storage.classify(e)]}); it is checked again every few seconds")
 
         # Recordings folder watch (a drive that is unplugged while we run).
-        self.fallback_root = storage.fallback_root(config.get('Paths', 'fallback_dir', fallback=''))
+        self.fallback_root = storage.fallback_root(config.get('Paths', 'fallback_dir', fallback=''), self.root_path)
         self.fallback_recorded_base = (os.path.join(self.fallback_root, "Recorded")
                                        if self.fallback_root else None)
 
@@ -1154,8 +1155,12 @@ class StreamRecorder:
         self.check_all_now()
 
     def update_status_from_queue(self):
-        while not self.status_queue.empty():
+        while True:
             try:
+                # empty() talks to the Manager process: if that is gone it raises (EOFError,
+                # BrokenPipeError...), and this runs from the supervisor loop and the GUI timer.
+                if self.status_queue.empty():
+                    break
                 ch, new_status = self.status_queue.get_nowait()
                 if ch not in self.status_dict:
                     continue
@@ -1168,7 +1173,9 @@ class StreamRecorder:
                 if ch in self.stopped_channels:
                     continue
                 self.status_dict[ch] = new_status
-            except Exception:
+            except Exception as e:
+                if not isinstance(e, queue.Empty):
+                    self._log_tick_problem("status updates", e)
                 break
 
     def stop_channel(self, channel_name):
@@ -1205,9 +1212,13 @@ class StreamRecorder:
             self._sync_kick_push()
             return
 
+        # Mark it stopped BEFORE the kill: the supervisor must not see the dead worker in between
+        # and restart it.
+        self.stopped_channels.add(channel_name)
         # Kill them all
         for proc in alive_procs:
             logging.info(f"Stopping channel {channel_name} (PID {proc.pid})")
+            self._mark_killed(proc)
             kill_process_tree(proc.pid)
 
         for proc in alive_procs:
@@ -1306,6 +1317,7 @@ class StreamRecorder:
                     f"existing worker(s) before spawning replacement"
                 )
                 for proc in alive_existing:
+                    self._mark_killed(proc)
                     kill_process_tree(proc.pid)
                 for proc in alive_existing:
                     proc.join(timeout=8)
@@ -1319,8 +1331,11 @@ class StreamRecorder:
 
             logging.info(f"Starting channel {channel_name} mid-session")
 
-            # Clear the individually-stopped flag
+            # Clear the individually-stopped flag (and the crash history: this is a deliberate start)
             self.stopped_channels.discard(channel_name)
+            sv = self._supervision()
+            sv["fast"].pop(channel_name, None)
+            sv["restart_at"].pop(channel_name, None)
 
             # Build config dict the same way run() does
             config_dict = {section: dict(self.config.config.items(section))
@@ -1335,11 +1350,7 @@ class StreamRecorder:
             }
 
             # Spawn exactly one worker
-            worker_args = (channel_name, config_dict, self.should_stop, self.status_queue,
-                           self._get_wake_event(channel_name), self.runtime)
-            proc = mp.Process(target=record_worker, args=(worker_args,))
-            proc.daemon = True
-            proc.start()
+            proc = self._spawn_worker(channel_name, config_dict)
             self.processes[channel_name] = [proc]
             logging.info(f"Started process for {channel_name} (PID {proc.pid})")
 
@@ -1378,6 +1389,7 @@ class StreamRecorder:
 
         for ch, pid in pids_to_kill:
             logging.info(f"Killing process tree for {ch} (PID {pid})")
+            self._supervision()["killed"].add(pid)
             kill_process_tree(pid)
 
         for ch, procs in self.processes.items():
@@ -1397,7 +1409,7 @@ class StreamRecorder:
                 logging.warning("Startup cleanup: still stopping - leaving its remaining .ts files for the next pass")
 
         logging.info("Checking for orphaned recording processes...")
-        kill_orphan_recording_processes(logging.getLogger(), streams_dir=self.root_path)
+        kill_orphan_recording_processes(logging.getLogger(), streams_dir=self._orphan_roots())
 
         # All workers are dead now — normalize any stale 'Recording'/'Remuxing'
         # statuses so the busy-directory guard in BackgroundCleaner doesn't
@@ -1451,6 +1463,10 @@ class StreamRecorder:
 
     STORAGE_CHECK_SECONDS = 10
     FALLBACK_SCAN_SECONDS = 300
+
+    def _orphan_roots(self):
+        """The folders whose leftover workers are ours to kill: the main one and the fallback."""
+        return [r for r in (self.root_path, self.fallback_root) if r]
 
     def storage_notice(self):
         """A one-line warning for the GUI while the recordings folder is unreachable ('' = fine)."""
@@ -1518,12 +1534,155 @@ class StreamRecorder:
             logging.exception("Fallback recordings: moving them back failed - the files stay in the "
                               "fallback folder and it is tried again later")
 
+    # ------------------------------------------------------------------
+    # Supervision: restart policy and a loop that survives its own errors
+    # ------------------------------------------------------------------
+
+    RESTART_FAST_SECONDS = 60       # a worker that ends sooner than this counts as a fast exit
+    RESTART_BACKOFF_FIRST = 5       # delay after the first quick exit; doubles with each one in a row
+    RESTART_BACKOFF_MAX = 300
+    TICK_LOG_EVERY = 300            # the same loop problem is logged with a traceback this often
+
+    def _supervision(self):
+        """Per-instance supervision state (created on first use)."""
+        state = self.__dict__.get("_sv_state")
+        if state is None:
+            state = self._sv_state = {
+                "started": {},      # channel -> time.monotonic() of its last start
+                "fast": {},         # channel -> consecutive fast exits
+                "restart_at": {},   # channel -> time.monotonic() when it may start again
+                "killed": set(),    # pids we ended on purpose (stop / restart of a channel)
+                "problems": {},     # what -> [last logged, suppressed count]
+            }
+        return state
+
+    def _mark_killed(self, proc):
+        """Remember that WE are about to end this worker, so its exit is not mistaken for a crash."""
+        pid = getattr(proc, "pid", None)
+        if pid is not None:
+            self._supervision()["killed"].add(pid)
+
+    def _log_tick_problem(self, what, exc, now=None):
+        """Log a problem of the supervisor loop: with a traceback the first time, then every 5 minutes."""
+        now = time.monotonic() if now is None else now
+        entry = self._supervision()["problems"].setdefault(what, [None, 0])
+        if entry[0] is not None and now - entry[0] < self.TICK_LOG_EVERY:
+            entry[1] += 1
+            return
+        more = f" ({entry[1]} more since the last message)" if entry[1] else ""
+        logging.error(f"Supervisor: {what} failed: {type(exc).__name__}: {exc}{more} - "
+                      "carrying on", exc_info=exc)
+        entry[0], entry[1] = now, 0
+
+    def _spawn_worker(self, ch, config_dict):
+        worker_args = (ch, config_dict, self.should_stop, self.status_queue,
+                       self._get_wake_event(ch), self.runtime)
+        proc = mp.Process(target=record_worker, args=(worker_args,))
+        proc.daemon = True
+        proc.start()
+        self._supervision()["started"][ch] = time.monotonic()
+        return proc
+
+    def _restart_delay(self, fast_exits):
+        """Seconds to wait before the next start after ``fast_exits`` quick exits in a row."""
+        if fast_exits <= 0:
+            return 0
+        return min(self.RESTART_BACKOFF_FIRST * 2 ** (fast_exits - 1), self.RESTART_BACKOFF_MAX)
+
+    def _schedule_restart(self, ch, now, exit_code=None, reason=None):
+        """Count a worker that is gone and decide when it may start again."""
+        sv = self._supervision()
+        ran = now - sv["started"].get(ch, now - self.RESTART_FAST_SECONDS)
+        fast = sv["fast"].get(ch, 0) + 1 if ran < self.RESTART_FAST_SECONDS else 0
+        sv["fast"][ch] = fast
+        delay = self._restart_delay(fast)
+        sv["restart_at"][ch] = now + delay
+        what = reason or ("crashed" if exit_code else "exited")
+        code = f" (exit code {exit_code})" if exit_code is not None else ""
+        if fast <= 3 or fast % 10 == 0:
+            note = f"; {fast} quick exits in a row" if fast > 1 else ""
+            logging.warning(f"Process for {ch} {what}{code}{note} - restarting"
+                            + (f" in {delay}s" if delay else ""))
+        if delay and ch in self.status_dict and ch not in self.stopped_channels:
+            self.status_dict[ch] = {"status": "Error", "detail": f"worker {what}, restart in {delay}s",
+                                    "size": "", "time": "", "progress": 0}
+        return delay
+
+    def _supervise_channel(self, ch, config_dict, now):
+        """One look at one channel: restart its worker if it is gone (and allowed to be)."""
+        sv = self._supervision()
+        if ch in self.stopped_channels:
+            sv["restart_at"].pop(ch, None)
+            return
+        with self._spawn_lock:
+            if ch in self._spawning:
+                return
+        procs = self.processes.get(ch, [])
+        alive = [p for p in procs if p.is_alive()]
+        self.processes[ch] = alive
+        if alive:
+            return
+        if ch not in sv["restart_at"]:
+            dead = [p for p in procs if not p.is_alive()]
+            if not dead:
+                return    # never started here (a start_channel in progress registers it itself)
+            last_proc = dead[-1]
+            if last_proc.pid in sv["killed"]:
+                # We ended it (stop / restart of the channel): that is intentional. The exit code
+                # says nothing: an outside kill (another instance's orphan check, a task manager)
+                # looks identical (15 on Windows) and must be restarted.
+                sv["killed"].discard(last_proc.pid)
+                logging.info(f"Process for {ch} ended after we stopped it - not restarting")
+                self.stopped_channels.add(ch)
+                return
+            code = last_proc.exitcode
+            reason = ("was killed from outside" if code in (-15, 15, -9) else
+                      "crashed" if code else "exited normally")
+            self._schedule_restart(ch, now, code, reason)
+        if now < sv["restart_at"][ch]:
+            return
+        del sv["restart_at"][ch]
+        proc = self._spawn_worker(ch, config_dict)
+        self.processes[ch] = [proc]
+        logging.info(f"Restarted process for {ch} (PID {proc.pid})")
+
+    def _supervise_failed(self, ch, exc, now):
+        """Starting a worker raised (out of handles or memory...): retry with a growing delay."""
+        self._log_tick_problem(f"restarting {ch}", exc, now)
+        sv = self._supervision()
+        sv["fast"][ch] = sv["fast"].get(ch, 0) + 1
+        sv["restart_at"][ch] = now + max(self._restart_delay(sv["fast"][ch]), self.RESTART_BACKOFF_FIRST)
+
+    def _supervise_tick(self, config_dict, now=None):
+        """One pass of the supervisor loop. Nothing in here may end the loop."""
+        now = time.monotonic() if now is None else now
+        try:
+            self.update_status_from_queue()
+        except Exception as e:
+            self._log_tick_problem("status updates", e, now)
+        try:
+            self._storage_tick()
+        except Exception as e:
+            self._log_tick_problem("recordings folder check", e, now)
+        try:
+            channels = list(self.processes.keys())
+        except Exception as e:  # pragma: no cover - dict(copy) cannot realistically fail
+            self._log_tick_problem("listing channels", e, now)
+            return
+        for ch in channels:
+            if self.should_stop.is_set():
+                break
+            try:
+                self._supervise_channel(ch, config_dict, now)
+            except Exception as e:
+                self._supervise_failed(ch, e, now)
+
     def run(self):
         if self.is_running:
             return
         # Ghost workers from a dead instance reconnect if we only kill ffmpeg.
         kill_orphan_recording_processes(
-            logging.getLogger(), streams_dir=self.root_path,
+            logging.getLogger(), streams_dir=self._orphan_roots(),
         )
         self.is_running = True
         self.should_stop.clear()
@@ -1546,11 +1705,7 @@ class StreamRecorder:
             logging.info(f"Using cookies file: {cookies_file}")
 
         for ch in self.channels:
-            worker_args = (ch, config_dict, self.should_stop, self.status_queue,
-                           self._get_wake_event(ch), self.runtime)
-            proc = mp.Process(target=record_worker, args=(worker_args,))
-            proc.daemon = True
-            proc.start()
+            proc = self._spawn_worker(ch, config_dict)
             self.processes[ch] = [proc]
             logging.info(f"Started process for {ch} (PID {proc.pid})")
 
@@ -1563,66 +1718,14 @@ class StreamRecorder:
         # a time, in the background).
         self._launch_startup_cleanup(startup_leftovers)
 
-        # Monitor processes — restart any that exit unexpectedly
+        # Monitor processes — restart any that exit unexpectedly (see _supervise_channel for the
+        # policy). A problem inside one pass is logged and the loop carries on: it used to end on
+        # the first exception while the GUI kept showing "Recording".
         while self.is_running and not self.should_stop.is_set():
-            self.update_status_from_queue()
-            self._storage_tick()
-
-            for ch in list(self.processes.keys()):
-                if self.should_stop.is_set():
-                    break
-
-                # Skip channels individually stopped by the user
-                if ch in self.stopped_channels:
-                    continue
-
-                # Skip channels that have an active start_channel() in progress
-                with self._spawn_lock:
-                    if ch in self._spawning:
-                        continue
-
-                procs = self.processes.get(ch, [])
-
-                # Prune dead processes from the list
-                alive = [p for p in procs if p.is_alive()]
-                self.processes[ch] = alive
-
-                if not alive:
-                    # All processes for this channel have exited — examine the last
-                    # one to decide whether to restart.
-                    dead = [p for p in procs if not p.is_alive()]
-                    if not dead:
-                        # Channel was never started (shouldn't happen in run(), but
-                        # handle gracefully)
-                        continue
-
-                    last_proc = dead[-1]
-                    exit_code = last_proc.exitcode
-
-                    # Exit code -15 (SIGTERM on Unix) or 15 (Windows-mapped) means
-                    # we killed the process ourselves (stop_channel / stop).
-                    # Do NOT restart in that case — it was intentional.
-                    if exit_code in (-15, 15):
-                        logging.info(
-                            f"Process for {ch} exited with code {exit_code} (SIGTERM) "
-                            f"— not restarting (intentional kill)"
-                        )
-                        self.stopped_channels.add(ch)
-                        continue
-
-                    if exit_code != 0:
-                        logging.warning(f"Process for {ch} crashed (exit code {exit_code}) — restarting...")
-                    else:
-                        logging.info(f"Process for {ch} exited normally — restarting...")
-
-                    worker_args = (ch, config_dict, self.should_stop, self.status_queue,
-                                   self._get_wake_event(ch), self.runtime)
-                    new_proc = mp.Process(target=record_worker, args=(worker_args,))
-                    new_proc.daemon = True
-                    new_proc.start()
-                    self.processes[ch] = [new_proc]
-                    logging.info(f"Restarted process for {ch} (PID {new_proc.pid})")
-
+            try:
+                self._supervise_tick(config_dict)
+            except Exception as e:  # last safety net; the pieces are guarded individually
+                self._log_tick_problem("supervisor pass", e)
             time.sleep(2)
 
         # Loop exited — stop() was already called or should_stop was set

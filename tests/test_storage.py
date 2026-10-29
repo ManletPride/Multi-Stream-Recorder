@@ -151,9 +151,10 @@ class ChooseRootTests(unittest.TestCase):
         self.assertIsNone(storage.fallback_root("off"))
         self.assertIsNone(storage.fallback_root(" OFF "))
         self.assertEqual(storage.fallback_root(self.fallback), os.path.abspath(self.fallback))
-        default = storage.fallback_root("")
+        default = storage.fallback_root("", self.drive.path)
         self.assertTrue(default.startswith(os.path.abspath(tempfile.gettempdir())))
-        self.assertEqual(default, storage.fallback_root(None))
+        self.assertEqual(default, storage.fallback_root(None, self.drive.path))
+        self.assertNotEqual(default, storage.fallback_root("", self.drive.path + "2"))
 
 
 class ReconcileTests(unittest.TestCase):
@@ -616,7 +617,7 @@ class RecorderWatchTests(unittest.TestCase):
             with self.assertLogs(level="WARNING") as cm:
                 rec = StreamRecorder(["chanA"], FakeConfig(self.drive.path))
         self.assertTrue(any("not available right now" in o for o in cm.output))
-        self.assertEqual(rec.fallback_root, storage.fallback_root(""))
+        self.assertEqual(rec.fallback_root, storage.fallback_root("", self.drive.path))
 
     def test_clip_finder_looks_in_the_fallback_too(self):
         rec = self.recorder(self.fb)

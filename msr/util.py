@@ -1178,14 +1178,64 @@ def _cmdline_text(cmdline):
     return str(cmdline)
 
 
-def _argv_includes_streams_dir(text, streams_dir):
-    if not text or not streams_dir:
+# What MSR keeps directly under a recordings folder. Anything else under the same prefix belongs to
+# somebody else (another MSR instance's folder nested inside this one, for example).
+_INSTANCE_ENTRIES = ("recorded", "processed", PENDING_DELETION_FOLDER.lower(), "clips")
+_INSTANCE_FILES = ("stream_recorder.log", ".msr_instance.lock")
+
+
+def _instance_roots(streams_dir):
+    """Normalised recordings folders from one folder or a list of them (blank entries dropped)."""
+    if not streams_dir:
+        return []
+    items = streams_dir if isinstance(streams_dir, (list, tuple, set)) else [streams_dir]
+    return [os.path.normcase(os.path.abspath(str(item))) for item in items if item]
+
+
+def _is_instance_path(path, root):
+    """True if ``path`` is ``root`` or something MSR keeps under it (Recorded/, the log...).
+
+    Compared by path component, not by substring: ``E:\\streams2`` and ``E:\\streams-old`` are not
+    inside ``E:\\streams``, and neither is another instance nested in it (``E:\\streams\\test``).
+    """
+    path = os.path.normpath(path) if os.path.isabs(path) else path
+    path = os.path.normcase(path)
+    if not path.startswith(root):
         return False
-    marker = os.path.normcase(os.path.abspath(streams_dir))
-    haystack = os.path.normcase(str(text))
-    if marker in haystack:
+    rest = path[len(root):]
+    if not rest:
         return True
-    return marker.replace("\\", "/") in haystack.replace("\\", "/")
+    if rest[0] not in ("\\", "/"):
+        return False
+    first = rest.lstrip("\\/").replace("\\", "/").split("/")[0].lower()
+    if not first:
+        return True
+    return first in _INSTANCE_ENTRIES or first.startswith(_INSTANCE_FILES)
+
+
+def _argv_pieces(text):
+    """The path-like pieces of an argv (a list), or of one path / one quoted command line (a string).
+
+    A string is never split on blanks: it is usually ONE path, and ``E:\\streams old`` must not
+    look like ``E:\\streams``.
+    """
+    if isinstance(text, (list, tuple)):
+        items = [str(t) for t in text]
+    else:
+        text = str(text)
+        items = [text] + [a or b for a, b in re.findall(r'"([^"]+)"|\'([^\']+)\'', text)]
+    for item in items:
+        yield item
+        if "=" in item:
+            yield item.split("=", 1)[1]        # --output=PATH
+
+
+def _argv_includes_streams_dir(text, streams_dir):
+    """True if an argv (or one path) points into a recordings folder (one folder or a list)."""
+    roots = _instance_roots(streams_dir)
+    if not text or not roots:
+        return False
+    return any(_is_instance_path(piece, root) for piece in _argv_pieces(text) for root in roots)
 
 
 def _ffmpeg_is_msr_network_orphan(cmdline, streams_dir):
@@ -1197,11 +1247,10 @@ def _ffmpeg_is_msr_network_orphan(cmdline, streams_dir):
     """
     if not cmdline or not streams_dir:
         return False
-    text = _cmdline_text(cmdline)
-    lower = text.lower()
+    lower = _cmdline_text(cmdline).lower()
     if "http://" not in lower and "https://" not in lower:
         return False
-    return _argv_includes_streams_dir(text, streams_dir)
+    return _argv_includes_streams_dir(cmdline, streams_dir)
 
 
 def _is_multiprocessing_spawn(cmdline):
@@ -1386,6 +1435,10 @@ def _plan_orphan_kills(procs, streams_dir, keep_pids, spawn_open_paths=None):
     *spawn_open_paths* maps spawn-worker pid → open file paths so a worker
     in reconnect-grace (no ffmpeg child) is still found via the log/.ts.
 
+    *streams_dir* is one recordings folder or a list of them (the main one and the fallback).
+    A worker is only planned when its owner process is gone, and paths are matched by component
+    (see ``_is_instance_path``), so another instance is never mistaken for a leftover.
+
     Returns ``(worker_pids, leftover_capture_pids)``. Kill each worker with
     ``kill_process_tree`` first; then SIGKILL leftover captures.
     """
@@ -1480,6 +1533,14 @@ def _plan_orphan_kills(procs, streams_dir, keep_pids, spawn_open_paths=None):
             if _spawn_parent_pid(p.get("cmdline")) in foreign_parents:
                 workers.add(pid)
 
+    # A worker whose parent is still running is not an orphan: it belongs to a live instance
+    # (another MSR with a similar folder, say). Only workers whose owner is gone are ours to kill.
+    for wid in list(workers):
+        owner = _spawn_parent_pid((by_pid.get(wid) or {}).get("cmdline"))
+        if owner is not None and owner in by_pid and owner not in keep:
+            workers.discard(wid)
+            leftover_captures.difference_update(_descendants(wid))
+
     worker_descendants = set()
     for wid in workers:
         worker_descendants.update(_descendants(wid))
@@ -1508,12 +1569,17 @@ def kill_orphan_recording_processes(logger=None, streams_dir=None, keep_pid=None
     under *streams_dir* or have an open file there (log / .ts during
     reconnect grace). This instance's PID tree (*keep_pid*) is never killed.
 
-    Local remux/clip ffmpeg (no http) and unrelated encodes are skipped.
+    Local remux/clip ffmpeg (no http) and unrelated encodes are skipped. *streams_dir* may be a
+    list (the main folder and the fallback folder): a worker recording into the fallback after a
+    crash is a leftover too.
     """
-    if not streams_dir:
+    roots = [str(r) for r in (streams_dir if isinstance(streams_dir, (list, tuple, set)) else [streams_dir]) if r]
+    if not roots:
         if logger:
             logger.info("Orphan recording check skipped — no streams directory given")
         return
+    streams_dir = roots[0] if len(roots) == 1 else roots
+    where = ", ".join(roots)
 
     keep_pid = os.getpid() if keep_pid is None else keep_pid
 
@@ -1555,7 +1621,7 @@ def kill_orphan_recording_processes(logger=None, streams_dir=None, keep_pid=None
                 if logger:
                     logger.info(
                         f"Killing orphaned record worker (PID {pid}) — "
-                        f"leftover spawn process under {streams_dir}"
+                        f"leftover spawn process under {where}"
                     )
                 kill_process_tree(pid, logger)
             for pid in captures:
@@ -1565,7 +1631,7 @@ def kill_orphan_recording_processes(logger=None, streams_dir=None, keep_pid=None
                     if logger:
                         logger.info(
                             f"Killing orphaned capture (PID {pid}) — "
-                            f"MSR network capture under {streams_dir}"
+                            f"MSR network capture under {where}"
                         )
                     psutil.Process(pid).kill()
                 except (psutil.NoSuchProcess, psutil.AccessDenied):

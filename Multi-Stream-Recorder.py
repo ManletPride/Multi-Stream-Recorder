@@ -253,7 +253,11 @@ examples:
 
     # Ghost workers from a crashed previous copy treat ffmpeg SIGTERM as a
     # reconnect. Reap them before this instance records anything.
-    kill_orphan_recording_processes(logging.getLogger(), streams_dir=streams_dir)
+    # a leftover worker may be recording into the fallback folder (main drive was gone)
+    from msr.storage import fallback_root as _fallback_root
+    kill_orphan_recording_processes(
+        logging.getLogger(),
+        streams_dir=[streams_dir, _fallback_root(config.get('Paths', 'fallback_dir', fallback=''), streams_dir)])
 
     errors, warnings = validate_startup(config)
 
