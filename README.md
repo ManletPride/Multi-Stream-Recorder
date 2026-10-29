@@ -185,6 +185,8 @@ python Multi-Stream-Recorder.py [--data-dir DIR] [--config FILE] [--headless] [-
 
 ## Agent control (scripts, bots, headless)
 
+Writing an agent? Start with [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md); `python msr_ctl.py help --json` lists every command with its arguments, safety level and an example.
+
 Everything you do in the window can be done without it. A running copy (window or `--headless`) accepts commands on a local control channel, and `msr_ctl.py` is the command-line client. With nothing running, `msr_ctl.py` edits `channels.json` / `config.ini` directly (one atomic write, with the same history copy the app keeps).
 
 - **Local only.** The channel listens on `127.0.0.1` on a random port. Every request must carry the random token that the app writes to `msr_control.json` in the data folder when it starts (git-ignored, removed when it quits). There is no remote access.
@@ -247,9 +249,11 @@ python msr_ctl.py quit                        # stops recording AND closes MSR (
 
 **Waiting for something.** `wait` blocks until a channel goes live (`live`), a recording is finished (`finished`, also when its remux failed: see `remux_ok`) or an error is reported (`error`), for one `--channel` or any (it warns when that channel is not recording, since then no `finished` can come soon), and exits `6` after `--timeout` seconds (default 300, at most 3600) with nothing. Each event has a `seq`; pass `--after SEQ` to the next `wait` so nothing that happened in between is missed.
 
+**After a stop.** `record-stop` (or `stop`) leaves the raw `.ts`; the cleanup remuxes it a few seconds later (as soon as the stopped workers are confirmed gone; locked files are retried). Until then the channel shows `finishing` (`waiting_for_cleanup`, then `remuxing`) and the events `stopped`, `remux_started` and `finished` follow. `wait --event finished --channel NAME` after a stop starts at that stop, so it also returns a finish that happened before the wait.
+
 **Update headless.** `update install --yes` downloads the release, stops recording (remuxing what was recorded), quits, lets the update helper copy the new files, and starts the same copy again with `--headless --data-dir <the same data folder>`. The restarted copy runs in the background with no console window; use `msr_ctl.py status` and `logs`.
 
-Anything that removes or replaces something needs `--yes` (a permanent delete needs `--confirm <word>`, the word `library plan permanent ...` shows). Exit codes: `0` ok, `1` refused or failed, `2` usage, `3` not running, `4` wrong token, `5` needs confirmation, `6` timed out, `130` Ctrl+C (no traceback). The protocol (one JSON line per request) is in `AGENTS.md`.
+Anything that removes or replaces something needs `--yes` (a permanent delete needs `--confirm <word>`, the word `library plan permanent ...` shows). Exit codes: `0` ok, `1` refused or failed, `2` usage, `3` not running, `4` wrong token, `5` needs confirmation, `6` timed out, `7` control API version mismatch (use the `msr_ctl.py` next to the running copy), `130` Ctrl+C (no traceback). `msr_control.json`, `ping`, `help --json` and `msr_status.json` carry an `api_version`; it changes only when something is removed or changes meaning. The protocol (one JSON line per request) is in `AGENTS.md`.
 
 To try it next to a copy you already use, give the second one its own data folder with a different `streams_dir`. One copy per recordings folder can run at a time. In PowerShell:
 

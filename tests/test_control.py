@@ -244,7 +244,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(self.h.recorders[0].channels, ["kickone"])
 
     def test_stop_then_start_makes_a_new_session(self):
-        self.assertEqual(self.h.call("stop")["result"], {"session": "stopped"})
+        self.assertEqual(self.h.call("stop")["result"]["session"], "stopped")
         self.assertTrue(self.h.wait(lambda: self.h.app.recorder is None))
         self.assertFalse(self.h.call("check")["ok"])
         self.assertEqual(self.h.call("stop")["code"], "conflict")

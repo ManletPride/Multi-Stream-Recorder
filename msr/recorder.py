@@ -57,6 +57,15 @@ class BackgroundCleaner:
         self._thread = None
         self._stop_event = threading.Event()
 
+    def _report(self, event, *args, **kwargs):
+        """Tell agent control what the cleanup does (msr.agent_status.Tracker.on_cleanup)."""
+        hook = self.__dict__.get("on_file")
+        if hook is not None:
+            try:
+                hook(event, *args, **kwargs)
+            except Exception as e:
+                logging.debug(f"cleanup hook: {e}")
+
     def start(self):
         if self._thread and self._thread.is_alive():
             return
@@ -86,6 +95,7 @@ class BackgroundCleaner:
         logging.info("Cleanup: Waiting for any concurrent cleanup pass to finish...")
         _cleanup_lock.acquire()
         _cleanup_lock.release()
+        started = time.time()
 
         for pass_num in range(3):
             if self._stop_event.is_set():
@@ -100,6 +110,7 @@ class BackgroundCleaner:
                 time.sleep(1)
 
         logging.info("Background cleanup finished")
+        self._report("pass_done", started=started)
 
     def _process_leftover_files(self, lock_timeout=120):
         # Only one cleanup scan may run at a time across all threads.
@@ -271,6 +282,7 @@ class BackgroundCleaner:
                 if existing_mp4_ok:
                     logging.info(f"Cleanup: MP4 already exists for {filename}, just moving raw file")
                 else:
+                    self._report("remux_started", platform, username_dir, raw_file)
                     file_size_gb = file_size / (1024**3)
                     scaled_timeout = max(ffmpeg_timeout, int(file_size_gb * 60) + 120)
                     success, mp4_size, error = remux_to_mp4(
@@ -279,6 +291,7 @@ class BackgroundCleaner:
                     )
                     if not success:
                         logging.error(f"Cleanup: Failed to process {filename}: {error}")
+                        self._report("finished", platform, username_dir, raw_file, ok=False, error=error or "")
                         if error != "output too small":
                             # A failed remux (ffmpeg missing, timeout, disk full, antivirus lock)
                             # says nothing about the recording: keep it where it is and retry.
@@ -303,6 +316,7 @@ class BackgroundCleaner:
                     try:
                         shutil.move(raw_file, pending_path)
                         logging.info(f"Cleanup: Successfully processed {mp4_filename}")
+                        self._report("finished", platform, username_dir, mp4_file, ok=True)
                         moved = True
                         break
                     except PermissionError:
@@ -1050,6 +1064,11 @@ class KickPushListener:
 class StreamRecorder:
     """Main recorder that manages worker processes."""
 
+    # Seconds between a single-channel stop and the cleanup pass for its files: short when every
+    # process of the channel is confirmed dead (handles closed), the old generous wait otherwise.
+    STOP_CLEANUP_DELAY = 3
+    STOP_CLEANUP_DELAY_SLOW = 30
+
     # Recordings folder watch state (see _storage_tick); defaults so a bare instance works too.
     fallback_root = None
     fallback_recorded_base = None
@@ -1291,6 +1310,7 @@ class StreamRecorder:
             if proc.is_alive():
                 proc.kill()
                 proc.join(timeout=5)
+        all_gone = not any(p.is_alive() for p in alive_procs)
 
         # Log summary for this channel
         if size_str and time_str:
@@ -1313,10 +1333,22 @@ class StreamRecorder:
         # We wait long enough for any in-flight remux in the killed worker process
         # to either finish or be abandoned before scanning for leftover .ts files
         # (Bug #3 fix — the old 5 s wait was insufficient for multi-GB remuxes).
+        # The worker's whole process tree (capture and any remux it ran) is killed above, so once
+        # every process is confirmed gone its handles are closed and a short wait is enough. The
+        # pass itself still skips any .ts that is locked, renamed-blocked or still growing, and
+        # such files are retried, so a slow handle release cannot be remuxed early.
+        delay = self.STOP_CLEANUP_DELAY if all_gone else self.STOP_CLEANUP_DELAY_SLOW
+
         def _channel_cleanup():
-            time.sleep(30)  # generous wait for large-file remux / file handle release
-            self.cleaner._process_leftover_files()
+            time.sleep(delay)
+            for pass_num in range(3):
+                if not self.cleaner._process_leftover_files():
+                    break
+                logging.info(f"Cleanup for {channel_name}: some files were busy, retrying in 10s "
+                             f"(pass {pass_num + 1}/3)")
+                time.sleep(10)
             logging.info(f"Cleanup finished for {channel_name}")
+            self.cleaner._report("channel_done", channel_name)
 
         threading.Thread(target=_channel_cleanup, daemon=True,
                          name=f"cleanup-{channel_name}").start()

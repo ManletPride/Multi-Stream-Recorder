@@ -440,5 +440,175 @@ class PolishTests(unittest.TestCase):
         self.assertIn("jittered_sleep", src, "later polls keep their spacing")
 
 
+class FinishingTests(unittest.TestCase):
+    """record-stop -> cleanup remux -> finished, race-free, and the per-channel finishing state."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data, self.streams = make_data(self.tmp.name, [{"name": "knut", "enabled": True},
+                                                            {"name": "twitch:saruei", "enabled": True}])
+        self._cd = in_dir(self.data)
+        self._cd.__enter__()
+        self.config = Config(os.path.join(self.data, "config.ini"))
+        self.app = control.OfflineApp(self.config)
+        self.app.tracker = self.t = agent_status.Tracker(self.config)
+
+        class Rec:
+            is_running = True
+            status_dict = {"knut": {"status": "Recording"}, "twitch:saruei": {"status": "Recording"}}
+
+            def stop_channel(self, key):
+                self.status_dict[key] = {"status": "Stopped", "detail": "by user"}
+
+            def start_channel(self, key):
+                self.status_dict[key] = {"status": "Initializing"}
+
+        self.app.recorder = Rec()
+        self.c = control.Controller(self.app)
+
+    def tearDown(self):
+        self._cd.__exit__(None, None, None)
+        self.tmp.cleanup()
+
+    def rows(self):
+        return {r["name"]: r for r in control.channel_rows(self.app)}
+
+    def test_finish_between_stop_and_wait_is_not_missed(self):
+        res = self.c.handle("record_stop", {"channels": ["twitch:saruei"]})["result"]
+        row = res["channels"][0]
+        self.assertEqual(row["result"], "stopped_recording")
+        self.assertEqual(self.rows()["twitch:saruei"]["finishing"], "waiting_for_cleanup")
+        raw = touch(os.path.join(self.streams, "Recorded", "twitch", "saruei", "s.ts"), 100)
+        self.t.on_cleanup("remux_started", "twitch", "saruei", raw)
+        self.assertEqual(self.rows()["twitch:saruei"]["finishing"], "remuxing")
+        os.remove(raw)
+        mp4 = touch(os.path.join(self.streams, "Processed", "twitch", "saruei", "s.mp4"), 5000)
+        self.t.on_cleanup("finished", "twitch", "saruei", mp4, ok=True)   # before anyone waits
+        # the default wait for a stopped channel starts at its stop: returns at once
+        ev = self.c.handle("wait", {"events": ["finished"], "channel": "twitch:saruei", "timeout": 0})["result"]
+        self.assertEqual((ev["event"], ev["path"], ev["remux_ok"]), ("finished", mp4, True))
+        # and so does an explicit --after finish_after_seq
+        ev2 = self.c.handle("wait", {"events": ["finished"], "after": row["finish_after_seq"], "timeout": 0})
+        self.assertEqual(ev2["result"]["seq"], ev["seq"])
+        kinds = [e["event"] for e in self.t.events() if e["channel"] == "twitch:saruei"]
+        self.assertEqual(kinds, ["stopped", "remux_started", "finished"])
+        r = self.rows()["twitch:saruei"]
+        self.assertEqual((r["finishing"], r["finished_since_stop"]), (None, True))
+        self.assertEqual(self.t.recent_finished()[0]["size"], 5000)
+
+    def test_restart_means_a_new_wait_waits_for_the_new_recording(self):
+        self.c.handle("record_stop", {"channels": ["knut"]})
+        self.t.on_cleanup("finished", "kick", "knut", "", ok=True)
+        self.app.mode = "headless"  # a running copy (the offline adapter only edits files)
+        self.c.handle("record_start", {"channels": ["knut"]})
+        reply = self.c.handle("wait", {"events": ["finished"], "channel": "knut", "timeout": 0.2})
+        self.assertEqual(reply.get("code"), "timeout", reply)
+
+    def test_cleanup_without_a_file_still_ends_the_wait(self):
+        self.c.handle("record_stop", {"channels": ["knut"]})
+        left = touch(os.path.join(self.streams, "Recorded", "kick", "knut", "k.ts"), 100)
+        self.t.on_cleanup("channel_done", "knut")           # locked through every pass: still finishing
+        self.assertEqual(self.rows()["knut"]["finishing"], "waiting_for_cleanup")
+        os.remove(left)
+        self.t.on_cleanup("channel_done", "knut")
+        ev = self.c.handle("wait", {"events": ["finished"], "channel": "knut", "timeout": 0})["result"]
+        self.assertIsNone(ev["remux_ok"])
+        self.assertIn("no recording file", ev["note"])
+
+    def test_session_stop_marks_recording_channels_finishing(self):
+        self.app.stop_session = lambda: "stopped"
+        self.app.mode = "headless"
+        res = self.c.handle("stop")["result"]
+        self.assertEqual(sorted(res["finishing"]), ["knut", "twitch:saruei"])
+        self.t.on_cleanup("pass_done", started=time.time() + 1)
+        kinds = [e["event"] for e in self.t.events()]
+        self.assertEqual(kinds.count("finished"), 2)
+
+    def test_window_stop_is_seen_from_the_status(self):
+        self.t.seen("knut", {"status": "Recording"})
+        self.t.seen("knut", {"status": "Stopped", "detail": "by user"})
+        self.assertEqual(self.t.finish_state("knut"), ("waiting_for_cleanup", False))
+
+    def test_cli_does_not_warn_while_finishing(self):
+        rows = [{"name": "knut", "index": 1, "recording": False, "finishing": "remuxing",
+                 "finished_since_stop": False}]
+        err = io.StringIO()
+        with mock.patch.object(msr_ctl.control, "call", return_value={"ok": True, "result": {"channels": rows}}), \
+                mock.patch("sys.stderr", err):
+            msr_ctl._warn_if_nothing_to_finish(self.data, {"events": ["finished"], "channel": "knut"})
+        self.assertEqual(err.getvalue(), "")
+
+
+class CleanerReportTests(unittest.TestCase):
+    def test_cleanup_pass_reports_remux_started_and_finished(self):
+        from msr import recorder as recorder_mod
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = touch(os.path.join(tmp, "Recorded", "kick", "knut", "k.ts"), 4096)
+            values = {("Paths", "streams_dir"): tmp, ("Advanced", "ffmpeg_path"): "ffmpeg"}
+            config = mock.MagicMock()
+            config.get.side_effect = lambda s, k, fallback=None: values.get((s, k), fallback)
+            config.getint.return_value = 60
+            config.getfloat.return_value = 0.0
+            cleaner = recorder_mod.BackgroundCleaner(config)
+            got = []
+            cleaner.on_file = lambda *a, **k: got.append((a, k))
+
+            def fake_remux(src, dst, *a, **k):
+                with open(dst, "wb") as fh:
+                    fh.write(b"m" * 4096)
+                return True, 4096, None
+
+            with mock.patch.object(recorder_mod, "remux_to_mp4", fake_remux), \
+                    mock.patch.object(recorder_mod.time, "sleep"):
+                cleaner._process_leftover_files()
+            mp4 = os.path.join(tmp, "Processed", "kick", "knut", "k.mp4")
+            self.assertEqual([a[0] for a, _k in got], ["remux_started", "finished"])
+            self.assertEqual(got[0][0], ("remux_started", "kick", "knut", raw))
+            self.assertEqual(got[1], (("finished", "kick", "knut", mp4), {"ok": True}))
+
+
+class CatalogAndApiTests(unittest.TestCase):
+    def test_catalog_covers_every_cli_command_and_every_protocol_command(self):
+        cat = msr_ctl.catalog()
+        leaves = {path for path, _p, _h in msr_ctl._leaves(msr_ctl.build_parser())}
+        self.assertEqual(leaves, set(msr_ctl.CATALOG), "every CLI command has a catalog row and back")
+        self.assertEqual({c["command"] for c in cat["commands"]}, leaves)
+        reached = {p for c in cat["commands"] for p in c["protocol_commands"]}
+        server = set(control.Controller(control.OfflineApp(mock.MagicMock())).commands())
+        self.assertEqual(server - reached, set(), "a protocol command has no CLI example")
+        self.assertEqual(reached - server - {"ping"}, set())
+        for c in cat["commands"]:
+            self.assertIn(c["safety"], ("read", "write", "session", "destructive", "depends on the command"))
+            self.assertTrue(c["examples"])
+        destructive = {c["command"] for c in cat["commands"] if c["safety"] == "destructive"}
+        self.assertTrue({"library run", "library restore", "history restore", "update install"} <= destructive)
+        self.assertEqual(cat["exit_codes"]["6"], "timed out")
+        self.assertEqual(cat["api_version"], control.API_VERSION)
+
+    def test_help_json_needs_no_running_copy(self):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            self.assertEqual(msr_ctl.run(["--data-dir", tempfile.gettempdir(), "help", "--json"]), 0)
+        self.assertEqual(json.loads(out.getvalue())["api_version"], control.API_VERSION)
+
+    def test_api_version_everywhere_and_mismatch_is_exit_7(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data, _ = make_data(tmp, ["knut"])
+            h = Headless(data, start_now=False)
+            try:
+                info = control.read_control_file(data)
+                self.assertEqual(info["api_version"], control.API_VERSION)
+                self.assertEqual(h.call("ping")["result"]["api_version"], control.API_VERSION)
+                self.assertEqual(h.call("status")["result"]["api_version"], control.API_VERSION)
+                err = io.StringIO()
+                with mock.patch.object(control, "API_VERSION", control.API_VERSION + 1), \
+                        mock.patch("sys.stderr", err), mock.patch("sys.stdout", io.StringIO()):
+                    code = msr_ctl.run(["--data-dir", data, "status"])
+                self.assertEqual(code, 7)
+                self.assertIn("api_mismatch", err.getvalue())
+            finally:
+                h.close()
+
+
 if __name__ == "__main__":
     unittest.main()

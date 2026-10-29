@@ -14,7 +14,7 @@ from collections import deque
 FINISHED_KEEP = 50        # finished recordings remembered this run
 FINISHED_IN_STATUS = 20   # of those, how many go into msr_status.json
 EVENTS_KEEP = 500
-EVENT_KINDS = ("live", "finished", "error")
+EVENT_KINDS = ("live", "stopped", "remux_started", "finished", "error")
 HEALTH_EVERY = 30.0       # seconds between health checks for the status file
 QUEUE_EVERY = 15.0        # seconds between scans of Recorded/ for the cleanup queue
 
@@ -71,6 +71,9 @@ class Tracker:
         self._last = {}
         self._live = {}
         self._cache = {}
+        self.finishing = {}       # key -> {"state": waiting_for_cleanup|remuxing, "since", "seq"}
+        self.stop_seq = {}        # key -> seq of its last "stopped" event (until it records again)
+        self.stop_finished = set()  # keys whose recording finished after that stop
 
     def info(self, key):
         return self.channels.setdefault(key, {"last_error": "", "last_error_at": None, "errors": 0,
@@ -117,14 +120,18 @@ class Tracker:
         low = status.lower()
         now = self.clock()
         info = self.info(key)
+        was_recording = (old or ("",))[0].lower().startswith("recording")
         if low.startswith("recording"):
             info["last_recorded"] = info["last_live"] = now
-            if not (old or ("",))[0].lower().startswith("recording"):
+            if not was_recording:
+                self._started(key)
                 self._set_live(key, True, "recording")
             return
         if old == (status, detail):
             return
-        if low == "completed":
+        if low == "stopped" and was_recording and key not in self.finishing:
+            self._stopping(key, True)   # stopped outside control (the window's right-click Stop)
+        elif low == "completed":
             self._live[key] = False
             self._finished(key, True, "")
         elif low == "remux failed":
@@ -159,26 +166,129 @@ class Tracker:
         info["last_error_at"] = now
         self.emit("error", key, error=info["last_error"])
 
-    def _finished(self, key, ok, error):
-        """Find the file this channel just finished (newest .mp4 in Processed, else .ts in Recorded)."""
+    def _finished(self, key, ok, error, path=None):
+        """Record a finished recording. Without ``path``: the newest .mp4 in the channel's
+        Processed folder (or .ts in Recorded when the remux failed)."""
         from msr.library import sidecar_seconds
-        since = self.clock() - 6 * 3600
-        hit = None
-        try:
-            for folder in channel_dirs(self.config, key, "Processed" if ok else "Recorded"):
-                found = _newest(folder, (".mp4",) if ok else (".ts",), since)
-                if found and (hit is None or found[0] > hit[0]):
-                    hit = found
-        except Exception as e:
-            logging.debug(f"agent status: finding the finished file of {key}: {e}")
-        path = hit[1] if hit else ""
-        entry = {"channel": key, "path": path, "size": hit[2] if hit else None,
+        size = None
+        if path is None:
+            since = self.clock() - 6 * 3600
+            hit = None
+            try:
+                for folder in channel_dirs(self.config, key, "Processed" if ok else "Recorded"):
+                    found = _newest(folder, (".mp4",) if ok else (".ts",), since)
+                    if found and (hit is None or found[0] > hit[0]):
+                        hit = found
+            except Exception as e:
+                logging.debug(f"agent status: finding the finished file of {key}: {e}")
+            path, size = (hit[1], hit[2]) if hit else ("", None)
+        elif path:
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = None
+        entry = {"channel": key, "path": path, "size": size,
                  "duration_seconds": sidecar_seconds(path) if path and ok else None,
                  "finished_at": iso(self.clock()), "time": self.clock(), "remux_ok": ok}
         if error:
             entry["error"] = error[:300]
         self.finished.append(entry)
+        self.finishing.pop(key, None)
+        if key in self.stop_seq:
+            self.stop_finished.add(key)
         self.emit("finished", key, path=path, remux_ok=ok)
+
+    # -------------------------------------------------- stop -> cleanup remux -> finished
+    def stopping(self, key, was_recording):
+        """A channel was stopped (control or window). Returns the seq of its "stopped" event:
+        a wait for "finished" after that seq cannot miss the recording's finish."""
+        with self._cond:
+            return self._stopping(key, was_recording)
+
+    def _stopping(self, key, was_recording):
+        ev = self.emit("stopped", key, was_recording=bool(was_recording))
+        self.stop_seq[key] = ev["seq"]
+        self.stop_finished.discard(key)
+        self._live[key] = False
+        if was_recording:
+            self.finishing[key] = {"state": "waiting_for_cleanup", "since": self.clock(), "seq": ev["seq"]}
+        else:
+            self.finishing.pop(key, None)
+        self._last[key] = ("Stopped", "by user")
+        return ev["seq"]
+
+    def started(self, key):
+        with self._cond:
+            self._started(key)
+
+    def _started(self, key):
+        self.stop_seq.pop(key, None)
+        self.finishing.pop(key, None)
+        self.stop_finished.discard(key)
+
+    def finish_state(self, key):
+        """For the status row: "waiting_for_cleanup" / "remuxing" while a stopped recording is
+        being finished, else None; and whether it finished since the last stop."""
+        with self._cond:
+            f = self.finishing.get(key)
+            return (f["state"] if f else None), key in self.stop_finished
+
+    def default_after(self, key):
+        """Where a "finished" wait for ``key`` starts: its last stop (until it records again)."""
+        with self._cond:
+            return self.stop_seq.get(key)
+
+    def _key_for(self, platform, user_dir):
+        from msr.util import channel_key_to_dirs
+        for key in list(self.finishing) + [k for k in self._last if k not in self.finishing]:
+            try:
+                if channel_key_to_dirs(key) == (platform, user_dir):
+                    return key
+            except Exception:
+                pass
+        return None
+
+    def on_cleanup(self, event, *args, **kwargs):
+        """Hook for BackgroundCleaner._report (cleanup thread)."""
+        with self._cond:
+            if event == "remux_started":
+                platform, user_dir, raw = args
+                key = self._key_for(platform, user_dir)
+                if key is None:
+                    return
+                if key in self.finishing:
+                    self.finishing[key]["state"] = "remuxing"
+                self.emit("remux_started", key, path=raw)
+            elif event == "finished":
+                platform, user_dir, path = args
+                key = self._key_for(platform, user_dir)
+                if key is None:
+                    return
+                ok = bool(kwargs.get("ok"))
+                if not ok:
+                    self._error(self.info(key), key, f"Remux failed: {kwargs.get('error', '')}", self.clock())
+                self._finished(key, ok, kwargs.get("error", ""), path=path)
+            elif event == "channel_done":
+                self._nothing_left(args[0])
+            elif event == "pass_done":
+                started = kwargs.get("started") or 0
+                for key in [k for k, f in self.finishing.items() if f["since"] <= started]:
+                    self._nothing_left(key)
+
+    def _nothing_left(self, key):
+        """The cleanup for a stopped channel ended without a file of it (too small, none, kept)."""
+        if key not in self.finishing:
+            return
+        try:  # a raw file is still there (locked through every pass): a later pass finishes it
+            for folder in channel_dirs(self.config, key, "Recorded"):
+                if _newest(folder, (".ts",)):
+                    return
+        except Exception:
+            pass
+        self.finishing.pop(key, None)
+        if key in self.stop_seq:
+            self.stop_finished.add(key)
+        self.emit("finished", key, path="", remux_ok=None, note="no recording file was left to remux")
 
     def recent_finished(self, n=FINISHED_IN_STATUS):
         return list(self.finished)[-n:][::-1]

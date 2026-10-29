@@ -276,6 +276,29 @@ class RestartPolicyTests(SupervisorBase):
         self.tick(1100.0)
         self.assertEqual(self.spawned, [])
 
+    def test_stop_channel_cleanup_starts_after_a_short_wait_when_the_workers_are_gone(self):
+        procs = self.start_all()
+
+        def fake_kill(pid, logger=None):
+            for p in procs.values():
+                if p.pid == pid:
+                    p.die(15)
+        rec = self.rec
+        rec._sync_kick_push = lambda: None
+        rec.cleaner = mock.Mock()
+        rec.cleaner._process_leftover_files.return_value = False
+        with mock.patch.object(recorder_mod, "kill_process_tree", fake_kill), \
+                mock.patch.object(recorder_mod.threading, "Thread") as thread:
+            rec.stop_channel("kick1")
+        target = thread.call_args.kwargs["target"]
+        with mock.patch.object(recorder_mod.time, "sleep") as sleep:
+            target()
+        self.assertEqual(sleep.call_args_list[0].args[0], StreamRecorder.STOP_CLEANUP_DELAY)
+        self.assertLessEqual(StreamRecorder.STOP_CLEANUP_DELAY, 5)
+        self.assertEqual(StreamRecorder.STOP_CLEANUP_DELAY_SLOW, 30)
+        rec.cleaner._process_leftover_files.assert_called_once()
+        rec.cleaner._report.assert_called_with("channel_done", "kick1")
+
     def test_start_channel_forgets_the_crash_history(self):
         rec = self.rec
         procs = self.start_all()

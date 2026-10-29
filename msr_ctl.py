@@ -8,10 +8,14 @@ as the app); session commands then exit with code 3.
 Data folder: --data-dir, else %MSR_HOME%, else %MSR_DATA%, else the current folder.
 
 Exit codes: 0 ok, 1 refused/failed, 2 usage, 3 not running (or running but not answering),
-4 wrong token, 5 needs confirmation (--yes / --confirm WORD), 6 timed out, 130 Ctrl+C.
+4 wrong token, 5 needs confirmation (--yes / --confirm WORD), 6 timed out, 7 API version
+mismatch (use the msr_ctl.py of the running copy), 130 Ctrl+C.
+
+`help --json` prints every command with its arguments, safety level and an example.
+Agents: see docs/AGENT_GUIDE.md.
 
 Examples:
-  python msr_ctl.py status --json
+  python msr_ctl.py --json status
   python msr_ctl.py add twitch:somename
   python msr_ctl.py disable "#3" kickname
   python msr_ctl.py start | stop | quit
@@ -36,9 +40,66 @@ sys.path.insert(0, HERE)
 
 import msr.nowindow  # noqa: F401,E402  (hide child console windows, as everywhere else)
 from msr import control  # noqa: E402
+from msr.agent_status import EVENT_KINDS  # noqa: E402
 
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_NOT_RUNNING, EXIT_AUTH, EXIT_CONFIRM, EXIT_TIMEOUT = range(7)
+EXIT_API = 7  # the running copy speaks another control api_version
 EXIT_INTERRUPTED = 130  # Ctrl+C
+EXIT_CODES = {EXIT_OK: "ok", EXIT_FAILED: "refused or failed", EXIT_USAGE: "usage error",
+              EXIT_NOT_RUNNING: "not running (or running but not answering)", EXIT_AUTH: "wrong token",
+              EXIT_CONFIRM: "needs confirmation (--yes / --confirm WORD)", EXIT_TIMEOUT: "timed out",
+              EXIT_API: "control API version mismatch", EXIT_INTERRUPTED: "interrupted (Ctrl+C)"}
+
+# One row per CLI command (the parser's leaves): safety level and examples. help --json joins this
+# with the parser itself (arguments, options) and derives each example's protocol command through
+# to_request, so the catalog cannot drift; tests/test_agent_status.py checks both directions.
+# Safety: read = changes nothing; write = safe, reversible edit; session = starts/stops recording or
+# the app; destructive = removes or replaces something and needs --yes / --confirm.
+CATALOG = {
+    "status": ("read", ["--json status"]),
+    "channels": ("read", ["channels"]),
+    "ping": ("read", ["ping"]),
+    "help": ("read", ["help --json"]),
+    "health": ("read", ["health"]),
+    "start": ("session", ["start"]),
+    "stop": ("session", ["stop"]),
+    "quit": ("session", ["quit"]),
+    "reload-channels": ("write", ["reload-channels"]),
+    "add": ("write", ["add kick:knut twitch:someone"]),
+    "remove": ("write", ["remove twitch:someone"]),
+    "enable": ("write", ["enable knut", "enable --all"]),
+    "disable": ("write", ["disable knut", "disable --all"]),
+    "record-start": ("session", ["record-start knut"]),
+    "record-stop": ("session", ["record-stop knut"]),
+    "recordings": ("read", ["recordings --since 24h", "recordings pending", "recordings retry"]),
+    "wait": ("read", ["wait --event finished --channel knut --timeout 600"]),
+    "events": ("read", ["events --after 0"]),
+    "move": ("write", ["move knut --to top"]),
+    "sort": ("write", ["sort platform"]),
+    "edit": ("write", ["edit twitch:old --name new"]),
+    "check": ("read", ["check knut"]),
+    "clip": ("write", ["clip knut --seconds 30"]),
+    "screenshot": ("write", ["screenshot knut"]),
+    "config get": ("read", ["config get Timeouts"]),
+    "config set": ("write", ["config set Timeouts.poll_interval_minutes 1"]),
+    "config reload": ("write", ["config reload"]),
+    "logs": ("read", ["logs -n 50 --filter error"]),
+    "update check": ("read", ["update check"]),
+    "update install": ("destructive", ["update install --yes"]),
+    "library summary": ("read", ["library summary"]),
+    "library files": ("read", ["library files --channel knut --older-than-days 30"]),
+    "library plan": ("read", ["library plan pending --channel knut --older-than-days 30"]),
+    "library run": ("destructive", ["library run pending --channel knut --older-than-days 30 --yes"]),
+    "library pending": ("read", ["library pending"]),
+    "library batches": ("read", ["library batches"]),
+    "library restore": ("destructive", ["library restore --last --yes"]),
+    "library suggest": ("read", ["library suggest --free 200 --older-days 90"]),
+    "library log": ("read", ["library log -n 20"]),
+    "history list": ("read", ["history list channels"]),
+    "history restore": ("destructive", ["history restore channels 2 --yes"]),
+    "call": ("depends on the command", ["call ping"]),
+}
+SAFETY_NOTES = {"recordings": "recordings retry runs the cleanup remux (write; originals kept until verified)"}
 LIVE_ONLY = {"start", "stop", "quit", "record_start", "record_stop", "check", "clip", "screenshot",
              "update_install", "wait", "events"}
 CODE_EXIT = {"auth": EXIT_AUTH, "confirm_required": EXIT_CONFIRM, "not_running": EXIT_NOT_RUNNING,
@@ -86,11 +147,14 @@ def build_parser():
     sub = ap.add_subparsers(dest="command", required=True, metavar="command")
 
     for name, text in (("status", "live status (or the files, when nothing runs)"), ("channels", "the roster"),
-                       ("ping", "is a copy running?"), ("help", "list the protocol commands"),
+                       ("ping", "is a copy running?"),
                        ("start", "Start Recording"), ("stop", "Stop Recording"), ("quit", "quit the app cleanly"),
                        ("reload-channels", "re-read channels.json"),
                        ("health", "tools, disk space, cookies, Fishtank login, problems")):
         sub.add_parser(name, help=text)
+
+    sub.add_parser("help", help="every command: arguments, safety, examples (local; --json for agents)") \
+        .add_argument("--json", dest="help_json", action="store_true", help="machine-readable catalog")
 
     p = sub.add_parser("add", help="add channel(s): name, platform:name or a URL")
     p.add_argument("names", nargs="+")
@@ -111,13 +175,14 @@ def build_parser():
     p.add_argument("--channel")
     p.add_argument("--limit", type=int, default=50)
     p = sub.add_parser("wait", help="block until a channel goes live, a recording finishes or an error")
-    p.add_argument("--event", action="append", choices=["live", "finished", "error"],
-                   help="repeatable; default: any")
+    p.add_argument("--event", action="append", choices=list(EVENT_KINDS),
+                   help="repeatable; default: any. A 'finished' wait for a channel that was stopped "
+                        "starts at that stop, so its finish is never missed")
     p.add_argument("--channel")
     p.add_argument("--timeout", "--for", dest="wait_timeout", type=float, default=300.0,
                    help="seconds (max 3600); exit code 6 when nothing happened")
     p.add_argument("--after", type=int, help="event seq to continue from (no event is missed between waits)")
-    sub.add_parser("events", help="recent events (live/finished/error)").add_argument("--after", type=int, default=0)
+    sub.add_parser("events", help="recent events (" + "/".join(EVENT_KINDS) + ")").add_argument("--after", type=int, default=0)
     p = sub.add_parser("move", help="reorder")
     p.add_argument("channels", nargs="+")
     p.add_argument("--to", required=True, choices=["top", "bottom", "up", "down"])
@@ -215,7 +280,7 @@ def to_request(a):
                                                     "limit": a.limit}.items() if v is not None}
         return "recordings_" + a.action, {}
     if c == "wait":
-        args = {"events": a.event or ["live", "finished", "error"], "timeout": a.wait_timeout}
+        args = {"events": a.event or list(EVENT_KINDS), "timeout": a.wait_timeout}
         if a.channel:
             args["channel"] = a.channel
         if a.after is not None:
@@ -277,6 +342,75 @@ def to_request(a):
     if c == "call":
         return a.cmd, json.loads(a.args)
     raise SystemExit(f"unknown command {c}")
+
+
+def _leaves(parser, prefix=()):
+    """(path, parser) for every runnable command of the CLI, from the parser itself."""
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            helps = {c.dest: c.help for c in action._choices_actions}
+            for name, sub in action.choices.items():
+                path = prefix + (name,)
+                inner = any(isinstance(x, argparse._SubParsersAction) for x in sub._actions)
+                if inner:
+                    yield from _leaves(sub, path)
+                else:
+                    yield " ".join(path), sub, helps.get(name) or ""
+
+
+def _arg_info(action):
+    out = {"name": action.dest, "flags": list(action.option_strings) or None,
+           "required": bool(action.required) or (not action.option_strings and action.nargs not in ("?", "*")),
+           "help": action.help or ""}
+    if action.choices:
+        out["choices"] = list(action.choices)
+    if action.nargs is not None:
+        out["nargs"] = action.nargs
+    if action.default not in (None, argparse.SUPPRESS, False) and action.option_strings:
+        out["default"] = action.default
+    if isinstance(action, (argparse._StoreTrueAction,)):
+        out["flag_only"] = True
+    return out
+
+
+def catalog():
+    """The machine-readable command catalog (help --json)."""
+    ap = build_parser()
+    commands = []
+    for path, sub, text in _leaves(ap):
+        safety, examples = CATALOG[path]
+        protocol = []
+        for ex in examples:
+            cmd, _args = to_request(ap.parse_args(ex.split()))
+            if cmd not in protocol:
+                protocol.append(cmd)
+        commands.append({
+            "command": path, "help": text, "safety": safety, "safety_note": SAFETY_NOTES.get(path, ""),
+            "arguments": [_arg_info(x) for x in sub._actions if not isinstance(x, argparse._HelpAction)],
+            "examples": ["python msr_ctl.py " + ex for ex in examples],
+            "protocol_commands": protocol,
+        })
+    return {
+        "api_version": control.API_VERSION,
+        "usage": "python msr_ctl.py [--data-dir DIR] [--json] [--timeout S] <command> ...",
+        "global_options": [_arg_info(x) for x in ap._actions
+                           if not isinstance(x, (argparse._HelpAction, argparse._SubParsersAction))],
+        "exit_codes": {str(k): v for k, v in sorted(EXIT_CODES.items())},
+        "events": list(EVENT_KINDS),
+        "safety_levels": {"read": "changes nothing", "write": "safe, reversible edit",
+                          "session": "starts or stops recording, or the app",
+                          "destructive": "removes or replaces something; needs --yes or --confirm WORD"},
+        "commands": commands,
+    }
+
+
+def _help_text(cat):
+    lines = [f"msr_ctl.py commands (control API v{cat['api_version']}):"]
+    for c in cat["commands"]:
+        lines.append(f"  {c['command']:<18} [{c['safety']}] {c['help']}")
+        lines.append(f"  {'':<18} e.g. {c['examples'][0]}")
+    lines.append("exit codes: " + ", ".join(f"{k} {v}" for k, v in cat["exit_codes"].items()))
+    return "\n".join(lines)
 
 
 def run_offline(data_dir, cmd, args):
@@ -366,6 +500,10 @@ def human(cmd, reply):
 def main(argv=None):
     ap = build_parser()
     a = ap.parse_args(argv)
+    if a.command == "help":  # local: works with nothing running
+        cat = catalog()
+        print(json.dumps(cat, indent=2) if (a.json or a.help_json) else _help_text(cat))
+        return EXIT_OK
     try:
         cmd, args = to_request(a)
     except ValueError as e:
@@ -381,6 +519,8 @@ def main(argv=None):
         reply = control.call(data_dir, cmd, args, timeout=timeout)
     except control.NotRunning:
         reply, exit_code = run_offline(data_dir, cmd, args)
+    except control.ApiMismatch as e:
+        reply, exit_code = {"ok": False, "code": "api_mismatch", "error": str(e)}, EXIT_API
     except (socket.timeout, TimeoutError):
         reply, exit_code = {"ok": False, "code": "timeout", "error": "No reply in time."}, EXIT_TIMEOUT
     if exit_code is None:
@@ -405,7 +545,10 @@ def _warn_if_nothing_to_finish(data_dir, args):
         return
     want = str(args.get("channel") or "").lower()
     picked = [r for r in rows if not want or want in (r["name"].lower(), f"#{r['index']}", str(r["index"]))]
-    if picked and not any(r["recording"] for r in picked):
+    # A stopped channel whose recording is still being remuxed ("finishing"), or that finished
+    # since the stop (the wait returns that at once), is fine: no warning.
+    if picked and not any(r["recording"] or r.get("finishing") or r.get("finished_since_stop")
+                          for r in picked):
         who = picked[0]["name"] if want else "no channel"
         print(f"warning: {who} is not recording now, so a 'finished' event comes only after a new "
               "recording starts and ends.", file=sys.stderr)

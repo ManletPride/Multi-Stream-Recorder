@@ -34,6 +34,11 @@ CONTROL_FILE = "msr_control.json"
 STATUS_FILE = "msr_status.json"
 ENV_SWITCH = "MSR_CONTROL"
 PROTOCOL = 1
+# API version of the control channel (msr_control.json, ping, help, msr_status.json). Bump it only
+# for a breaking change: a command, argument, reply field or exit code removed, renamed or given a
+# different meaning. Adding commands, arguments or fields does not bump it. msr_ctl.py refuses to
+# talk to a copy with another api_version (exit code 7) instead of guessing.
+API_VERSION = 1
 MAX_REQUEST = 1 << 20
 STATUS_INTERVAL = 3.0
 
@@ -596,6 +601,9 @@ def channel_rows(app) -> list:
         row["restarts"] = info.get("restarts", 0)
         row["last_live"] = iso(info.get("last_live"))
         row["last_recorded"] = iso(info.get("last_recorded"))
+        state, done = tracker.finish_state(key) if tracker is not None else (None, False)
+        row["finishing"] = state            # waiting_for_cleanup | remuxing | None
+        row["finished_since_stop"] = done
     return rows
 
 
@@ -645,6 +653,7 @@ def live_status(app) -> dict:
     rows = channel_rows(app)
     out = {
         "protocol": PROTOCOL,
+        "api_version": API_VERSION,
         "app": {"name": "Multi-Stream Recorder", "version": __version__, "pid": os.getpid(),
                 "mode": app.mode, "started_at": round(app.started, 1)},
         "updated_at": round(time.time(), 1),
@@ -688,9 +697,12 @@ class StatusWriter(threading.Thread):
         if tracker is None:
             return
         rec = self.app.recorder
-        if rec is not None and rec.__dict__.get("on_status") is not tracker.seen:
+        if rec is not None:
             try:
                 rec.on_status = tracker.seen
+                cleaner = getattr(rec, "cleaner", None)
+                if cleaner is not None:
+                    cleaner.on_file = tracker.on_cleanup
             except Exception:
                 pass
         for key, st in _status_copy(rec).items():
@@ -812,10 +824,11 @@ class Controller:
 
     # -------------------------------------------------- info
     def cmd_ping(self, args):
-        return {"pong": True, "version": __version__, "mode": self.app.mode, "pid": os.getpid()}
+        return {"pong": True, "version": __version__, "api_version": API_VERSION, "mode": self.app.mode,
+                "pid": os.getpid()}
 
     def cmd_help(self, args):
-        return {"commands": self.commands()}
+        return {"api_version": API_VERSION, "commands": self.commands()}
 
     def cmd_status(self, args):
         return live_status(self.app)
@@ -841,6 +854,9 @@ class Controller:
         started with no channel enabled) starts one, unless the user stopped recording."""
         if self.app.mode == "offline":
             return {"monitoring": False, "saved": "files (MSR not running)"}
+        if self.app.tracker is not None:
+            for key in keys:
+                self.app.tracker.started(key)  # a new recording: waits no longer start at the old stop
         rec = self.app.recorder
         if not keys:
             return {"monitoring": is_running_session(rec)}
@@ -958,7 +974,17 @@ class Controller:
 
     def cmd_stop(self, args):
         self._need_live()
-        return {"session": self.app.stop_session()}
+        before = _status_copy(self.app.recorder)
+        out = {"session": self.app.stop_session()}
+        tracker = self.app.tracker
+        if tracker is not None:
+            rec_keys = [k for k, st in before.items()
+                        if str((st or {}).get("status", "")).lower().startswith("recording")]
+            seqs = [tracker.stopping(k, True) for k in rec_keys]
+            out["finishing"] = [display_name(k) for k in rec_keys]
+            if seqs:
+                out["finish_after_seq"] = min(seqs) - 1
+        return out
 
     def cmd_record_start(self, args):
         if not getattr(self.app, "auto_session", False):
@@ -977,6 +1003,8 @@ class Controller:
             out = self._monitor(keys)
             return dict(out, started=[display_name(k) for k in keys])
         for key in keys:
+            if self.app.tracker is not None:
+                self.app.tracker.started(key)
             rec.start_channel(key)
         return {"started": [display_name(k) for k in keys]}
 
@@ -990,8 +1018,11 @@ class Controller:
             status = str((before.get(key) or {}).get("status", "") or "")
             recording = status.lower().startswith("recording")
             rec.stop_channel(key)
-            results.append({"name": display_name(key), "result": "stopped_recording" if recording else "was_idle",
-                            "status_before": status})
+            row = {"name": display_name(key), "result": "stopped_recording" if recording else "was_idle",
+                   "status_before": status}
+            if self.app.tracker is not None:
+                row["finish_after_seq"] = self.app.tracker.stopping(key, recording) - 1
+            results.append(row)
         out = {"stopped": [display_name(k) for k in keys], "channels": results}
         if any(r["result"] == "was_idle" for r in results):
             out["note"] = ("A channel that was not recording has nothing to finish: no 'finished' event "
@@ -1232,6 +1263,8 @@ class Controller:
             raise ControlError("A cleanup pass is already running.", "busy")
         status = getattr(rec, "status_dict", None) if rec is not None else None
         cleaner = BackgroundCleaner(self.app.config, status_dict=status if status is not None else {})
+        if self.app.tracker is not None:
+            cleaner.on_file = self.app.tracker.on_cleanup
 
         def work():
             for _ in range(3):
@@ -1256,7 +1289,9 @@ class Controller:
         return {"events": tracker.events(int(args.get("after", 0) or 0)), "seq": tracker.seq}
 
     def cmd_wait(self, args):
-        """Block until a live / finished / error event (for one channel), or time out."""
+        """Block until a live / stopped / remux_started / finished / error event (for one channel),
+        or time out. A "finished" wait for a channel that was stopped starts at that stop, so a
+        finish that happened between the stop and the wait is returned at once."""
         from msr.agent_status import EVENT_KINDS
         tracker = self.app.tracker
         if tracker is None:
@@ -1270,6 +1305,10 @@ class Controller:
         key = self._channel_key(args["channel"]) if args.get("channel") else None
         timeout = max(0.0, min(float(args.get("timeout", 300)), 3600.0))
         after = args.get("after")
+        if after in (None, "") and key is not None and "finished" in kinds:
+            stop = tracker.default_after(key)  # stopped and not recording again: its finish counts
+            if stop is not None:
+                after = stop - 1
         ev = tracker.wait(set(kinds), key, timeout, None if after in (None, "") else int(after))
         if ev is None:
             raise ControlError(f"No {'/'.join(kinds)} event within {timeout:g}s.", "timeout")
@@ -1526,7 +1565,7 @@ class ControlServer:
         sock.settimeout(0.5)
         self._sock = sock
         _write_private(self.path, json.dumps({
-            "protocol": PROTOCOL, "host": self.host, "port": self.port, "token": self.token,
+            "protocol": PROTOCOL, "api_version": API_VERSION, "host": self.host, "port": self.port, "token": self.token,
             "pid": os.getpid(), "mode": self.mode, "version": __version__, "started_at": round(time.time(), 1),
         }, indent=2).encode("utf-8"))
         self._thread = threading.Thread(target=self._serve, daemon=True, name="control-server")
@@ -1597,6 +1636,10 @@ class ControlServer:
 
 
 # ------------------------------------------------------------------ the client
+class ApiMismatch(Exception):
+    """The running copy speaks another api_version than this client."""
+
+
 class NotRunning(Exception):
     pass
 
@@ -1616,6 +1659,12 @@ def call(data_dir, cmd, args=None, timeout=600.0, token=None):
     info = read_control_file(data_dir)
     if info is None:
         raise NotRunning("no msr_control.json")
+    theirs = info.get("api_version")
+    if theirs != API_VERSION:
+        raise ApiMismatch(
+            f"The running Multi-Stream Recorder speaks control API v{theirs or '0 (older build)'}, this "
+            f"msr_ctl.py speaks v{API_VERSION}. Use the msr_ctl.py next to the running copy, or "
+            "restart MSR from this folder.")
     try:
         sock = socket.create_connection(("127.0.0.1", int(info["port"])), timeout=5)
     except OSError as e:  # refused: the copy that wrote the file is gone
