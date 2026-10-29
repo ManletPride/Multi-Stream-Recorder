@@ -187,8 +187,10 @@ def prepare_update(zipball_url, work_dir=None):
 
 
 def spawn_updater(staging_dir, target_dir=None, python_exe=None, launcher=None,
-                  pid=None):
+                  pid=None, launcher_args=()):
     """Start the helper that copies *staging_dir* after this PID exits.
+
+    ``launcher_args`` are passed to the relaunched MSR (headless: ``--headless --data-dir ...``).
 
     Call this only after worker child processes have been killed, and
     immediately before ``os._exit``.
@@ -209,6 +211,7 @@ def spawn_updater(staging_dir, target_dir=None, python_exe=None, launcher=None,
         "--python", python_exe,
         "--launcher", launcher,
     ]
+    args += [f"--arg={a}" for a in launcher_args]
     kwargs = {"close_fds": True}
     if os.name == "nt":
         flags = 0

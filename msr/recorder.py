@@ -1232,6 +1232,12 @@ class StreamRecorder:
                 if ch in self.stopped_channels:
                     continue
                 self.status_dict[ch] = new_status
+                hook = self.__dict__.get("on_status")  # agent control: msr.agent_status.Tracker.seen
+                if hook is not None:
+                    try:
+                        hook(ch, new_status)
+                    except Exception as e:
+                        logging.debug(f"status hook: {e}")
             except Exception as e:
                 if not isinstance(e, queue.Empty):
                     self._log_tick_problem("status updates", e)

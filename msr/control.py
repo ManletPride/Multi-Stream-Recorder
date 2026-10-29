@@ -337,10 +337,12 @@ class AppAdapter:
 
     mode = "offline"
     presence = None
+    tracker = None   # msr.agent_status.Tracker while a Service runs
 
     def __init__(self, config):
         self.config = config
         self.started = time.time()
+        self.update_state = {}   # last update check: tag, url, zipball
 
     @property
     def data_dir(self):
@@ -383,7 +385,11 @@ class AppAdapter:
         return os.path.join(self.config.get("Paths", "streams_dir"), "stream_recorder.log")
 
     def update_info(self) -> dict:
-        return {}
+        tag = (self.update_state or {}).get("tag")
+        return {"available": bool(tag), "latest": tag} if self.update_state else {}
+
+    def watch_changed(self) -> None:
+        """The roster changed: tell a running recorder which (disabled) channels to watch."""
 
 
 class FileRoster:
@@ -447,18 +453,44 @@ class HeadlessApp(AppAdapter):
         self._lock = threading.Lock()
         self.after_children = None
         self.paused = False    # set by stop: stays stopped until start
+        from msr.presence import PresenceStore
+        self.presence = PresenceStore()   # live/offline of disabled channels (start_presence)
+        self._poller = None
 
     def records(self):
         return self.roster.records()
 
     def mutate(self, fn):
-        return self.roster.mutate(fn)
+        result = self.roster.mutate(fn)
+        self.watch_changed()
+        return result
 
     def reload_channels(self):
-        return self.roster.reload()
+        count = self.roster.reload()
+        self.watch_changed()
+        return count
 
     def enabled_keys(self):
         return [r["name"] for r in self.records() if r.get("enabled", True)]
+
+    def disabled_keys(self):
+        return [r["name"] for r in self.records() if not r.get("enabled", True)]
+
+    def watch_changed(self):
+        rec = self.recorder
+        if is_running_session(rec) and hasattr(rec, "set_watch_channels"):
+            try:
+                rec.set_watch_channels(self.disabled_keys())
+            except Exception as e:
+                logging.debug(f"control: watch channels: {e}")
+
+    def start_presence(self, poller_factory=None):
+        """The GUI's slow live/offline poll of DISABLED channels, headless too."""
+        from msr.presence import PresencePoller
+        factory = poller_factory or PresencePoller
+        self._poller = factory(self.presence, self.records)
+        self._poller.start()
+        return self._poller
 
     def start_session(self):
         with self._lock:
@@ -486,6 +518,8 @@ class HeadlessApp(AppAdapter):
         self.after_children = after_children
         self._want_session.clear()
         self._quit.set()
+        if self._poller is not None:
+            self._poller.stop()
         rec = self.recorder
         if is_running_session(rec):
             rec.should_stop.set()  # run() returns; the main thread does the full stop + cleanup
@@ -545,6 +579,23 @@ def channel_rows(app) -> list:
     for key, st in statuses.items():  # removed from the roster but still finishing
         if key not in seen:
             rows.append(_row(None, key, None, st, key in stopped, runtime.get(f"kick_push:{key}"), None))
+    from msr.agent_status import iso
+    from msr.util import channel_watch_url
+    tracker = app.tracker
+    for row in rows:
+        key = row.pop("_key")
+        try:
+            # no query string: a custom URL can carry a token (same rule as the shown name)
+            row["url"] = (channel_watch_url(key) or "").split("?", 1)[0].split("#", 1)[0]
+        except Exception:
+            row["url"] = ""
+        info = dict(tracker.channels.get(key) or {}) if tracker is not None else {}
+        row["last_error"] = info.get("last_error", "")
+        row["last_error_at"] = iso(info.get("last_error_at"))
+        row["errors"] = info.get("errors", 0)
+        row["restarts"] = info.get("restarts", 0)
+        row["last_live"] = iso(info.get("last_live"))
+        row["last_recorded"] = iso(info.get("last_recorded"))
     return rows
 
 
@@ -562,6 +613,7 @@ def _row(index, key, enabled_flag, st, stopped, push, presence):
             pass
     current = st.get("raw_file") or st.get("file") or ""
     return {
+        "_key": key,
         "index": index,
         "name": display_name(key),
         "platform": _platform(key),
@@ -591,7 +643,7 @@ def live_status(app) -> dict:
     cleaner = getattr(getattr(rec, "cleaner", None), "_thread", None)
     startup = getattr(rec, "_startup_cleanup_thread", None)
     rows = channel_rows(app)
-    return {
+    out = {
         "protocol": PROTOCOL,
         "app": {"name": "Multi-Stream Recorder", "version": __version__, "pid": os.getpid(),
                 "mode": app.mode, "started_at": round(app.started, 1)},
@@ -607,6 +659,12 @@ def live_status(app) -> dict:
         "channels": rows,
         "update": app.update_info(),
     }
+    tracker = app.tracker
+    if tracker is not None:
+        out["finished"] = tracker.recent_finished()
+        out["cleanup_queue"] = tracker.cached("queue")
+        out["health"] = tracker.cached("health")
+    return out
 
 
 class StatusWriter(threading.Thread):
@@ -617,12 +675,33 @@ class StatusWriter(threading.Thread):
         self.app = app
         self.path = os.path.join(app.data_dir, STATUS_FILE)
         self.interval = max(0.5, float(interval))
-        self._stop = threading.Event()
+        self._halt = threading.Event()
         self._poke = threading.Event()
         self._last_error = 0.0
 
     def poke(self):
         self._poke.set()
+
+    def feed(self):
+        """Keep the tracker current: status hook, a diff for direct status writes, presence, caches."""
+        tracker = self.app.tracker
+        if tracker is None:
+            return
+        rec = self.app.recorder
+        if rec is not None and rec.__dict__.get("on_status") is not tracker.seen:
+            try:
+                rec.on_status = tracker.seen
+            except Exception:
+                pass
+        for key, st in _status_copy(rec).items():
+            tracker.seen(key, st)
+        store = self.app.presence or getattr(rec, "presence", None)
+        if store is not None:
+            try:
+                tracker.seen_presence(store.snapshot())
+            except Exception:
+                pass
+        tracker.refresh(self.app)
 
     def write_once(self, running=True):
         data = live_status(self.app)
@@ -630,11 +709,12 @@ class StatusWriter(threading.Thread):
         _write_private(self.path, json.dumps(data, indent=2).encode("utf-8"))
 
     def run(self):
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             try:
                 rec = self.app.recorder
                 if self.app.mode == "headless" and is_running_session(rec):
                     rec.update_status_from_queue()
+                self.feed()
                 self.write_once()
             except Exception as e:
                 if time.time() - self._last_error > 300:
@@ -644,8 +724,10 @@ class StatusWriter(threading.Thread):
             self._poke.clear()
 
     def stop(self):
-        self._stop.set()
+        self._halt.set()
         self._poke.set()
+        if self.is_alive() and self is not threading.current_thread():
+            self.join(5)  # no write may land after the final one (or after the folder is gone)
         try:
             self.write_once(running=False)
         except Exception:
@@ -684,7 +766,7 @@ class Controller:
         self.app = app
         self._library_lock = threading.Lock()
         self._media_jobs = set()
-        self._update = {}
+        self._retry = None
         self.on_change = None  # called after anything that changes state (StatusWriter.poke)
 
     # -------------------------------------------------- plumbing
@@ -802,9 +884,12 @@ class Controller:
         return {"removed": [display_name(k) for k in keys], "recordings_kept": True}
 
     def _set_enabled(self, args, value):
-        refs = _refs(args)
-        changed = self.app.mutate(lambda recs: roster_set_enabled(
-            recs, [resolve_channel(recs, r) for r in refs], value))
+        if _truthy(args.get("all")):
+            changed = self.app.mutate(lambda recs: roster_set_enabled(recs, list(range(len(recs))), value))
+        else:
+            refs = _refs(args)
+            changed = self.app.mutate(lambda recs: roster_set_enabled(
+                recs, [resolve_channel(recs, r) for r in refs], value))
         out = {"changed": [display_name(k) for k in changed], "enabled": value}
         if value:
             out.update(self._monitor(changed))
@@ -1039,34 +1124,146 @@ class Controller:
 
         check_for_updates(__version__, callback=got)
         done.wait(float(args.get("timeout", 15)))
-        self._update = dict(found)
+        self.app.update_state = dict(found)
+        if self.app.tracker is not None:
+            self.app.tracker.forget("health")
         return {"current": __version__, "latest": found.get("tag"), "available": bool(found),
                 "release_url": found.get("url")}
 
     def cmd_update_install(self, args):
         self._need_live()
-        if self.app.mode != "gui":
-            raise ControlError("In-app update needs the GUI copy (it reopens the window). Headless: stop it, "
-                               "git pull or unpack the release, then start it again.", "unsupported")
-        if not self._update:
+        if not self.app.update_state:
             self.cmd_update_check({})
-        if not self._update:
+        if not self.app.update_state:
             raise ControlError("No newer version found.", "not_found")
-        self._confirm(args, f"This downloads v{self._update['tag']}, stops all recordings and restarts.")
+        self._confirm(args, f"This downloads v{self.app.update_state['tag']}, stops all recordings and restarts.")
         from msr.update import prepare_update, spawn_updater, zipball_url_for_tag, zipball_url_is_allowed
         from msr.util import application_dir
         target = application_dir()
         if not os.access(target, os.W_OK):
             raise ControlError("The program folder is not writable.", "write_failed")
-        url = self._update.get("zipball") or ""
+        url = self.app.update_state.get("zipball") or ""
         if not zipball_url_is_allowed(url):
-            url = zipball_url_for_tag(self._update["tag"])
+            url = zipball_url_for_tag(self.app.update_state["tag"])
         staging = prepare_update(url)
         rec = self.app.recorder
         if is_running_session(rec):
             rec.stop()
-        self.app.request_quit(after_children=lambda: spawn_updater(staging, target_dir=target))
-        return {"installing": self._update["tag"]}
+        relaunch = list(getattr(self.app, "relaunch_args", None) or [])
+        self.app.request_quit(after_children=lambda: spawn_updater(staging, target_dir=target,
+                                                                   launcher_args=relaunch))
+        return {"installing": self.app.update_state["tag"], "relaunch": [self.app.mode] + relaunch}
+
+    # -------------------------------------------------- health, recordings, events
+    def cmd_health(self, args):
+        from msr.agent_status import health
+        out = health(self.app.config, update=self.app.update_info())
+        if self.app.mode == "offline":
+            out["note"] = "MSR is not running; this is the state of the files and drives."
+        return out
+
+    def _channel_key(self, ref):
+        recs = self.app.records()
+        try:
+            return recs[resolve_channel(recs, ref)]["name"]
+        except ControlError:
+            rec = self.app.recorder
+            if ref in _status_copy(rec):
+                return ref
+            raise
+
+    def cmd_recordings(self, args):
+        """Finished recordings in Processed/ (newest first), optionally since a time / for one channel."""
+        from msr.agent_status import iso, parse_since
+        from msr.library import sidecar_seconds
+        from msr.util import channel_key_to_dirs
+        try:
+            since = parse_since(args.get("since"))
+        except ValueError as e:
+            raise ControlError(str(e), "bad_request") from None
+        stats = self._scan(files=True)
+        recs = [r for r in stats.files if r.kind == "recording" and r.category == "processed"
+                and r.mtime >= since]
+        if args.get("channel"):
+            platform, user = channel_key_to_dirs(self._channel_key(args["channel"]))
+            leaf = user.split("/")[-1].lower()
+            recs = [r for r in recs if r.platform.lower() == platform.lower() and r.channel.lower() == leaf]
+        recs.sort(key=lambda r: -r.mtime)
+        limit = max(1, min(int(args.get("limit", 50)), 5000))
+        out = [{"path": r.path, "channel": f"{r.platform}:{r.channel}", "size": r.size,
+                "duration_seconds": sidecar_seconds(r.path), "finished_at": iso(r.mtime), "remux_ok": True}
+               for r in recs[:limit]]
+        tracker = self.app.tracker
+        return {"recordings": out, "count": len(recs), "truncated": max(0, len(recs) - limit),
+                "this_run": tracker.recent_finished(50) if tracker is not None else []}
+
+    def cmd_recordings_pending(self, args):
+        """Raw .ts waiting for the cleanup remux, and what sits in PendingDeletion."""
+        from msr.agent_status import busy_channels, cleanup_queue, iso
+        raw = cleanup_queue(self.app.config, busy_channels(self.app.recorder))
+        stats = self._scan(files=True)
+        pending = sorted((r for r in stats.files if r.category == "pending"), key=lambda r: r.path)
+        limit = max(1, min(int(args.get("limit", 500)), 20000))
+        return {"raw_waiting": raw,
+                "pending_deletion": [{"path": r.path, "size": r.size, "moved_at": iso(r.mtime), "kind": r.kind}
+                                     for r in pending[:limit]],
+                "pending_deletion_count": len(pending),
+                "pending_deletion_bytes": sum(r.size for r in pending)}
+
+    def cmd_recordings_retry(self, args):
+        """Run the leftover-file cleanup (remux raw .ts in Recorded/) now. Files being recorded are skipped."""
+        from msr.recorder import BackgroundCleaner
+        rec = self.app.recorder
+        running = (self._retry is not None and self._retry.is_alive())
+        for t in (getattr(getattr(rec, "cleaner", None), "_thread", None),
+                  getattr(rec, "_startup_cleanup_thread", None)):
+            running = running or bool(t is not None and t.is_alive())
+        if running:
+            raise ControlError("A cleanup pass is already running.", "busy")
+        status = getattr(rec, "status_dict", None) if rec is not None else None
+        cleaner = BackgroundCleaner(self.app.config, status_dict=status if status is not None else {})
+
+        def work():
+            for _ in range(3):
+                if not cleaner._process_leftover_files():
+                    break
+                time.sleep(10)
+            logging.info("Cleanup (requested by control) finished")
+            if self.app.tracker is not None:
+                self.app.tracker.forget("queue")
+
+        if self.app.mode == "offline":
+            work()
+            return {"done": True}
+        self._retry = threading.Thread(target=work, daemon=True, name="control-cleanup-retry")
+        self._retry.start()
+        return {"started": True, "note": "Runs in the background; see recordings_pending / logs."}
+
+    def cmd_events(self, args):
+        tracker = self.app.tracker
+        if tracker is None:
+            raise ControlError("Multi-Stream Recorder is not running.", "not_running")
+        return {"events": tracker.events(int(args.get("after", 0) or 0)), "seq": tracker.seq}
+
+    def cmd_wait(self, args):
+        """Block until a live / finished / error event (for one channel), or time out."""
+        from msr.agent_status import EVENT_KINDS
+        tracker = self.app.tracker
+        if tracker is None:
+            raise ControlError("Multi-Stream Recorder is not running.", "not_running")
+        kinds = args.get("events") or args.get("event") or list(EVENT_KINDS)
+        if isinstance(kinds, str):
+            kinds = [k.strip() for k in kinds.split(",") if k.strip()]
+        bad = [k for k in kinds if k not in EVENT_KINDS]
+        if bad:
+            raise ControlError(f"event must be one of {', '.join(EVENT_KINDS)}.", "bad_request")
+        key = self._channel_key(args["channel"]) if args.get("channel") else None
+        timeout = max(0.0, min(float(args.get("timeout", 300)), 3600.0))
+        after = args.get("after")
+        ev = tracker.wait(set(kinds), key, timeout, None if after in (None, "") else int(after))
+        if ev is None:
+            raise ControlError(f"No {'/'.join(kinds)} event within {timeout:g}s.", "timeout")
+        return ev
 
     # -------------------------------------------------- quit
     def cmd_quit(self, args):
@@ -1193,12 +1390,44 @@ class Controller:
             b["time"] = max(b["time"], m.get("time") or 0)
         return {"batches": sorted(batches.values(), key=lambda b: -b["time"])}
 
+    def cmd_library_suggest(self, args):
+        """The Library window's clean-up suggestions (read only: nothing is touched)."""
+        from msr import library_actions as act
+        stats = self._scan(files=True)
+        older = int(args.get("older_days") or 90)
+        suggestions = act.build_suggestions(stats, older_days=older)
+        if args.get("free_gb"):
+            suggestions.insert(0, act.free_up_suggestion(stats, int(float(args["free_gb"]) * 1024 ** 3)))
+        limit = max(1, min(int(args.get("limit", 50)), 5000))
+        return {"suggestions": [
+            {"key": g.key, "title": g.title, "detail": g.detail, "count": g.count, "bytes": g.bytes,
+             "files": [r.path for r in g.recs[:limit]], "folders": list(g.dirs[:limit]),
+             "truncated": max(0, g.count - limit)} for g in suggestions],
+            "note": "Read only. To act, pass the files to library plan/run with --path."}
+
+    def cmd_library_log(self, args):
+        n = max(1, min(int(args.get("lines", 50)), 5000))
+        lines = deque(maxlen=n)
+        try:
+            with open(os.path.join(self.app.data_dir, "library_actions.log"), "r",
+                      encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    lines.append(line.rstrip("\n"))
+        except FileNotFoundError:
+            pass
+        return {"lines": list(lines)}
+
     def cmd_library_restore(self, args):
-        """Undo one move to PendingDeletion (batch id from library_batches / library_execute)."""
+        """Undo one move to PendingDeletion (batch id from library_batches / library_execute, or last)."""
         from msr import library_actions as act
         batch = str(args.get("batch") or "")
+        if not batch and _truthy(args.get("last")):
+            batches = self.cmd_library_batches({})["batches"]
+            batch = batches[0]["batch"] if batches else ""
+            if not batch:
+                raise ControlError("No move to PendingDeletion to undo.", "nothing")
         if not batch:
-            raise ControlError("Give the batch id (library_batches).", "bad_request")
+            raise ControlError("Give the batch id (library_batches) or last.", "bad_request")
         if not self._library_lock.acquire(blocking=False):
             raise ControlError("Another library action is running.", "busy")
         try:
@@ -1409,6 +1638,8 @@ class Service:
             interval = app.config.getfloat("Control", "status_interval_seconds", fallback=STATUS_INTERVAL)
         except Exception:
             pass
+        from msr.agent_status import Tracker
+        app.tracker = Tracker(app.config)
         self.status = StatusWriter(app, interval)
         self.controller.on_change = self.status.poke
         self.server = ControlServer(self.controller, app.data_dir, app.mode)

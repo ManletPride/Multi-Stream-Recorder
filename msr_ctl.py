@@ -16,6 +16,10 @@ Examples:
   python msr_ctl.py disable "#3" kickname
   python msr_ctl.py start | stop | quit
   python msr_ctl.py record-start kickname      (one channel, mid-session)
+  python msr_ctl.py health
+  python msr_ctl.py recordings --since 24h
+  python msr_ctl.py wait --event finished --channel kickname --timeout 3600
+  python msr_ctl.py library suggest --free 200
   python msr_ctl.py config set Timeouts.poll_interval_minutes 1
   python msr_ctl.py library plan pending --channel somename --older-than-days 30
   python msr_ctl.py library run pending --channel somename --older-than-days 30 --yes
@@ -35,8 +39,9 @@ from msr import control  # noqa: E402
 
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_NOT_RUNNING, EXIT_AUTH, EXIT_CONFIRM, EXIT_TIMEOUT = range(7)
 LIVE_ONLY = {"start", "stop", "quit", "record_start", "record_stop", "check", "clip", "screenshot",
-             "update_install"}
-CODE_EXIT = {"auth": EXIT_AUTH, "confirm_required": EXIT_CONFIRM, "not_running": EXIT_NOT_RUNNING}
+             "update_install", "wait", "events"}
+CODE_EXIT = {"auth": EXIT_AUTH, "confirm_required": EXIT_CONFIRM, "not_running": EXIT_NOT_RUNNING,
+             "timeout": EXIT_TIMEOUT}
 
 
 def data_dir_from(args):
@@ -82,17 +87,36 @@ def build_parser():
     for name, text in (("status", "live status (or the files, when nothing runs)"), ("channels", "the roster"),
                        ("ping", "is a copy running?"), ("help", "list the protocol commands"),
                        ("start", "Start Recording"), ("stop", "Stop Recording"), ("quit", "quit the app cleanly"),
-                       ("reload-channels", "re-read channels.json")):
+                       ("reload-channels", "re-read channels.json"),
+                       ("health", "tools, disk space, cookies, Fishtank login, problems")):
         sub.add_parser(name, help=text)
 
     p = sub.add_parser("add", help="add channel(s): name, platform:name or a URL")
     p.add_argument("names", nargs="+")
     p.add_argument("--platform")
     p.add_argument("--disabled", action="store_true", help="add unticked")
-    for name, text in (("remove", "remove from the roster (recordings stay)"), ("enable", "tick"),
-                       ("disable", "untick"), ("record-start", "start recording now (ticks it)"),
+    for name, text in (("remove", "remove from the roster (recordings stay)"),
+                       ("record-start", "start recording now (ticks it)"),
                        ("record-stop", "stop recording this channel")):
         sub.add_parser(name, help=text).add_argument("channels", nargs="+", help="#N, key or shown name")
+    for name, text in (("enable", "tick"), ("disable", "untick")):
+        p = sub.add_parser(name, help=text)
+        p.add_argument("channels", nargs="*", help="#N, key or shown name")
+        p.add_argument("--all", action="store_true", help="every channel in the roster")
+
+    p = sub.add_parser("recordings", help="finished recordings; 'pending' = waiting files; 'retry' = run cleanup")
+    p.add_argument("action", nargs="?", default="list", choices=["list", "pending", "retry"])
+    p.add_argument("--since", help="24h, 7d, 2026-10-29 or '2026-10-29 14:00'")
+    p.add_argument("--channel")
+    p.add_argument("--limit", type=int, default=50)
+    p = sub.add_parser("wait", help="block until a channel goes live, a recording finishes or an error")
+    p.add_argument("--event", action="append", choices=["live", "finished", "error"],
+                   help="repeatable; default: any")
+    p.add_argument("--channel")
+    p.add_argument("--timeout", "--for", dest="wait_timeout", type=float, default=300.0,
+                   help="seconds (max 3600); exit code 6 when nothing happened")
+    p.add_argument("--after", type=int, help="event seq to continue from (no event is missed between waits)")
+    sub.add_parser("events", help="recent events (live/finished/error)").add_argument("--after", type=int, default=0)
     p = sub.add_parser("move", help="reorder")
     p.add_argument("channels", nargs="+")
     p.add_argument("--to", required=True, choices=["top", "bottom", "up", "down"])
@@ -143,8 +167,15 @@ def build_parser():
     lsub.add_parser("pending")
     lsub.add_parser("batches")
     r = lsub.add_parser("restore", help="undo one move to PendingDeletion")
-    r.add_argument("batch")
+    r.add_argument("batch", nargs="?")
+    r.add_argument("--last", action="store_true", help="the newest batch")
     r.add_argument("--yes", action="store_true")
+    g = lsub.add_parser("suggest", help="clean-up suggestions (read only)")
+    g.add_argument("--free", type=float, dest="free_gb", help="GB to free: oldest recordings first")
+    g.add_argument("--older-days", type=int, default=90)
+    g.add_argument("--limit", type=int, default=50)
+    g = lsub.add_parser("log", help="library_actions.log")
+    g.add_argument("-n", "--lines", type=int, default=50)
 
     p = sub.add_parser("history", help="Restore previous channels.json / config.ini")
     hsub = p.add_subparsers(dest="action", required=True)
@@ -169,8 +200,28 @@ def to_request(a):
         return simple[c], {}
     if c == "add":
         return "channel_add", {"names": a.names, "platform": a.platform, "disabled": a.disabled}
-    if c in ("remove", "enable", "disable"):
+    if c in ("enable", "disable"):
+        if a.all == bool(a.channels):
+            raise SystemExit(f"{c}: name channels or use --all (not both)")
+        return "channel_" + c, ({"all": True} if a.all else {"channels": a.channels})
+    if c == "remove":
         return "channel_" + c, {"channels": a.channels}
+    if c == "health":
+        return "health", {}
+    if c == "recordings":
+        if a.action == "list":
+            return "recordings", {k: v for k, v in {"since": a.since, "channel": a.channel,
+                                                    "limit": a.limit}.items() if v is not None}
+        return "recordings_" + a.action, {}
+    if c == "wait":
+        args = {"events": a.event or ["live", "finished", "error"], "timeout": a.wait_timeout}
+        if a.channel:
+            args["channel"] = a.channel
+        if a.after is not None:
+            args["after"] = a.after
+        return "wait", args
+    if c == "events":
+        return "events", {"after": a.after}
     if c in ("record-start", "record-stop"):
         return c.replace("-", "_"), {"channels": a.channels}
     if c == "move":
@@ -206,7 +257,13 @@ def to_request(a):
         if a.action == "files":
             return "library_files", dict(_filter_args(a), limit=a.limit)
         if a.action == "restore":
-            return "library_restore", {"batch": a.batch, "confirm": a.yes}
+            if bool(a.batch) == a.last:
+                raise SystemExit("library restore: give a batch id or --last")
+            return "library_restore", {"batch": a.batch, "last": a.last, "confirm": a.yes}
+        if a.action == "suggest":
+            return "library_suggest", {"free_gb": a.free_gb, "older_days": a.older_days, "limit": a.limit}
+        if a.action == "log":
+            return "library_log", {"lines": a.lines}
         args = dict(_filter_args(a), action=a.method, no_sidecars=a.no_sidecars)
         if a.action == "plan":
             return "library_plan", args
@@ -280,8 +337,28 @@ def human(cmd, reply):
                 lines.append("Recording is stopped: 'start' (or add/enable a channel) starts it.")
         lines.extend(_channel_lines(res))
         return "\n".join(lines)
-    if cmd == "logs":
+    if cmd in ("logs", "library_log"):
         return "\n".join(res["lines"])
+    if cmd == "health":
+        lines = ["OK" if res.get("ok") else "Problems:"] + [f"  - {p}" for p in res.get("problems", [])]
+        for side, d in (res.get("disk") or {}).items():
+            if d:
+                lines.append(f"disk {side}: {d['free_gb']} GB free (min {d['min_gb']:g}) {d['path']}")
+        ck = res.get("cookies") or {}
+        lines.append("cookies: " + ("none" if not ck.get("found") else
+                                    f"{ck.get('cookies')} in {ck.get('file')}, earliest login expiry "
+                                    f"{ck.get('earliest_auth_expiry') or '-'}"
+                                    + (" (EXPIRED)" if ck.get("auth_expired") else "")))
+        lines.append(f"fishtank login set: {res.get('fishtank', {}).get('login_set')}")
+        for name, t in (res.get("tools") or {}).items():
+            lines.append(f"{name}: {(t.get('version') or 'yes') if t.get('available') else 'missing'}")
+        return "\n".join(lines)
+    if cmd == "recordings":
+        return "\n".join(f"{r['finished_at']}  {r['channel']:<28} {r['size'] / 1e6:>9.1f} MB  {r['path']}"
+                         for r in res["recordings"]) or "No finished recordings in that range."
+    if cmd == "wait":
+        return f"#{res['seq']} {res['at']} {res['event']} {res['channel']}" + (
+            f" {res['path']}" if res.get("path") else "") + (f" {res['error']}" if res.get("error") else "")
     return json.dumps(res, indent=2)
 
 
@@ -296,7 +373,10 @@ def main(argv=None):
     data_dir = data_dir_from(a)
     exit_code = None
     try:
-        reply = control.call(data_dir, cmd, args, timeout=a.timeout)
+        timeout = a.timeout
+        if cmd == "wait":
+            timeout = max(timeout, float(args.get("timeout", 300)) + 30)
+        reply = control.call(data_dir, cmd, args, timeout=timeout)
     except control.NotRunning:
         reply, exit_code = run_offline(data_dir, cmd, args)
     except (socket.timeout, TimeoutError):

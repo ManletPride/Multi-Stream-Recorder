@@ -80,7 +80,9 @@ Everything the GUI does must stay reachable without it. One `Controller` (no tki
 - **Status file.** `StatusWriter` rewrites `msr_status.json` every `[Control] status_interval_seconds` (3) and on `poke()` after each command. Channel names go through `status.display_name` (custom URLs -> host). Settings shown by `config_get` are masked when `history.is_sensitive`.
 - **Confirmation.** Library actions, history restore and update install need `confirm=true`; a permanent delete needs `confirm` equal to `Plan.confirm_word` (the GUI's typed word). A library action with no filter at all is refused. The `Guard` rules above apply unchanged (busy channels via `busy_from_status`).
 - **Offline edits.** `msr_ctl.py` falls back to `OfflineApp` only when no copy answers **and** `status.is_running(streams_dir)` is false; otherwise it exits 3 and changes nothing.
-- **Off switch.** `[Control] enabled = false` or `MSR_CONTROL=0`. Tests: `tests/test_control.py` (fake recorder, temp data folders).
+- **Tracker and health (`msr/agent_status.py`).** `Service` gives the app a `Tracker`. It is fed by the recorder's `on_status` hook (called in `update_status_from_queue`), by the status writer's diff of `status_dict` (for direct writes such as the supervisor's restart notice) and by the presence store; an unchanged status is ignored, so the feeds may overlap. It keeps per-channel `last_error`/`errors`/`restarts`/`last_live`/`last_recorded`, the last 50 finished recordings (newest `.mp4` in that channel's Processed folder at `Completed`, newest `.ts` in Recorded at `Remux failed`) and a numbered event log (`live`, `finished`, `error`) that `wait` blocks on (a `threading.Condition`; `wait` times out with code `timeout` -> exit 6). `health()` (tools, disk vs `min_disk_space_gb` on main and fallback, cookies, Fishtank login set, problems) is cached 30 s for the status file; the cleanup queue 15 s. Cookie checks report counts, domains and expiry only, never a value; the `url` row field drops query strings.
+- **Headless extras.** `HeadlessApp` has its own `PresenceStore`; `main_headless` starts the `PresencePoller` (disabled channels only) and passes the store and `watch_channels` to `StreamRecorder`; roster edits call `set_watch_channels`. `_schedule_update_check` fills `update_state` 10 s after start (`MSR_NO_UPDATE_CHECK=1` turns it off; `tests/__init__.py` sets it). `update_install` in headless passes `app.relaunch_args` (`--headless --data-dir <abs> --config <abs>`) to `spawn_updater(launcher_args=...)`; the helper relaunches with them (`apply_update.py --arg=...`). `main_headless` runs `after_children` after the final cleanup, so the old process (and its single-instance lock) is gone before the helper copies files and starts the new one.
+- **Off switch.** `[Control] enabled = false` or `MSR_CONTROL=0`. Tests: `tests/test_control.py`, `tests/test_agent_status.py` (fake recorder, temp data folders, fake release zip).
 
 | GUI feature | Command (`msr_ctl.py`) |
 | --- | --- |
@@ -93,13 +95,15 @@ Everything the GUI does must stay reachable without it. One `Controller` (no tki
 | Clip Now, Screenshot Now | `clip`, `screenshot` |
 | Polling and Clip Length selectors, config.ini | `config_get`, `config_set` (poll interval live; the GUI selectors follow), `config_reload` |
 | Logs tab, Open log file | `logs` (redacted) |
-| Update banner / install | `update_check`, `update_install` (GUI mode only: it restarts the window) |
+| Update banner / install | `update_check`, `update_install` (GUI restarts the window; headless restarts headless with the same data folder) |
+| (no GUI equivalent) | `health`, `recordings` (`--since`, `--channel`), `recordings_pending`, `recordings_retry`, `events`, `wait` |
 | Library tab numbers | `library_summary` |
-| Files / PendingDeletion / Clean up tabs, Delete... dialog | `library_files`, `library_plan` (dry run), `library_execute`, `library_pending`, `library_batches`, `library_restore` (Undo) |
+| Files / PendingDeletion / Clean up tabs, Delete... dialog | `library_files`, `library_plan` (dry run), `library_execute`, `library_pending`, `library_batches`, `library_restore` (Undo; `last=true` for the newest batch), `library_suggest` (read only), `library_log` |
+| Tick all / untick all | `channel_enable` / `channel_disable` with `all=true` (`--all`) |
 | Restore previous channel list / settings | `history_list`, `history_restore`, `channels_reload` |
 | Quit (window X, tray, Ctrl+Q) | `quit` |
 
-Left out on purpose (window-only): theme and theme dialog, window size/place and column widths, roster search/filter/view, live preview strip, tray show/hide, desktop notifications, About, Open folder / open in browser / Copy name, Library charts and Count hours (ffprobe over the whole library; `library_summary` gives the numbers without it), clean-up *suggestions*, and Open themes folder. They change only what the window shows, or open something on the desktop, which an agent can do itself from the paths in the replies.
+Left out on purpose (window-only): theme and theme dialog, window size/place and column widths, roster search/filter/view, live preview strip, tray show/hide, desktop notifications, About, Open folder / open in browser / Copy name, Library charts and Count hours (ffprobe over the whole library; `library_summary` gives the numbers without it), and Open themes folder. They change only what the window shows, or open something on the desktop, which an agent can do itself from the paths in the replies.
 
 ## Instant clips (`create_clip` in `msr/worker.py`)
 

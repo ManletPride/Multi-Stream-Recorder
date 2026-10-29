@@ -7,8 +7,11 @@ later test (recorder, cleanup and control threads), Tcl aborted the whole run wi
 while the tests run, and every test ends with a collection on the main thread instead.
 """
 import gc
+import os
 import threading
 import unittest
+
+os.environ.setdefault("MSR_NO_UPDATE_CHECK", "1")  # headless runs in tests never ask GitHub
 
 gc.disable()
 _run = unittest.TestCase.run

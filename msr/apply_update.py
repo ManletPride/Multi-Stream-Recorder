@@ -152,7 +152,7 @@ def _write_text(path, text):
         pass
 
 
-def relaunch(python_exe, launcher, cwd):
+def relaunch(python_exe, launcher, cwd, args=()):
     kwargs = {"cwd": cwd, "close_fds": True}
     if os.name == "nt":
         flags = 0
@@ -162,7 +162,7 @@ def relaunch(python_exe, launcher, cwd):
         kwargs["creationflags"] = flags
     else:
         kwargs["start_new_session"] = True
-    subprocess.Popen([python_exe, launcher], **kwargs)
+    subprocess.Popen([python_exe, launcher, *args], **kwargs)
 
 
 def main(argv=None):
@@ -172,6 +172,7 @@ def main(argv=None):
     parser.add_argument("--target", required=True)
     parser.add_argument("--python", required=True)
     parser.add_argument("--launcher", required=True)
+    parser.add_argument("--arg", action="append", default=[], help="passed to the relaunched MSR")
     args = parser.parse_args(argv)
     err_path = os.path.join(args.target, ERROR_FILE)
     try:
@@ -181,7 +182,7 @@ def main(argv=None):
             raise RuntimeError(f"MSR PID {args.pid} is still running")
         time.sleep(0.5)
         apply_staged_update(args.staging, args.target)
-        relaunch(args.python, args.launcher, args.target)
+        relaunch(args.python, args.launcher, args.target, args.arg)
     except Exception as exc:
         _write_text(err_path, str(exc))
         return 1

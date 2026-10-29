@@ -1,0 +1,358 @@
+"""Agent control, second round: health, finished recordings, events/wait, the cleanup queue,
+headless presence, library suggest/log/restore --last, enable --all, the url field and the
+headless in-app update (a fake release; GitHub is never contacted).
+
+Temp data folders only; the fake recorder never starts a process.
+"""
+
+import io
+import json
+import os
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import zipfile
+from unittest import mock
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+import msr.control as control  # noqa: E402
+from msr import agent_status  # noqa: E402
+from msr.config import Config  # noqa: E402
+from tests.test_control import (SECRET_EMAIL, SECRET_PASSWORD, Headless, in_dir,  # noqa: E402
+                                make_data, msr_ctl, roster)
+
+COOKIE_VALUE = "cookie-value-must-not-leak"
+_tools = mock.patch.multiple("msr.util", HAS_STREAMLINK=True, HAS_YTDLP=True)
+
+
+def setUpModule():
+    _tools.start()
+
+
+def tearDownModule():
+    _tools.stop()
+
+
+def touch(path, size=10, age_days=0.0, duration=None):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(b"x" * size)
+    if duration is not None:
+        with open(path.rsplit(".", 1)[0] + ".meta.json", "w", encoding="utf-8") as fh:
+            json.dump({"duration_seconds": duration}, fh)
+    if age_days:
+        t = time.time() - age_days * 86400
+        os.utime(path, (t, t))
+    return path
+
+
+class TrackerTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data, self.streams = make_data(self.tmp.name, ["knut"])
+        self.config = Config(os.path.join(self.data, "config.ini"))
+        self.t = agent_status.Tracker(self.config)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_live_finished_error_and_restart_history(self):
+        self.t.seen("knut", {"status": "Checking..."})
+        self.t.seen("knut", {"status": "Recording", "time": "0:01"})
+        self.t.seen("knut", {"status": "Recording", "time": "0:02"})  # same session: one live event
+        mp4 = touch(os.path.join(self.streams, "Processed", "kick", "knut", "knut_1.mp4"), 2048, duration=61.5)
+        self.t.seen("knut", {"status": "Completed", "detail": "2 KB"})
+        self.t.seen("knut", {"status": "Completed", "detail": "2 KB"})  # repeated: not a 2nd recording
+        self.t.seen("knut", {"status": "Error", "detail": "worker crashed, restart in 5s"})
+        raw = touch(os.path.join(self.streams, "Recorded", "kick", "knut", "knut_2.ts"), 99)
+        self.t.seen("knut", {"status": "Remux failed", "detail": "ffmpeg exit 1"})
+        kinds = [e["event"] for e in self.t.events()]
+        self.assertEqual(kinds, ["live", "finished", "error", "error", "finished"])
+        ok, bad = self.t.finished
+        self.assertEqual((ok["path"], ok["size"], ok["duration_seconds"], ok["remux_ok"]), (mp4, 2048, 61.5, True))
+        self.assertEqual((bad["path"], bad["remux_ok"], bad["error"]), (raw, False, "ffmpeg exit 1"))
+        info = self.t.channels["knut"]
+        self.assertEqual((info["errors"], info["restarts"]), (2, 1))
+        self.assertIn("ffmpeg exit 1", info["last_error"])
+        self.assertIsNotNone(info["last_recorded"])
+        self.assertEqual(self.t.recent_finished()[0]["path"], raw, "newest first")
+
+    def test_presence_goes_live_once(self):
+        self.t.seen_presence({"twitch:two": {"live": True}})
+        self.t.seen_presence({"twitch:two": {"live": True}})
+        self.t.seen_presence({"twitch:two": {"live": False}})
+        self.t.seen_presence({"twitch:two": {"live": True}})
+        self.assertEqual([e["event"] for e in self.t.events()], ["live", "live"])
+
+    def test_wait_returns_the_next_matching_event_or_none(self):
+        self.t.emit("error", "other")
+        threading.Timer(0.2, lambda: self.t.emit("live", "knut")).start()
+        ev = self.t.wait({"live"}, "knut", timeout=5)
+        self.assertEqual((ev["event"], ev["channel"]), ("live", "knut"))
+        started = time.monotonic()
+        self.assertIsNone(self.t.wait({"finished"}, None, timeout=0.3))
+        self.assertGreaterEqual(time.monotonic() - started, 0.25)
+        # "after" replays what happened between two waits
+        self.assertEqual(self.t.wait({"error"}, None, timeout=0, after=0)["channel"], "other")
+
+    def test_parse_since(self):
+        now = 1_000_000.0
+        self.assertEqual(agent_status.parse_since("24h", now), now - 86400)
+        self.assertEqual(agent_status.parse_since("7d", now), now - 7 * 86400)
+        self.assertEqual(agent_status.parse_since("", now), 0.0)
+        self.assertGreater(agent_status.parse_since("2026-10-29"), 0)
+        with self.assertRaises(ValueError):
+            agent_status.parse_since("yesterday")
+
+
+class OfflineAgentTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data, self.streams = make_data(self.tmp.name, ["knut", "twitch:two"])
+        self._cd = in_dir(self.data)
+        self._cd.__enter__()
+        self.config = Config(os.path.join(self.data, "config.ini"))
+        self.c = control.Controller(control.OfflineApp(self.config))
+
+    def tearDown(self):
+        self._cd.__exit__(None, None, None)
+        self.tmp.cleanup()
+
+    def ok(self, cmd, args=None):
+        reply = self.c.handle(cmd, args)
+        self.assertTrue(reply["ok"], reply)
+        return reply["result"]
+
+    def test_health_reports_disk_cookies_fishtank_without_secrets(self):
+        with open(os.path.join(self.streams, "cookies.txt"), "w", encoding="utf-8") as fh:
+            fh.write("# Netscape HTTP Cookie File\n")
+            fh.write(f".twitch.tv\tTRUE\t/\tTRUE\t1000\tauth-token\t{COOKIE_VALUE}\n")
+            fh.write(f".kick.com\tTRUE\t/\tTRUE\t{int(time.time()) + 86400 * 30}\tsession_token\t{COOKIE_VALUE}\n")
+        h = self.ok("health")
+        self.assertEqual(h["disk"]["main"]["path"], self.streams)
+        self.assertIsNotNone(h["disk"]["main"]["free_gb"])
+        self.assertEqual(h["disk"]["main"]["min_gb"], 5.0)
+        self.assertIn("fallback", h["disk"])
+        self.assertTrue(h["cookies"]["found"])
+        self.assertTrue(h["cookies"]["auth_expired"])
+        self.assertIn("twitch.tv", h["cookies"]["expired_domains"])
+        self.assertTrue(any("expired" in p for p in h["problems"]))
+        self.assertEqual(h["fishtank"], {"login_set": True, "email_set": True})
+        self.assertIn("ffmpeg", h["tools"])
+        text = json.dumps(h)
+        for secret in (COOKIE_VALUE, SECRET_PASSWORD, SECRET_EMAIL):
+            self.assertNotIn(secret, text)
+
+    def test_recordings_since_channel_and_pending(self):
+        new = touch(os.path.join(self.streams, "Processed", "kick", "knut", "new.mp4"), 3000, duration=12.0)
+        touch(os.path.join(self.streams, "Processed", "kick", "knut", "old.mp4"), 3000, age_days=10)
+        touch(os.path.join(self.streams, "Processed", "twitch", "two", "t.mp4"), 3000)
+        res = self.ok("recordings", {"since": "2d", "channel": "knut"})
+        self.assertEqual([r["path"] for r in res["recordings"]], [new])
+        self.assertEqual(res["recordings"][0]["duration_seconds"], 12.0)
+        self.assertEqual(self.ok("recordings")["count"], 3)
+        self.assertEqual(self.c.handle("recordings", {"since": "soon"})["code"], "bad_request")
+
+        raw = touch(os.path.join(self.streams, "Recorded", "kick", "knut", "left.ts"), 500)
+        gone = touch(os.path.join(self.streams, "PendingDeletion", "kick", "knut", "gone.mp4"), 700)
+        pend = self.ok("recordings_pending")
+        self.assertEqual([r["path"] for r in pend["raw_waiting"]], [raw])
+        self.assertFalse(pend["raw_waiting"][0]["recording_now"])
+        self.assertEqual([r["path"] for r in pend["pending_deletion"]], [gone])
+
+    def test_retry_runs_the_cleanup_pass(self):
+        from msr.recorder import BackgroundCleaner
+        with mock.patch.object(BackgroundCleaner, "_process_leftover_files", return_value=False) as run:
+            self.assertEqual(self.ok("recordings_retry"), {"done": True})
+        run.assert_called_once()
+
+    def test_enable_disable_all_and_url(self):
+        self.ok("channel_disable", {"all": True})
+        self.assertTrue(all(not r["enabled"] for r in roster(self.data)))
+        self.ok("channel_enable", {"all": True})
+        self.assertTrue(all(r["enabled"] for r in roster(self.data)))
+        rows = {r["name"]: r for r in self.ok("channels")["channels"]}
+        self.assertEqual(rows["knut"]["url"], "https://kick.com/knut")
+        self.assertEqual(rows["twitch:two"]["url"], "https://twitch.tv/two")
+
+    def test_library_suggest_log_and_restore_last(self):
+        old = touch(os.path.join(self.streams, "Processed", "kick", "knut", "a.mp4"), 4000, age_days=200)
+        touch(os.path.join(self.streams, "Processed", "kick", "knut", "b.mp4"), 4000)
+        sug = {s["key"]: s for s in self.ok("library_suggest", {"older_days": 100, "free_gb": 1e-6})["suggestions"]}
+        self.assertEqual(sug["older"]["files"], [old])
+        self.assertEqual(sug["free"]["files"], [old], "oldest first, just enough")
+        self.assertTrue(os.path.exists(old), "suggest is read only")
+
+        self.ok("library_execute", {"action": "pending", "paths": [old], "confirm": True})
+        self.assertFalse(os.path.exists(old))
+        self.assertTrue(self.ok("library_log", {"lines": 5})["lines"])
+        self.assertEqual(self.c.handle("library_restore", {"last": True})["code"], "confirm_required")
+        self.ok("library_restore", {"last": True, "confirm": True})
+        self.assertTrue(os.path.exists(old))
+
+    def test_cli_enable_all_and_wait_offline(self):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            self.assertEqual(msr_ctl.main(["--data-dir", self.data, "disable", "--all"]), 0)
+            self.assertEqual(msr_ctl.main(["--data-dir", self.data, "wait", "--timeout", "1"]),
+                             msr_ctl.EXIT_NOT_RUNNING)
+        self.assertFalse(any(r["enabled"] for r in roster(self.data)))
+
+
+class LiveAgentTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data, self.streams = make_data(self.tmp.name, [{"name": "knut", "enabled": True},
+                                                            {"name": "twitch:two", "enabled": False}])
+        with open(os.path.join(self.data, "config.ini"), "a", encoding="utf-8") as fh:
+            fh.write("[Control]\nstatus_interval_seconds = 0.5\n")
+        self.h = Headless(self.data, start_now=True)
+
+    def tearDown(self):
+        self.h.close()
+        self.tmp.cleanup()
+
+    def test_status_file_has_health_finished_queue_and_channel_history(self):
+        self.assertTrue(self.h.wait(lambda: self.h.recorders and self.h.recorders[0].is_running))
+        path = os.path.join(self.data, control.STATUS_FILE)
+
+        def status():
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    return json.load(fh)
+            except (OSError, ValueError):
+                return {}
+
+        self.assertTrue(self.h.wait(lambda: status().get("health") and any(
+            r.get("last_recorded") for r in status().get("channels", [])), timeout=10))
+        st = status()
+        self.assertIn("problems", st["health"])
+        self.assertEqual(st["finished"], [])
+        self.assertIsInstance(st["cleanup_queue"], list)
+        row = st["channels"][0]
+        for field in ("url", "last_error", "last_error_at", "errors", "restarts", "last_live", "last_recorded"):
+            self.assertIn(field, row)
+        self.assertNotIn(SECRET_PASSWORD, json.dumps(st))
+
+    def test_wait_over_the_socket_and_cli_timeout_exit_code(self):
+        reply = self.h.call("wait", {"events": ["live"], "channel": "knut", "timeout": 10, "after": 0})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["result"]["channel"], "knut")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            code = msr_ctl.main(["--data-dir", self.data, "wait", "--event", "finished", "--timeout", "0.5"])
+        self.assertEqual(code, 6, err.getvalue())
+        self.assertEqual(self.h.call("wait", {"events": ["nope"]})["code"], "bad_request")
+        self.assertTrue(self.h.call("events")["result"]["events"])
+
+    def test_presence_headless_marks_disabled_channels_live(self):
+        from msr.presence import PresencePoller
+        poller = self.h.app.start_presence(lambda store, get: PresencePoller(
+            store, get, pollers={"twitch": lambda name: {"live": True, "viewers": 3}}, first_delay=3600))
+        try:
+            self.assertEqual(poller.poll_round(), ["twitch:two"])
+        finally:
+            poller.stop()
+        rows = {r["name"]: r for r in self.h.call("status")["result"]["channels"]}
+        self.assertTrue(rows["twitch:two"]["live"])
+        self.assertFalse(rows["twitch:two"]["recording"])
+
+    def test_roster_change_updates_the_watch_list(self):
+        self.assertTrue(self.h.wait(lambda: self.h.recorders and self.h.recorders[0].is_running))
+        rec = self.h.recorders[0]
+        rec.set_watch_channels = mock.MagicMock()
+        self.h.call("channel_add", {"name": "twitch:three", "disabled": True})
+        rec.set_watch_channels.assert_called_with(["twitch:two", "twitch:three"])
+
+
+class HeadlessUpdateTests(unittest.TestCase):
+    """update install --yes headless: fake release zip, fake download, the helper is not started."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data, _ = make_data(self.tmp.name, ["knut"])
+        self.target = os.path.join(self.tmp.name, "program")
+        os.makedirs(os.path.join(self.target, "msr"))
+        self.zip = os.path.join(self.tmp.name, "fake-release.zip")
+        with zipfile.ZipFile(self.zip, "w") as z:
+            z.writestr("owner-repo-abc/Multi-Stream-Recorder.py", "print('v9')\n")
+            z.writestr("owner-repo-abc/msr/__init__.py", "__version__ = '9.9.9'\n")
+        self.h = Headless(self.data, start_now=True)
+
+    def tearDown(self):
+        self.h.close()
+        self.tmp.cleanup()
+
+    def test_install_quits_and_relaunches_headless_with_the_same_data_dir(self):
+        import shutil
+        app = self.h.app
+        app.relaunch_args = ["--headless", "--data-dir", self.data, "--config",
+                             os.path.join(self.data, "config.ini")]
+        app.update_state = {"tag": "9.9.9", "url": "https://github.com/x/y/releases/tag/v9.9.9",
+                            "zipball": "https://api.github.com/repos/x/y/zipball/v9.9.9"}
+        self.assertTrue(self.h.wait(lambda: self.h.recorders and self.h.recorders[0].is_running))
+        self.assertEqual(self.h.call("update_install")["code"], "confirm_required")
+        with mock.patch("msr.update.download_zipball", side_effect=lambda url, dest: shutil.copy(self.zip, dest)) \
+                as dl, mock.patch("msr.util.application_dir", return_value=self.target), \
+                mock.patch("msr.update.spawn_updater") as spawn:
+            reply = self.h.call("update_install", {"confirm": True})
+            self.assertTrue(reply["ok"], reply)
+            self.assertEqual(reply["result"]["relaunch"][:2], ["headless", "--headless"])
+            self.assertTrue(self.h.wait(lambda: not self.h.thread.is_alive()), "the app quits")
+            self.assertIsNotNone(app.after_children)
+            app.after_children()   # what main_headless does after the final cleanup
+        dl.assert_called_once()
+        staging = spawn.call_args.args[0]
+        self.assertTrue(os.path.isfile(os.path.join(staging, "Multi-Stream-Recorder.py")))
+        self.assertEqual(spawn.call_args.kwargs["target_dir"], self.target)
+        self.assertEqual(spawn.call_args.kwargs["launcher_args"], app.relaunch_args)
+        self.assertIn("stop", self.h.recorders[0].calls)
+
+    def test_spawn_and_helper_pass_the_arguments_through(self):
+        from msr import apply_update, update
+        staging = os.path.join(self.tmp.name, "work", "staging")
+        os.makedirs(staging)
+        with mock.patch("subprocess.Popen") as popen:
+            update.spawn_updater(staging, target_dir=self.target, python_exe="py", launcher="L",
+                                 pid=1, launcher_args=["--headless", "--data-dir", "D:\\x y"])
+        args = popen.call_args.args[0]
+        self.assertIn("--arg=--headless", args)
+        self.assertIn("--arg=D:\\x y", args)
+        with mock.patch.object(apply_update, "wait_for_pid", return_value=True), \
+                mock.patch.object(apply_update, "apply_staged_update"), \
+                mock.patch.object(apply_update.time, "sleep"), \
+                mock.patch.object(apply_update.subprocess, "Popen") as popen:
+            code = apply_update.main(["--pid", "1", "--staging", staging, "--target", self.target,
+                                      "--python", "py", "--launcher", "L"] + args[args.index("--arg=--headless"):])
+        self.assertEqual(code, 0)
+        self.assertEqual(popen.call_args.args[0], ["py", "L", "--headless", "--data-dir", "D:\\x y"])
+
+
+class SmallTextTests(unittest.TestCase):
+    def test_headless_warning_mentions_msr_ctl(self):
+        import inspect
+        from msr import util
+        self.assertNotIn("via the GUI", inspect.getsource(util.validate_startup))
+        self.assertIn("msr_ctl.py add", inspect.getsource(util.validate_startup))
+
+    def test_update_check_can_be_turned_off(self):
+        spec = __import__("importlib").util.spec_from_file_location(
+            "msr_main_for_test", os.path.join(ROOT, "Multi-Stream-Recorder.py"))
+        main = __import__("importlib").util.module_from_spec(spec)
+        spec.loader.exec_module(main)
+        app = mock.MagicMock()
+        with mock.patch.dict(os.environ, {"MSR_NO_UPDATE_CHECK": "1"}):
+            self.assertIsNone(main._schedule_update_check(app))
+        with mock.patch.dict(os.environ, {"MSR_NO_UPDATE_CHECK": ""}), \
+                mock.patch.object(main, "check_for_updates",
+                                  side_effect=lambda v, callback: callback("9.9.9", "u", "z")):
+            main._schedule_update_check(app, delay=0).join(5)
+        self.assertEqual(app.update_state["tag"], "9.9.9")
+
+
+if __name__ == "__main__":
+    unittest.main()

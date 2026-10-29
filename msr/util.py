@@ -143,7 +143,7 @@ def validate_startup(config):
     if not os.path.exists(channels_file):
         warnings.append(
             f"Channels file '{channels_file}' not found — will be created on first use.\n"
-            "  Add channels via the GUI or create the file manually."
+            "  Add channels in the GUI or with: python msr_ctl.py add NAME"
         )
     else:
         try:
@@ -152,7 +152,7 @@ def validate_startup(config):
             if not isinstance(data, list):
                 warnings.append(f"'{channels_file}' should contain a JSON array, e.g. [\"twitch:zackrawrr\", \"betty-fae\"]")
             elif len(data) == 0:
-                warnings.append("No channels configured.  Add channels via the GUI or edit channels.json.")
+                warnings.append("No channels configured.  Add channels in the GUI or with: python msr_ctl.py add NAME")
         except json.JSONDecodeError as e:
             warnings.append(f"'{channels_file}' contains invalid JSON: {e}")
 

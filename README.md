@@ -188,7 +188,7 @@ python Multi-Stream-Recorder.py [--data-dir DIR] [--config FILE] [--headless] [-
 Everything you do in the window can be done without it. A running copy (window or `--headless`) accepts commands on a local control channel, and `msr_ctl.py` is the command-line client. With nothing running, `msr_ctl.py` edits `channels.json` / `config.ini` directly (one atomic write, with the same history copy the app keeps).
 
 - **Local only.** The channel listens on `127.0.0.1` on a random port. Every request must carry the random token that the app writes to `msr_control.json` in the data folder when it starts (git-ignored, removed when it quits). There is no remote access.
-- **Live status file.** `msr_status.json` in the data folder is rewritten every 3 seconds and after each command. It lists every channel (enabled, status, live, recording, file name, size, duration, error, Kick push) plus the session, fallback-drive state and background cleanup. It holds no passwords, cookies or tokens, and custom URLs appear only as their host.
+- **Live status file.** `msr_status.json` in the data folder is rewritten every 3 seconds and after each command. It lists every channel (enabled, status, live, recording, file name, size, duration, error, Kick push, URL, last error and when, error and restart counts, last live and last recorded times) plus the session, fallback-drive state and background cleanup, the last 20 recordings finished in this run (path, channel, size, duration, finish time, remux OK), the raw files waiting for the cleanup remux, and a `health` block (tools and versions, free space on the main and fallback drives against `min_disk_space_gb`, cookie file validity and earliest login expiry, whether a Fishtank login is set, update available, and a list of problems). It holds no passwords, cookie values or tokens, and custom URLs appear without their query string. Headless also checks disabled channels' live/offline state (as the window does) and looks for an update 10 seconds after start.
 - **Turn it off** with `[Control] enabled = false` in `config.ini` or `MSR_CONTROL=0` in the environment.
 
 `msr_ctl.py` finds the data folder from `--data-dir`, then `MSR_HOME`, then `MSR_DATA`, then the current folder. Add `--json` for machine-readable output.
@@ -201,6 +201,7 @@ python msr_ctl.py add kick:knut youtube:@someone https://www.tiktok.com/@someone
 python msr_ctl.py add @someone --platform youtube --disabled
 python msr_ctl.py enable "#3" kickname        # #N = position in the list
 python msr_ctl.py disable kickname
+python msr_ctl.py disable --all               # or enable --all
 python msr_ctl.py remove twitch:someone       # recordings on disk are kept
 python msr_ctl.py move kickname --to top      # top | bottom | up | down
 python msr_ctl.py sort platform               # enabled | platform | name
@@ -216,13 +217,23 @@ python msr_ctl.py config get Timeouts
 python msr_ctl.py config set Timeouts.poll_interval_minutes 1
 echo secret | python msr_ctl.py config set Fishtank.password --stdin
 python msr_ctl.py logs -n 50 --filter error
+python msr_ctl.py health                      # tools, disk space, cookies, Fishtank login, problems
+python msr_ctl.py recordings --since 24h      # finished .mp4s, newest first (--channel, --limit)
+python msr_ctl.py recordings pending          # raw .ts waiting for a remux, files in PendingDeletion
+python msr_ctl.py recordings retry            # run the leftover cleanup/remux now
+python msr_ctl.py wait --event finished --channel kickname --timeout 3600
+python msr_ctl.py events                      # recent live / finished / error events
 python msr_ctl.py library summary
 python msr_ctl.py library files --channel kickname --older-than-days 30
 python msr_ctl.py library plan pending --channel kickname --older-than-days 30
 python msr_ctl.py library run pending --channel kickname --older-than-days 30 --yes
 python msr_ctl.py library batches             # then: library restore <batch> --yes
+python msr_ctl.py library restore --last --yes  # undo the newest move to PendingDeletion
+python msr_ctl.py library suggest --free 200 --older-days 90   # read only: what could go
+python msr_ctl.py library log -n 20           # library_actions.log
 python msr_ctl.py history list channels       # then: history restore channels 2 --yes
 python msr_ctl.py update check
+python msr_ctl.py update install --yes        # headless too: stops, updates, restarts headless with the same data folder
 python msr_ctl.py quit                        # stops recording AND closes MSR (window or headless)
 ```
 
@@ -233,6 +244,10 @@ python msr_ctl.py quit                        # stops recording AND closes MSR (
 - `stop` stops all recording, and it stays stopped (adds are only saved) until you run `start` or `record-start NAME`.
 - In the window, adding a channel while recording starts it at once, as the + Add button does. When the window is not recording, `start` is the Start Recording button.
 - With no copy running, commands only change the files (`saved: files (MSR not running)`). Start MSR to record.
+
+**Waiting for something.** `wait` blocks until a channel goes live (`live`), a recording is finished (`finished`, also when its remux failed: see `remux_ok`) or an error is reported (`error`), for one `--channel` or any, and exits `6` after `--timeout` seconds (default 300, at most 3600) with nothing. Each event has a `seq`; pass `--after SEQ` to the next `wait` so nothing that happened in between is missed.
+
+**Update headless.** `update install --yes` downloads the release, stops recording (remuxing what was recorded), quits, lets the update helper copy the new files, and starts the same copy again with `--headless --data-dir <the same data folder>`. The restarted copy runs in the background with no console window; use `msr_ctl.py status` and `logs`.
 
 Anything that removes or replaces something needs `--yes` (a permanent delete needs `--confirm <word>`, the word `library plan permanent ...` shows). Exit codes: `0` ok, `1` refused or failed, `2` usage, `3` not running, `4` wrong token, `5` needs confirmation, `6` timed out. The protocol (one JSON line per request) is in `AGENTS.md`.
 
@@ -253,6 +268,9 @@ $t = "$env:TEMP\msr-try"
 python msr_ctl.py --data-dir "$t\data" add kick:knut twitch:saruei
 python msr_ctl.py --data-dir "$t\data" status
 python msr_ctl.py --data-dir "$t\data" logs -n 20
+python msr_ctl.py --data-dir "$t\data" health
+python msr_ctl.py --data-dir "$t\data" wait --event live --timeout 120
+python msr_ctl.py --data-dir "$t\data" recordings
 python msr_ctl.py --data-dir "$t\data" quit
 ```
 

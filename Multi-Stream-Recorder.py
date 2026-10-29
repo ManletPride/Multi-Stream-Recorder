@@ -71,6 +71,7 @@ if __name__ != "__mp_main__":
         from msr.recorder import StreamRecorder, finish_headless_session, purge_old_pending_files
         from msr.util import (
             activate_existing_instance,
+            check_for_updates,
             coerce_channel_records,
             kill_orphan_recording_processes,
             redact_for_log,
@@ -120,7 +121,11 @@ def main_headless(config):
         logging.error(f"Error loading channels: {e}")
         sys.exit(1)
 
-    app = HeadlessApp(config, lambda keys: StreamRecorder(keys, config))
+    app = HeadlessApp(config, lambda keys: StreamRecorder(keys, config, presence=app.presence,
+                                                          watch_channels=app.disabled_keys()))
+    # An in-app update (msr_ctl.py update install --yes) relaunches with exactly this data folder.
+    app.relaunch_args = ["--headless", "--data-dir", os.getcwd(),
+                         "--config", os.path.abspath(config.config_file)]
     service = _start_control(app)
 
     if not channels and service is None:
@@ -154,6 +159,8 @@ def main_headless(config):
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    app.start_presence()  # live/offline of disabled channels, as in the GUI
+    _schedule_update_check(app)
     try:
         app.run(start_now=bool(channels))
     except KeyboardInterrupt:
@@ -162,6 +169,26 @@ def main_headless(config):
         service.stop()
     if app.last_recorder is not None:
         finish_headless_session(app.last_recorder)
+    if app.after_children is not None:  # update install: the helper waits for this process to exit
+        try:
+            app.after_children()
+        except Exception:
+            logging.exception("Failed to start update helper")
+
+
+def _schedule_update_check(app, delay=10.0):
+    """Fill the status file's update block headless (the GUI checks 10 s after start too).
+    MSR_NO_UPDATE_CHECK=1 turns it off (the tests set it)."""
+    if os.environ.get("MSR_NO_UPDATE_CHECK", "").strip() in ("1", "true", "yes"):
+        return None
+
+    def got(tag, url, zipball=None):
+        app.update_state = {"tag": tag, "url": url, "zipball": zipball}
+
+    timer = threading.Timer(delay, lambda: check_for_updates(__version__, callback=got))
+    timer.daemon = True
+    timer.start()
+    return timer
 
 
 def _safe_console():
