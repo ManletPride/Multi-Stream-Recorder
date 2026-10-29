@@ -6,6 +6,13 @@ A big interface release: a Library tab that shows (and can clean up) what your r
 
 ### Added
 
+**Updates dialog for tools and packages (new)**
+- Click the version at the bottom left or **Updates…** next to About: MSR, yt-dlp, streamlink, ffmpeg and the Python packages with installed version, latest version and status; Check now, Update selected, Update all.
+- pip updates run hidden in the background; running recordings are not touched and the next recording uses the new version. A failed update puts the previous version back; offline, pip and permission errors get a clear message.
+- ffmpeg is reported (version and source) but not updated, because MSR did not install it. MSR itself uses the existing in-app updater.
+- A daily background check (on by default, `[Updates] daily_check`) marks the button **Updates •**. It starts a minute after launch and never delays recording.
+- Agents: `msr_ctl.py deps list|check|update [names|--all]` and control command `deps` (api_version stays 1).
+
 **App icon (new)**
 - Multi-Stream Recorder has its own icon: a blue video camera with a red record dot (drawn as a vector in `assets/icon.svg`, with thicker shapes and a bigger dot at 16-48 px), as a Windows `.ico` (16-256 px) and PNGs (16-512 px).
 - The window, every dialog and the Clip Editor show it; the taskbar groups MSR as its own app (not "Python") with this icon; the tray icon is the camera with the record dot red while recording and grey when idle.

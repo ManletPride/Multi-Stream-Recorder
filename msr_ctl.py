@@ -87,6 +87,7 @@ CATALOG = {
     "config reload": ("write", ["config reload"]),
     "logs": ("read", ["logs -n 50 --filter error"]),
     "update check": ("read", ["update check"]),
+    "deps": ("write", ["deps list", "deps check", "deps update yt-dlp streamlink", "deps update --all"]),
     "update install": ("destructive", ["update install --yes"]),
     "library summary": ("read", ["library summary"]),
     "library files": ("read", ["library files --channel knut --older-than-days 30"]),
@@ -101,7 +102,8 @@ CATALOG = {
     "history restore": ("destructive", ["history restore channels 2 --yes"]),
     "call": ("depends on the command", ["call ping"]),
 }
-SAFETY_NOTES = {"recordings": "recordings retry runs the cleanup remux (write; originals kept until verified)"}
+SAFETY_NOTES = {"deps": "deps list / check only read; deps update pip-installs (old version restored on failure)",
+                "recordings": "recordings retry runs the cleanup remux (write; originals kept until verified)"}
 LIVE_ONLY = {"start", "stop", "quit", "record_start", "record_stop", "check", "clip", "screenshot",
              "update_install", "wait", "events"}
 CODE_EXIT = {"auth": EXIT_AUTH, "confirm_required": EXIT_CONFIRM, "not_running": EXIT_NOT_RUNNING,
@@ -217,6 +219,10 @@ def build_parser():
     p.add_argument("-n", "--lines", type=int, default=100)
     p.add_argument("--filter", default="")
 
+    p = sub.add_parser("deps", help="dependencies: list versions, check for updates, pip-update packages")
+    p.add_argument("action", choices=["list", "check", "update"])
+    p.add_argument("names", nargs="*", help="update: package names (yt-dlp, streamlink, pillow, ...)")
+    p.add_argument("--all", action="store_true", help="update: every package with an update")
     p = sub.add_parser("update", help="check / install an update")
     usub = p.add_subparsers(dest="action", required=True)
     usub.add_parser("check")
@@ -326,6 +332,14 @@ def to_request(a):
         return "config_set", {"section": section, "key": key, "value": value}
     if c == "logs":
         return "logs", {"lines": a.lines, "filter": a.filter}
+    if c == "deps":
+        if a.action != "update":
+            if a.names or a.all:
+                raise SystemExit(f"deps {a.action} takes no names")
+            return "deps", {"action": a.action}
+        if a.all == bool(a.names):
+            raise SystemExit("deps update: name packages or use --all (not both)")
+        return "deps", ({"action": "update", "all": True} if a.all else {"action": "update", "names": a.names})
     if c == "update":
         return ("update_check", {}) if a.action == "check" else ("update_install", {"confirm": a.yes})
     if c == "library":
@@ -485,6 +499,17 @@ def human(cmd, reply):
         return "\n".join(lines)
     if cmd in ("logs", "library_log"):
         return "\n".join(res["lines"])
+    if cmd == "deps":
+        if "items" in res:
+            lines = [f"{'item':<24} {'installed':<30} {'latest':<14} status"]
+            for r in res["items"]:
+                lines.append(f"{r['label']:<24} {str(r.get('installed') or '-'):<30} {str(r.get('latest') or '-'):<14} "
+                             f"{r['status']}" + (f"  ({r['note']})" if r.get("note") else ""))
+            return "\n".join(lines)
+        out = [f"{r['name']}: " + (f"{r.get('old') or '-'} -> {r.get('new')}" if r.get("ok") else
+               f"FAILED - {r.get('error')}" + (" (previous version restored)" if r.get("rolled_back") else ""))
+               for r in res["results"]]
+        return "\n".join(out + [res["note"]]) if out else "Nothing to update."
     if cmd == "health":
         lines = ["OK" if res.get("ok") else "Problems:"] + [f"  - {p}" for p in res.get("problems", [])]
         for side, d in (res.get("disk") or {}).items():

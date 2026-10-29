@@ -244,6 +244,9 @@ python msr_ctl.py library suggest --free 200 --older-days 90   # read only: what
 python msr_ctl.py library log -n 20           # library_actions.log
 python msr_ctl.py history list channels       # then: history restore channels 2 --yes
 python msr_ctl.py update check
+python msr_ctl.py deps list                   # installed versions of yt-dlp, streamlink, ffmpeg, packages (no network)
+python msr_ctl.py deps check                  # also the latest versions (PyPI / GitHub)
+python msr_ctl.py deps update yt-dlp          # or: deps update --all; pip, hidden; old version restored on failure
 python msr_ctl.py update install --yes        # headless too: stops, updates, restarts headless with the same data folder
 python msr_ctl.py quit                        # stops recording AND closes MSR (window or headless)
 ```
@@ -288,6 +291,16 @@ python msr_ctl.py --data-dir "$t\data" quit
 ```
 
 Recordings land in `$t\streams\Recorded` (raw `.ts` while recording) and `$t\streams\Processed` (`.mp4` after the stream ends or MSR stops). Instead of `--data-dir` on every line you can set `$env:MSR_HOME = "$t\data"` once in window 2.
+
+## Updating yt-dlp, streamlink and packages
+
+Click the version text at the bottom left, or **Updates…** next to About. The dialog lists MSR, yt-dlp, streamlink, ffmpeg and the Python packages from `requirements.txt` with the installed version, the latest version and a status. **Check now** asks PyPI and GitHub; **Update selected** / **Update all** run `pip install --upgrade` for this Python in the background (no console window).
+
+- Recordings that are running keep the version they started with; the next recording uses the new one. If Windows reports a file in use (a recording is running that tool), try again when nothing records.
+- If an update fails, the previous version is installed again. Offline and permission problems are explained in the dialog.
+- MSR itself is updated by its own updater (the same as the update banner); it stops recordings and restarts.
+- ffmpeg is shown with its version and where it comes from (PATH or `[Advanced] ffmpeg_path`). MSR never installed it, so MSR does not update it.
+- Once a day (about a minute after start, in the background) MSR checks for updates and shows **Updates •** when there are some. Turn it off in the dialog or with `[Updates] daily_check = false`.
 
 ## Troubleshooting
 

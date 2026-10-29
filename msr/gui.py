@@ -2257,6 +2257,24 @@ def main_gui(config):
 
     about_btn = ttk.Button(toggle_frame, text="About", command=_about_dialog, width=6)
     about_btn.pack(side=tk.RIGHT, padx=(0, 4))
+
+    # Updates: dependency versions and pip updates (msr/depsupdate.py, msr/deps_dialog.py)
+    from msr import depsupdate as _depsupdate
+
+    def _set_updates_badge(names):
+        updates_btn.configure(text="Updates \u2022" if names else "Updates\u2026")
+
+    def _open_updates(event=None):
+        from msr.deps_dialog import open_deps_dialog
+        open_deps_dialog(root, config=config, state_file=state_file,
+                         ffmpeg_path=config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg') or 'ffmpeg',
+                         on_msr_update=lambda: _begin_in_app_update(), on_badge=_set_updates_badge)
+
+    updates_btn = ttk.Button(toggle_frame, text="Updates\u2026", command=_open_updates, width=10)
+    updates_btn.pack(side=tk.RIGHT, padx=(0, 4))
+    _Tooltip(updates_btn, "Versions of MSR, yt-dlp, streamlink, ffmpeg and Python packages;\n"
+                          "check and install updates. A dot means updates are available.")
+    _set_updates_badge(_depsupdate.remembered_updates(win_state))
     more_btn = ttk.Menubutton(toggle_frame, text="\u22ef", width=3)
     more_menu = tk.Menu(more_btn, tearoff=0)
     more_menu.add_command(label="Library summary\u2026", command=lambda: notebook.select(library_panel.frame))
@@ -2279,6 +2297,8 @@ def main_gui(config):
     status_bar = tk.Label(root, text=f"  v{__version__}  —  {dep_str}  —  Ctrl+Q quit, F1 about, Enter add, Del remove",
                           font=("Segoe UI", 8), anchor="w", padx=6, pady=2)
     status_bar.grid(row=2, column=0, columnspan=2, sticky="ew")
+    status_bar.configure(cursor="hand2")
+    status_bar.bind("<Button-1>", _open_updates)
 
     # ── Version update check ──
     update_label = tk.Label(root, text="", font=("Segoe UI", 8, "bold"),
@@ -2400,6 +2420,38 @@ def main_gui(config):
     def _delayed_version_check():
         check_for_updates(__version__, callback=_on_update_found)
     root.after(10_000, _delayed_version_check)
+
+    # Daily dependency check: a background thread long after startup; never delays recording.
+    _deps_q = stdlib_queue.Queue()
+
+    def _daily_deps_check():
+        if not config.getboolean('Updates', 'daily_check', fallback=True):
+            return
+        if not _depsupdate.due(load_window_state(state_file)):
+            return
+
+        def work():
+            try:
+                rs = _depsupdate.rows(True, ffmpeg_path=config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg') or 'ffmpeg')
+                if any(r['status'] != 'unknown' for r in rs if r['name'] != 'ffmpeg'):
+                    _depsupdate.remember(state_file, rs)
+                _deps_q.put(_depsupdate.updates_available(rs))
+            except Exception:
+                logging.debug("Daily dependency check failed", exc_info=True)
+                _deps_q.put(None)
+
+        threading.Thread(target=work, daemon=True, name="deps-daily").start()
+        _drain_deps_q()
+
+    def _drain_deps_q():
+        try:
+            names = _deps_q.get_nowait()
+            if names is not None:
+                _set_updates_badge(names)
+        except stdlib_queue.Empty:
+            root.after(1000, _drain_deps_q)
+
+    root.after(60_000, _daily_deps_check)
 
     def _warn_if_last_update_failed():
         from msr.update import update_error_path

@@ -185,6 +185,9 @@ class Config:
             'email': '',
             'password': '',
         },
+        'Updates': {
+            'daily_check': 'true',
+        },
         'Clipping': {
             # Length of the instant clip cut from the live .ts, in seconds.
             # Remembered across restarts; changeable live from the GUI's

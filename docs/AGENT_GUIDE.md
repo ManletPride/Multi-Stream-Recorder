@@ -77,6 +77,13 @@ python msr_ctl.py logs -n 100 --filter error
 python msr_ctl.py --json status   # per channel: error, last_error, errors, restarts, last_live
 ```
 
+**Dependencies** (works with or without a running copy)
+```
+python msr_ctl.py --json deps check     # installed vs latest for msr, yt-dlp, streamlink, ffmpeg, packages
+python msr_ctl.py deps update yt-dlp    # pip, hidden; restores the old version on failure; next recording uses it
+```
+`deps update` changes the user's Python packages: ask first unless the user asked for it. ffmpeg and MSR itself are never updated by `deps` (MSR: `update install --yes`).
+
 ## 4. Output and exit codes
 
 Add `--json` (before the command) to get the full reply: `{"ok": true, "result": ...}` or `{"ok": false, "code": "...", "error": "..."}`. Errors go to stderr.

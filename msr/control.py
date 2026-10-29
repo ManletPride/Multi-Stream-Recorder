@@ -1158,6 +1158,42 @@ class Controller:
         logging.info(f"{kind.capitalize()} saved for {display_name(key)} (control): {out}")
         return {"file": out}
 
+    # -------------------------------------------------- dependencies
+    def cmd_deps(self, args):
+        """action=list (installed, no network) | check (also latest) | update (names=[...] or all=true).
+        pip updates apply to the next recording; running recordings keep their version."""
+        from msr import depsupdate
+        action = str(args.get("action") or "list")
+        ffmpeg = self.app.config.get("Advanced", "ffmpeg_path", fallback="ffmpeg") or "ffmpeg"
+        if action == "list":
+            return {"items": depsupdate.rows(False, ffmpeg_path=ffmpeg)}
+        if action == "check":
+            rows = depsupdate.rows(True, ffmpeg_path=ffmpeg)
+            try:
+                state = self.app.config.get("GUI", "window_state_file", fallback="window_state.json")
+                depsupdate.remember(os.path.join(self.app.data_dir, state), rows)
+            except Exception:
+                pass
+            return {"items": rows, "updates": depsupdate.updates_available(rows)}
+        if action != "update":
+            raise ControlError("action must be list, check or update.", "bad_request")
+        names = [str(n).lower() for n in (args.get("names") or [])]
+        if _truthy(args.get("all")) == bool(names):
+            raise ControlError("Give names or all=true (not both).", "bad_request")
+        if names:
+            bad = [n for n in names if n not in depsupdate.NAMES]
+            if bad:
+                raise ControlError(f"Unknown: {', '.join(bad)}. Known: {', '.join(depsupdate.NAMES)}.", "not_found")
+        else:
+            rows = depsupdate.rows(True, ffmpeg_path=ffmpeg)
+            names = [r["name"] for r in rows if r.get("updatable") and r["name"] != "msr"]
+        results = depsupdate.update_packages(names) if names else []
+        for r in results:
+            logging.info(f"Dependency update (control) {r['name']}: "
+                         + (f"{r.get('old')} -> {r.get('new')}" if r.get("ok") else str(r.get("error"))))
+        return {"results": results, "ok_all": all(r.get("ok") for r in results),
+                "note": "New versions are used by recordings started from now on."}
+
     # -------------------------------------------------- settings
     def cmd_config_get(self, args):
         cfg = self.app.config.config
