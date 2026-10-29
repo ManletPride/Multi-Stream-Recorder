@@ -159,18 +159,54 @@ def _truthy(value) -> bool:
 
 
 # ------------------------------------------------------------------ roster edits (pure, on the list)
+_SITE_URLS = (  # full channel URLs that map to a platform (other http(s) URLs are custom)
+    (r"^https?://(?:www\.)?kick\.com/([^/?#]+)/?$", "kick"),
+    (r"^https?://(?:www\.)?twitch\.tv/([^/?#]+)/?$", "twitch"),
+    (r"^https?://(?:www\.|m\.)?youtube\.com/(@[^/?#]+)(?:/live|/streams)?/?$", "youtube"),
+    (r"^https?://(?:www\.|m\.)?youtube\.com/channel/(UC[\w-]+)(?:/live|/streams)?/?$", "youtube"),
+    (r"^https?://(?:www\.|m\.)?youtube\.com/watch\?v=([\w-]{11})(?:&.*)?$", "youtube"),
+    (r"^https?://youtu\.be/([\w-]{11})(?:\?.*)?$", "youtube"),
+    (r"^https?://(?:www\.)?rumble\.com/c/([^/?#]+)/?$", "rumble"),
+    (r"^https?://(?:www\.)?tiktok\.com/@([^/?#]+)(?:/live)?/?$", "tiktok"),
+)
+
+
+def parse_add_text(text, platform=None):
+    """(platform, name) for what a user types to add a channel: kick:knut, twitch:x,
+    youtube:@x, a bare name (Kick, as in the GUI) or a full channel URL. A lone platform word
+    (kick) is refused with a hint: "add kick knut" used to add two channels."""
+    import re
+    from msr.channel_panel import PLATFORM_LABELS
+    text = str(text or "").strip()
+    if platform:
+        platform = str(platform).strip().lower()
+        if platform not in PLATFORM_LABELS:
+            raise ControlError(f"Unknown platform '{platform}'. Use one of: {', '.join(PLATFORM_LABELS)}.",
+                               "invalid")
+        if text.lower().startswith(platform + ":"):
+            text = text[len(platform) + 1:]
+        return platform, text
+    for pattern, plat in _SITE_URLS:
+        m = re.match(pattern, text, re.I)
+        if m:
+            return plat, m.group(1)
+    if text.lower().startswith(("http://", "https://")):
+        return "custom", text
+    if ":" in text:
+        head, rest = text.split(":", 1)
+        if head.lower() in PLATFORM_LABELS:
+            return head.lower(), rest.strip()
+    if text.lower() in PLATFORM_LABELS:
+        p = text.lower()
+        raise ControlError(f"'{text}' is a platform, not a channel. Write {p}:NAME "
+                           f"(for example add {p}:somename) or add NAME --platform {p}.", "invalid")
+    return "kick", text
+
+
 def roster_add(records, name, platform=None, enable=True) -> str:
-    from msr.channel_panel import build_channel_key, split_channel_key
+    from msr.channel_panel import build_channel_key
     from msr.util import validate_channel_name
-    name = str(name or "").strip()
-    if not platform:
-        if name.startswith(("http://", "https://")):
-            platform = "custom"
-        else:
-            platform, name = split_channel_key(name)
-            if platform == "custom" and name.startswith("custom:"):
-                name = name[len("custom:"):]
-    platform = str(platform).strip().lower()
+    platform, name = parse_add_text(name, platform)
     existing = [r["name"] for r in records]
     ok, problem = validate_channel_name(name, platform, existing)
     if not ok:
@@ -398,6 +434,7 @@ class HeadlessApp(AppAdapter):
     """The --headless loop: ``run()`` keeps the main thread; sessions start and stop on command."""
 
     mode = "headless"
+    auto_session = True   # adding/enabling a channel while idle starts recording (no start needed)
 
     def __init__(self, config, recorder_factory):
         super().__init__(config)
@@ -409,6 +446,7 @@ class HeadlessApp(AppAdapter):
         self._quit = threading.Event()
         self._lock = threading.Lock()
         self.after_children = None
+        self.paused = False    # set by stop: stays stopped until start
 
     def records(self):
         return self.roster.records()
@@ -428,12 +466,14 @@ class HeadlessApp(AppAdapter):
                 raise ControlError("Recording is already running.", "conflict")
             if not self.enabled_keys():
                 raise ControlError("Enable at least one channel first.", "conflict")
+            self.paused = False
             self._want_session.set()
         return "starting"
 
     def stop_session(self):
         with self._lock:
             self._want_session.clear()
+            self.paused = True
             rec = self.recorder
         if not is_running_session(rec):
             raise ControlError("Recording is not running.", "conflict")
@@ -704,16 +744,47 @@ class Controller:
     # -------------------------------------------------- roster
     def cmd_channel_add(self, args):
         names = args.get("names") or [args.get("name")]
-        added = []
-        for name in names:
-            key = self.app.mutate(lambda recs, n=name: roster_add(recs, n, args.get("platform"),
-                                                                  enable=not _truthy(args.get("disabled"))))
-            added.append(key)
-            rec = self.app.recorder
-            if is_running_session(rec) and not _truthy(args.get("disabled")):
+        enable = not _truthy(args.get("disabled"))
+        # all or nothing: one bad name adds none of them
+        added = self.app.mutate(lambda recs: [roster_add(recs, n, args.get("platform"), enable=enable)
+                                              for n in names])
+        out = {"added": [display_name(k) for k in added]}
+        out.update(self._monitor(added if enable else []))
+        return out
+
+    def _monitor(self, keys):
+        """Start watching/recording newly enabled channels at once, like the GUI's Add.
+
+        A running session gets them mid-session. Headless with no session (for example it
+        started with no channel enabled) starts one, unless the user stopped recording."""
+        if self.app.mode == "offline":
+            return {"monitoring": False, "saved": "files (MSR not running)"}
+        rec = self.app.recorder
+        if not keys:
+            return {"monitoring": is_running_session(rec)}
+        if is_running_session(rec):
+            for key in keys:
                 rec.start_channel(key)
-        return {"added": [display_name(k) for k in added],
-                "recording_started": is_running_session(self.app.recorder) and not _truthy(args.get("disabled"))}
+            return {"monitoring": True, "session": "running"}
+        if getattr(self.app, "auto_session", False) and not getattr(self.app, "paused", False):
+            try:
+                return {"monitoring": True, "session": self.app.start_session()}
+            except ControlError as e:
+                if e.code != "conflict":
+                    raise
+            # a session is just starting: it may have read the roster before this edit
+            end = time.time() + 15
+            while time.time() < end and not is_running_session(self.app.recorder):
+                time.sleep(0.05)
+            rec = self.app.recorder
+            if is_running_session(rec):
+                for key in keys:
+                    if key not in getattr(rec, "channels", []) and key not in getattr(rec, "processes", {}):
+                        rec.start_channel(key)
+            return {"monitoring": True, "session": "running" if is_running_session(rec) else "starting"}
+        return {"monitoring": False,
+                "hint": "Recording is stopped; run start to watch and record the enabled channels."}
+
 
     def cmd_channel_remove(self, args):
         refs = _refs(args)
@@ -734,8 +805,15 @@ class Controller:
         refs = _refs(args)
         changed = self.app.mutate(lambda recs: roster_set_enabled(
             recs, [resolve_channel(recs, r) for r in refs], value))
-        return {"changed": [display_name(k) for k in changed], "enabled": value,
-                "note": "Takes effect for recording at the next start, or use record_start/record_stop now."}
+        out = {"changed": [display_name(k) for k in changed], "enabled": value}
+        if value:
+            out.update(self._monitor(changed))
+        else:
+            out["note"] = ("A channel that is recording keeps recording until it ends; "
+                           "use record_stop to stop it now.")
+            if self.app.mode == "offline":
+                out["saved"] = "files (MSR not running)"
+        return out
 
     def cmd_channel_enable(self, args):
         return self._set_enabled(args, True)
@@ -798,7 +876,8 @@ class Controller:
         return {"session": self.app.stop_session()}
 
     def cmd_record_start(self, args):
-        rec = self._recorder()
+        if not getattr(self.app, "auto_session", False):
+            rec = self._recorder()
         refs = _refs(args)
         recs = self.app.records()
         keys = [recs[resolve_channel(recs, r)]["name"] for r in refs]
@@ -807,6 +886,11 @@ class Controller:
             return roster_set_enabled(work, [resolve_channel(work, k) for k in keys], True)
 
         self.app.mutate(enable)  # the GUI does the same: starting a channel ticks it
+        rec = self.app.recorder
+        if not is_running_session(rec):  # headless and idle or stopped: an explicit start resumes
+            self.app.paused = False
+            out = self._monitor(keys)
+            return dict(out, started=[display_name(k) for k in keys])
         for key in keys:
             rec.start_channel(key)
         return {"started": [display_name(k) for k in keys]}

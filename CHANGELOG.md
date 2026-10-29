@@ -28,7 +28,7 @@ A big interface release: a Library tab that shows (and can clean up) what your r
 - `--json` prints a read-only status snapshot (settings, roster, tools, problems) and exits; no secrets and no personal paths. `--json --library` adds the Library numbers.
 - `llms.txt` is a manual for AI assistants.
 - **Agent control**: everything the window does can now be done by a script, a bot or an AI agent, in the window or `--headless`. A running copy accepts commands on a local, token-protected channel (127.0.0.1 only, token in `msr_control.json`), writes a live `msr_status.json`, and `msr_ctl.py` is the command-line client (JSON output, exit codes). With nothing running, it edits `channels.json` and `config.ini` safely. Destructive commands need an explicit confirmation. You can turn it off with `[Control] enabled = false` or `MSR_CONTROL=0`.
-- `--headless` no longer exits when no channel is enabled or `channels.json` is missing; it waits for commands.
+- `--headless` no longer exits when no channel is enabled or `channels.json` is missing; it waits for commands, and the first channel added or enabled starts recording at once (no `start` needed).
 
 **Unplugged drives**
 - New setting `[Paths] fallback_dir` (blank = a folder in the system temp folder, `off` = pause): where recording continues if the recordings folder becomes unreachable while MSR runs. See Fixed below.

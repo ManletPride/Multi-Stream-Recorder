@@ -132,7 +132,8 @@ def main_headless(config):
     if channels:
         print("Starting recording session...")
     else:
-        print("No channel is enabled yet - waiting for commands (msr_ctl.py).")
+        print("No channel is enabled yet. Add one with msr_ctl.py add NAME and it is watched and")
+        print("recorded at once (no start command needed).")
     for ch in channels:
         print(f"   {ch}")
     if service is not None:

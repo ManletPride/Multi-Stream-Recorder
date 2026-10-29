@@ -196,8 +196,9 @@ Everything you do in the window can be done without it. A running copy (window o
 ```
 python msr_ctl.py status                      # what is recording, sizes, errors
 python msr_ctl.py channels
-python msr_ctl.py add twitch:someone          # name, platform:name or a full URL (custom)
-python msr_ctl.py add someone --platform youtube --disabled
+python msr_ctl.py add twitch:someone          # platform:name, a bare Kick name, or a channel URL
+python msr_ctl.py add kick:knut youtube:@someone https://www.tiktok.com/@someone
+python msr_ctl.py add @someone --platform youtube --disabled
 python msr_ctl.py enable "#3" kickname        # #N = position in the list
 python msr_ctl.py disable kickname
 python msr_ctl.py remove twitch:someone       # recordings on disk are kept
@@ -222,12 +223,40 @@ python msr_ctl.py library run pending --channel kickname --older-than-days 30 --
 python msr_ctl.py library batches             # then: library restore <batch> --yes
 python msr_ctl.py history list channels       # then: history restore channels 2 --yes
 python msr_ctl.py update check
-python msr_ctl.py quit
+python msr_ctl.py quit                        # stops recording AND closes MSR (window or headless)
 ```
+
+**Adding channels.** Write `platform:name` for every site: `kick:knut`, `twitch:asmongold`, `youtube:@name` (or a `UC...` channel id or a video id), `rumble:name`, `tiktok:name`, `fishtank:name`. A bare name is a Kick channel (as in the window), and a full URL works too (`https://kick.com/knut`, `https://www.twitch.tv/name`, `https://www.youtube.com/@name`; any other URL becomes a custom channel). `add kick knut` is refused: that is two words, and `kick` alone is not a channel. If one name in an `add` is wrong, none are added.
+
+**Do I need `start`?** Not after adding a channel. A running copy starts watching (and recording, when it is live) every channel you add or enable, at once:
+- `--headless` starts recording the enabled channels when it opens. If it opened with none, the first `add` or `enable` starts the session.
+- `stop` stops all recording, and it stays stopped (adds are only saved) until you run `start` or `record-start NAME`.
+- In the window, adding a channel while recording starts it at once, as the + Add button does. When the window is not recording, `start` is the Start Recording button.
+- With no copy running, commands only change the files (`saved: files (MSR not running)`). Start MSR to record.
 
 Anything that removes or replaces something needs `--yes` (a permanent delete needs `--confirm <word>`, the word `library plan permanent ...` shows). Exit codes: `0` ok, `1` refused or failed, `2` usage, `3` not running, `4` wrong token, `5` needs confirmation, `6` timed out. The protocol (one JSON line per request) is in `AGENTS.md`.
 
-To try it next to a copy you already use, give the second one its own data folder with a different `streams_dir`. One copy per recordings folder can run at a time.
+To try it next to a copy you already use, give the second one its own data folder with a different `streams_dir`. One copy per recordings folder can run at a time. In PowerShell:
+
+```powershell
+cd C:\path\to\Multi-Stream-Recorder
+$t = "$env:TEMP\msr-try"
+New-Item -ItemType Directory -Force "$t\data", "$t\streams" | Out-Null
+Set-Content "$t\data\config.ini" "[Paths]`nstreams_dir = $t\streams" -Encoding utf8
+Set-Content "$t\data\channels.json" "[]" -Encoding ascii
+
+# window 1: the recorder (Ctrl+C or 'quit' from window 2 stops it)
+python Multi-Stream-Recorder.py --headless --data-dir "$t\data"
+
+# window 2: the controls (set $t again in a new window)
+$t = "$env:TEMP\msr-try"
+python msr_ctl.py --data-dir "$t\data" add kick:knut twitch:saruei
+python msr_ctl.py --data-dir "$t\data" status
+python msr_ctl.py --data-dir "$t\data" logs -n 20
+python msr_ctl.py --data-dir "$t\data" quit
+```
+
+Recordings land in `$t\streams\Recorded` (raw `.ts` while recording) and `$t\streams\Processed` (`.mp4` after the stream ends or MSR stops). Instead of `--data-dir` on every line you can set `$env:MSR_HOME = "$t\data"` once in window 2.
 
 ## Troubleshooting
 

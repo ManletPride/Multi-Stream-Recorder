@@ -249,6 +249,16 @@ def run_offline(data_dir, cmd, args):
         os.chdir(cwd)
 
 
+def _channel_lines(res):
+    out = []
+    for row in res["channels"]:
+        mark = "x" if row["enabled"] else (" " if row["enabled"] is False else "-")
+        num = f"#{row['index']}" if row["index"] else "  "
+        extra = " ".join(str(x) for x in (row["size"], row["duration"], row["file"]) if x)
+        out.append(f"{num:>4} [{mark}] {row['name']:<32} {row['status']:<14} {extra}".rstrip())
+    return out
+
+
 def human(cmd, reply):
     if not reply.get("ok"):
         return f"error ({reply.get('code')}): {reply.get('error')}"
@@ -257,16 +267,18 @@ def human(cmd, reply):
         lines = []
         if cmd == "status":
             app, ses = res["app"], res["session"]
+            if app.get("mode") == "offline":
+                lines.append("MSR is not running - changes are saved to the files; start MSR to record.")
+                lines.extend(_channel_lines(res))
+                return "\n".join(lines)
             lines.append(f"MSR {app['version']} {app['mode']} pid {app['pid']} - "
                          + ("recording session running" if ses["running"] else "not recording")
                          + (f", {ses['recording']} recording" if ses["running"] else ""))
             if ses.get("storage", {}).get("notice"):
                 lines.append("storage: " + ses["storage"]["notice"])
-        for row in res["channels"]:
-            mark = "x" if row["enabled"] else (" " if row["enabled"] is False else "-")
-            num = f"#{row['index']}" if row["index"] else "  "
-            extra = " ".join(str(x) for x in (row["size"], row["duration"], row["file"]) if x)
-            lines.append(f"{num:>4} [{mark}] {row['name']:<32} {row['status']:<14} {extra}".rstrip())
+            if not ses["running"] and app.get("mode") == "headless":
+                lines.append("Recording is stopped: 'start' (or add/enable a channel) starts it.")
+        lines.extend(_channel_lines(res))
         return "\n".join(lines)
     if cmd == "logs":
         return "\n".join(res["lines"])

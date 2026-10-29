@@ -606,3 +606,112 @@ class GuiControlTests(unittest.TestCase):
             with open(os.path.join(data, control.STATUS_FILE), encoding="utf-8") as fh:
                 self.assertFalse(json.load(fh)["app"]["running"])
             self.assertNotIn(SECRET_PASSWORD, err)
+
+
+class AddSyntaxTests(unittest.TestCase):
+    def test_every_platform_prefix_and_url(self):
+        cases = {
+            "kick:knut": ("kick", "knut"), "knut": ("kick", "knut"), "KICK:Knut": ("kick", "Knut"),
+            "twitch:asmongold": ("twitch", "asmongold"), "youtube:@someone": ("youtube", "@someone"),
+            "rumble:someone": ("rumble", "someone"), "tiktok:someone": ("tiktok", "someone"),
+            "fishtank:cam-1": ("fishtank", "cam-1"),
+            "https://kick.com/knut": ("kick", "knut"), "https://www.twitch.tv/saruei/": ("twitch", "saruei"),
+            "https://www.youtube.com/@someone/live": ("youtube", "@someone"),
+            "https://youtube.com/channel/UCabcdefghijklmnopqrstuv": ("youtube", "UCabcdefghijklmnopqrstuv"),
+            "https://www.youtube.com/watch?v=FaE2vM9h0ok": ("youtube", "FaE2vM9h0ok"),
+            "https://rumble.com/c/someone": ("rumble", "someone"),
+            "https://www.tiktok.com/@someone/live": ("tiktok", "someone"),
+            "https://example.com/stream.m3u8": ("custom", "https://example.com/stream.m3u8"),
+        }
+        for text, want in cases.items():
+            self.assertEqual(control.parse_add_text(text), want, text)
+        self.assertEqual(control.parse_add_text("@x", "youtube"), ("youtube", "@x"))
+        self.assertEqual(control.parse_add_text("kick:knut", "kick"), ("kick", "knut"))
+
+    def test_a_lone_platform_word_is_an_error_with_a_hint(self):
+        for word in ("kick", "YouTube", "twitch"):
+            with self.assertRaises(control.ControlError) as cm:
+                control.parse_add_text(word)
+            self.assertIn(":NAME", str(cm.exception))
+
+    def test_keys_match_what_the_gui_stores(self):
+        recs = []
+        self.assertEqual(control.roster_add(recs, "kick:knut"), "knut")  # Kick keys are bare names
+        self.assertEqual(control.roster_add(recs, "https://www.twitch.tv/saruei"), "twitch:saruei")
+        self.assertEqual(control.roster_add(recs, "youtube:@someone"), "youtube:@someone")
+
+    def test_cli_add_kick_knut_adds_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data, _ = make_data(tmp, [])
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                code = msr_ctl.main(["--data-dir", data, "add", "kick", "knut"])
+            self.assertEqual(code, 1)
+            self.assertIn("kick:NAME", err.getvalue())
+            self.assertEqual(roster(data), [], "all or nothing: 'knut' was not added either")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(msr_ctl.main(["--data-dir", data, "add", "kick:knut"]), 0)
+            self.assertEqual(roster(data), [{"name": "knut", "enabled": True}])
+            self.assertIn("MSR not running", out.getvalue())
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                msr_ctl.main(["--data-dir", data, "status"])
+            self.assertIn("MSR is not running - changes are saved to the files; start MSR to record.",
+                          out.getvalue())
+
+
+class HeadlessAutoStartTests(unittest.TestCase):
+    """Headless started with no channels: adding one must start watching and recording it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data, _ = make_data(self.tmp.name, [])
+        self.h = Headless(self.data, start_now=True)
+
+    def tearDown(self):
+        self.h.close()
+        self.tmp.cleanup()
+
+    def recording(self, name):
+        rows = self.h.call("status")["result"]["channels"]
+        return any(r["name"] == name and r["recording"] for r in rows)
+
+    def test_add_while_idle_records_without_further_commands(self):
+        self.assertEqual(self.h.recorders, [], "nothing to record yet")
+        reply = self.h.call("channel_add", {"name": "twitch:saruei"})
+        self.assertTrue(reply["result"]["monitoring"], reply)
+        self.assertTrue(self.h.wait(lambda: self.h.recorders and self.h.recorders[0].is_running))
+        self.assertEqual(self.h.recorders[0].channels, ["twitch:saruei"])
+        self.assertTrue(self.h.wait(lambda: self.recording("twitch:saruei")), "the live channel records")
+        # a second add joins the running session
+        self.h.call("channel_add", {"name": "kick:knut"})
+        self.assertIn(("start_channel", "knut"), self.h.recorders[0].calls)
+        self.assertEqual(len(self.h.recorders), 1)
+
+    def test_enable_while_idle_starts_and_while_running_joins(self):
+        self.h.call("channel_add", {"name": "twitch:a", "disabled": True})
+        self.assertEqual(self.h.recorders, [])
+        self.assertTrue(self.h.call("channel_enable", {"channels": ["twitch:a"]})["result"]["monitoring"])
+        self.assertTrue(self.h.wait(lambda: self.h.recorders and self.h.recorders[0].is_running))
+        self.h.call("channel_add", {"name": "twitch:b", "disabled": True})
+        self.h.call("channel_enable", {"channels": ["twitch:b"]})
+        self.assertIn(("start_channel", "twitch:b"), self.h.recorders[0].calls)
+
+    def test_stop_means_stopped_until_start(self):
+        self.h.call("channel_add", {"name": "twitch:a"})
+        self.assertTrue(self.h.wait(lambda: self.h.recorders and self.h.recorders[0].is_running))
+        self.h.call("stop")
+        self.assertTrue(self.h.wait(lambda: self.h.app.recorder is None))
+        reply = self.h.call("channel_add", {"name": "twitch:b"})["result"]
+        self.assertFalse(reply["monitoring"])
+        self.assertIn("start", reply["hint"])
+        self.assertEqual(len(self.h.recorders), 1)
+        self.h.call("start")
+        self.assertTrue(self.h.wait(lambda: len(self.h.recorders) == 2 and self.h.recorders[1].is_running))
+        self.assertEqual(self.h.recorders[1].channels, ["twitch:a", "twitch:b"])
+
+    def test_record_start_while_idle_starts_a_session(self):
+        self.h.call("channel_add", {"name": "twitch:a", "disabled": True})
+        self.assertTrue(self.h.call("record_start", {"channels": ["twitch:a"]})["ok"])
+        self.assertTrue(self.h.wait(lambda: self.h.recorders and self.h.recorders[0].is_running))
