@@ -75,3 +75,9 @@ library_cache.json.tmp
 library_actions.log
 library_moves.json
 library_moves.json.tmp
+
+# Agent control: port + token of the running copy, and its live status (msr/control.py)
+msr_control.json
+msr_status.json
+msr_control.json.*.tmp
+msr_status.json.*.tmp

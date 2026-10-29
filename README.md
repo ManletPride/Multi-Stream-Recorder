@@ -181,7 +181,53 @@ Output layout: `streams_dir\Recorded\<platform>\<channel>\` (raw `.ts` while rec
 python Multi-Stream-Recorder.py [--data-dir DIR] [--config FILE] [--headless] [--json [--library]] [--version]
 ```
 
-`--headless` records the enabled channels in `channels.json` with no window; Ctrl+C stops cleanly.
+`--headless` records the enabled channels in `channels.json` with no window; Ctrl+C stops cleanly. It keeps running with no channel enabled (waiting for commands) as long as agent control is on.
+
+## Agent control (scripts, bots, headless)
+
+Everything you do in the window can be done without it. A running copy (window or `--headless`) accepts commands on a local control channel, and `msr_ctl.py` is the command-line client. With nothing running, `msr_ctl.py` edits `channels.json` / `config.ini` directly (one atomic write, with the same history copy the app keeps).
+
+- **Local only.** The channel listens on `127.0.0.1` on a random port. Every request must carry the random token that the app writes to `msr_control.json` in the data folder when it starts (git-ignored, removed when it quits). There is no remote access.
+- **Live status file.** `msr_status.json` in the data folder is rewritten every 3 seconds and after each command. It lists every channel (enabled, status, live, recording, file name, size, duration, error, Kick push) plus the session, fallback-drive state and background cleanup. It holds no passwords, cookies or tokens, and custom URLs appear only as their host.
+- **Turn it off** with `[Control] enabled = false` in `config.ini` or `MSR_CONTROL=0` in the environment.
+
+`msr_ctl.py` finds the data folder from `--data-dir`, then `MSR_HOME`, then `MSR_DATA`, then the current folder. Add `--json` for machine-readable output.
+
+```
+python msr_ctl.py status                      # what is recording, sizes, errors
+python msr_ctl.py channels
+python msr_ctl.py add twitch:someone          # name, platform:name or a full URL (custom)
+python msr_ctl.py add someone --platform youtube --disabled
+python msr_ctl.py enable "#3" kickname        # #N = position in the list
+python msr_ctl.py disable kickname
+python msr_ctl.py remove twitch:someone       # recordings on disk are kept
+python msr_ctl.py move kickname --to top      # top | bottom | up | down
+python msr_ctl.py sort platform               # enabled | platform | name
+python msr_ctl.py edit twitch:old --name new
+python msr_ctl.py start                       # Start Recording
+python msr_ctl.py stop                        # Stop Recording
+python msr_ctl.py record-start kickname       # one channel, mid-session
+python msr_ctl.py record-stop kickname
+python msr_ctl.py check [kickname]            # Check Now
+python msr_ctl.py clip kickname --seconds 30  # Clip Now / Screenshot Now
+python msr_ctl.py screenshot kickname
+python msr_ctl.py config get Timeouts
+python msr_ctl.py config set Timeouts.poll_interval_minutes 1
+echo secret | python msr_ctl.py config set Fishtank.password --stdin
+python msr_ctl.py logs -n 50 --filter error
+python msr_ctl.py library summary
+python msr_ctl.py library files --channel kickname --older-than-days 30
+python msr_ctl.py library plan pending --channel kickname --older-than-days 30
+python msr_ctl.py library run pending --channel kickname --older-than-days 30 --yes
+python msr_ctl.py library batches             # then: library restore <batch> --yes
+python msr_ctl.py history list channels       # then: history restore channels 2 --yes
+python msr_ctl.py update check
+python msr_ctl.py quit
+```
+
+Anything that removes or replaces something needs `--yes` (a permanent delete needs `--confirm <word>`, the word `library plan permanent ...` shows). Exit codes: `0` ok, `1` refused or failed, `2` usage, `3` not running, `4` wrong token, `5` needs confirmation, `6` timed out. The protocol (one JSON line per request) is in `AGENTS.md`.
+
+To try it next to a copy you already use, give the second one its own data folder with a different `streams_dir`. One copy per recordings folder can run at a time.
 
 ## Troubleshooting
 

@@ -19,6 +19,8 @@ from msr.deps import (
     Image, ImageDraw, plyer_notification, pystray,
 )
 from msr import channel_panel as cp
+from msr import control as _control
+from msr.channel_panel import move_list_items  # noqa: F401  (pure; also used by msr/control.py)
 from msr import deps as _deps  # read _deps.HAS_FFMPEG at use time: configure_ffmpeg updates it
 from msr.config import default_streams_dir, fishtank_password
 from msr import dialogs as _dialogs
@@ -141,40 +143,6 @@ def send_notification(title, message, timeout=5, category="info", channel="", de
         )
     except Exception:
         pass  # notifications are best-effort
-
-
-def move_list_items(seq, indices, to="top"):
-    """Move entries at *indices* to the top or bottom of *seq* (in place).
-
-    The moved block keeps its relative order, as does the rest of the list.
-    Invalid indices are ignored. Returns the new indices of the moved
-    entries (sorted, in list order).
-    """
-    if not seq:
-        return []
-    want = []
-    seen = set()
-    for raw in indices:
-        try:
-            i = int(raw)
-        except (TypeError, ValueError):
-            continue
-        if i < 0 or i >= len(seq) or i in seen:
-            continue
-        seen.add(i)
-        want.append(i)
-    want.sort()
-    if not want:
-        return []
-    moving = [seq[i] for i in want]
-    rest = [item for i, item in enumerate(seq) if i not in seen]
-    if to == "bottom":
-        seq[:] = rest + moving
-        start = len(rest)
-    else:
-        seq[:] = moving + rest
-        start = 0
-    return list(range(start, start + len(moving)))
 
 
 def channel_matches_filter(name, enabled=True, query="", enabled_only=False):
@@ -2972,21 +2940,29 @@ def main_gui(config):
         root.after(500, refresh_logs)
 
     # ── Recording controls ──
-    def start_recording():
+    def start_recording(interactive=True):
+        """Start Recording. interactive=False (agent control): no dialogs; a refusal raises
+        ControlError and the dependency / channel-count warnings only go to the log."""
         nonlocal recorder
         if _stop_in_progress[0]:
             logging.info("Start ignored — stop is still finishing")
+            if not interactive:
+                raise _control.ControlError("The last stop is still finishing; try again shortly.", "busy")
             return
         enabled = get_enabled_channels()
         if not enabled:
+            if not interactive:
+                raise _control.ControlError("Enable at least one channel first.", "conflict")
             _dialogs.show_warning(root, "No channels", "Enable at least one channel (click the checkbox).")
             return
         if recorder and recorder.is_running:
+            if not interactive:
+                raise _control.ControlError("Recording is already running.", "conflict")
             _dialogs.show_info(root, "Already running", "Recording is active.")
             return
 
         # Warn about large number of concurrent recordings
-        if len(enabled) >= 15:
+        if len(enabled) >= 15 and interactive:
             if not _dialogs.ask_yes_no(root, "High Channel Count",
                     f"You're about to monitor {len(enabled)} channels simultaneously.\n\n"
                     "This may strain your CPU, RAM, and disk I/O. Each channel spawns "
@@ -3009,7 +2985,10 @@ def main_gui(config):
         if not _deps.HAS_FFMPEG:
             issues.append("ffmpeg is not installed — recordings cannot be remuxed to MP4.")
 
-        if issues:
+        if issues and not interactive:
+            for issue in issues:
+                logging.warning(f"Start (control): {issue}")
+        elif issues:
             msg = "The following issues may prevent recording:\n\n" + "\n\n".join(issues) + "\n\nStart anyway?"
             if not _dialogs.ask_yes_no(root, "Dependency Warning", msg):
                 return
@@ -3035,6 +3014,7 @@ def main_gui(config):
 
         if notifications_enabled:
             send_notification("Recording Started", f"Monitoring {len(enabled)} channel(s)")
+        return "starting"
 
     def stop_recording():
         nonlocal recorder
@@ -3174,6 +3154,12 @@ def main_gui(config):
         *after_children* runs after that kill (used to spawn the update helper
         so it is not torn down with the workers).
         """
+        # 0. No more commands; msr_status.json says "not running"
+        try:
+            if _control_service[0] is not None:
+                _control_service[0].stop()
+        except Exception:
+            pass
         # 1. Try graceful recorder shutdown
         try:
             if recorder and recorder.is_running:
@@ -3233,6 +3219,99 @@ def main_gui(config):
 
     root.protocol("WM_DELETE_WINDOW", on_close)
 
+    # ── Agent / headless control (msr/control.py, msr_ctl.py) ──
+    # Commands arrive on a server thread. Roster edits run here on the Tk thread (_on_tk) so the
+    # list, the tree and channels.json stay one thing; recorder calls run on the server thread,
+    # as the GUI's own background stop/start helpers do. refresh_status shows the result.
+    _tk_thread = threading.current_thread()
+    _control_service = [None]
+
+    def _on_tk(fn, timeout=30):
+        if threading.current_thread() is _tk_thread:
+            return fn()
+        box = {}
+        done = threading.Event()
+
+        def run():
+            try:
+                box["value"] = fn()
+            except BaseException as e:  # handed to the caller's thread
+                box["error"] = e
+            finally:
+                done.set()
+
+        root.after(0, run)
+        if not done.wait(timeout):
+            raise _control.ControlError("The window did not respond in time; try again.", "busy")
+        if "error" in box:
+            raise box["error"]
+        return box.get("value")
+
+    def _reflect_setting(section, key):
+        """Show a setting changed by control in the selectors that display it."""
+        if (section, key) == ("Timeouts", "poll_interval_minutes"):
+            minutes = config.getfloat('Timeouts', 'poll_interval_minutes', fallback=3.0)
+            shown = next((n for n, v in POLL_PRESETS.items() if abs(v - minutes) < 0.1),
+                         _custom_poll_display(minutes))
+            poll_var.set(shown)
+            _last_poll_display[0] = shown
+        elif (section, key) == ("Clipping", "clip_length_seconds"):
+            seconds = config.getint('Clipping', 'clip_length_seconds', fallback=30)
+            shown = next((n for n, v in CLIP_PRESETS.items() if v == seconds), _custom_clip_display(seconds))
+            clip_var.set(shown)
+            _last_clip_display[0] = shown
+
+    class _GuiControlApp(_control.AppAdapter):
+        mode = "gui"
+
+        @property
+        def recorder(self):
+            return recorder
+
+        @property
+        def presence(self):
+            return presence_store
+
+        def records(self):
+            return [dict(c) for c in list(channels)]
+
+        def mutate(self, fn):
+            def work():
+                result = fn(channels)
+                _populate_channel_tree()
+                save_channels()
+                return result
+            return _on_tk(work)
+
+        def start_session(self):
+            return _on_tk(lambda: start_recording(interactive=False))
+
+        def stop_session(self):
+            if not (recorder and recorder.is_running):
+                raise _control.ControlError("Recording is not running.", "conflict")
+            _on_tk(stop_recording)
+            return "stopping"
+
+        def request_quit(self, after_children=None):
+            if after_children is None:
+                root.after(300, on_close)
+            else:
+                root.after(300, lambda: _full_quit(after_children=after_children))
+
+        def reload_channels(self):
+            def work():
+                _reload_channels_from_disk()
+                return len(channels)
+            return _on_tk(work)
+
+        def settings_changed(self, section, key):
+            _on_tk(lambda: _reflect_setting(section, key))
+
+        def update_info(self):
+            return {"available": bool(_update_tag[0]), "latest": _update_tag[0]}
+
+    _control_service[0] = _control.Service.start_for(_GuiControlApp(config))
+
     # ── Apply theme and start refresh loops ──
     apply_theme()
     # Re-apply dark title bar after window is fully mapped (100ms + 500ms delays)
@@ -3245,7 +3324,8 @@ def main_gui(config):
     if HAS_PSUTIL:
         root.after(1000, _refresh_io_meter)
 
-    if smoke_test:
+    # MSR_SMOKE_KEEP=1 (tests/test_control.py): stay up hidden until a control "quit"
+    if smoke_test and os.environ.get("MSR_SMOKE_KEEP") != "1":
         root.after(2500, lambda: os._exit(0))
 
     try:

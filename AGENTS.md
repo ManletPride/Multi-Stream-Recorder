@@ -30,6 +30,8 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 | `msr/history.py` | Last-20 version history of `channels.json` / `config.ini` in git-ignored `msr_history/<file>/<stamp>.bak`, written by `snapshot()` before every overwrite (`Config._write`, `save_channels`). `summarize()` masks anything `is_sensitive` (passwords, e-mail, keys, cookies): never show raw ini values in a restore list. History copies of an `.ini` hold `KEPT_OUT` instead of any password/secret/token/cookie value (`strip_secrets`); `restore` fills the current value back in (`fill_secrets`). History failure must never block a save |
 | `msr/restore_dialog.py` | Themed "Restore previous..." window (the `\u22ef` menu beside About). Restore snapshots the current file first, so it can be undone; channel restore is refused while recording |
 | `msr/winstate.py` | Window size/place memory: main window geometry clamped to the current monitors, per-dialog geometry merged into `window_state.json["dialogs"]` (merge, never rewrite the file), negative places written `+-N` |
+| `msr/control.py` | Agent / headless control: `Controller` (every command), app adapters, `ControlServer` (127.0.0.1 + token in `msr_control.json`), `StatusWriter` (`msr_status.json`). No tkinter. See *Agent control* |
+| `msr_ctl.py` | Command-line client for `msr/control.py` (talks to the running copy, or edits the files when none runs) |
 | `msr/status.py` | `--json` snapshot. Read-only; no secrets, no absolute paths, custom URLs reduced to the host. `--json --library` adds the opt-in `library` section |
 | `msr/library.py` | Library statistics: `scan_library` (listing + file sizes only, never opens a video), `Roots`/`roots_from_config` (optional `[Library] extra_dirs`), `DurationCache` + `count_hours` (opt-in recorded time), `summary_text`, `to_dict`, `ScanJob` (background thread feeding a `queue.Queue`) |
 | `msr/charts.py` | Tk Canvas charts in the app theme: `BarChart`, `DonutChart`, `ColumnChart` with hover tooltips (no matplotlib) |
@@ -65,6 +67,38 @@ Size per site / channel / month of the recordings, and (since the manage feature
 - **`Guard.check` runs twice** per file: when the plan is built (dry run) and again right before each file. It refuses anything outside the Processed / Recorded / PendingDeletion / Clips folders (extra Library folders are scan-only), links/junctions on the way, files directly in a top folder, unknown file types (only recordings, raw/partial, clips, screenshots, `.meta.json`), files changed since the preview, files modified in the last 10 minutes, and **any channel or file the recorder is working on** (`busy_from_status` over `recorder.status_dict`; if that callback fails everything is blocked).
 - **No action while a scan or another action runs**, or if the action log cannot be written. Every action appends JSON lines to `library_actions.log` and a summary goes to the Log tab. `library_actions.log` and `library_moves.json` are in the data folder and git-ignored.
 - Tests use temp trees only and inject fake movers (`ManageContext.deleters`); `tests/test_gui_smoke.py` runs the real hidden app with a fake mover. Never point a test at a real library.
+
+## Agent control (`msr/control.py`, `msr_ctl.py`)
+
+Everything the GUI does must stay reachable without it. One `Controller` (no tkinter) runs every command against an **app adapter**: `_GuiControlApp` inside `main_gui`, `HeadlessApp` (the `--headless` loop) or `OfflineApp` (nothing running: `msr_ctl.py` edits the files). A new GUI feature needs a `cmd_*` here too (and a row below), or a line saying why not.
+
+- **Wire format.** TCP on `127.0.0.1`, random port, one JSON line per connection: `{"token": "...", "cmd": "status", "args": {...}}` -> `{"ok": true, "result": ...}` or `{"ok": false, "code": "...", "error": "..."}`. Port and token come from `msr_control.json` in the data folder (written atomically at start, POSIX 0600, deleted at exit only by the pid that wrote it, git-ignored). The token is checked with `hmac.compare_digest`; a bad one is logged without the token. Never bind anything but loopback, never put the token in a log, argv or `msr_status.json`.
+- **Codes** (stable, for agents): `auth`, `bad_request`, `unknown_command`, `not_found`, `ambiguous`, `invalid`, `conflict`, `busy`, `confirm_required`, `not_running`, `not_recording`, `unsupported`, `nothing`, `write_failed`, `failed`, `internal`. `msr_ctl.py` exit codes: 0 ok, 1 refused, 2 usage, 3 not running, 4 auth, 5 confirm, 6 timeout.
+- **Threads.** Commands run on a server thread. In the GUI, roster edits go through `_on_tk` (a `root.after` + wait) so `channels`, the tree and `channels.json` change together; recorder calls (`start_channel`, `stop_channel`, `check_now`, `set_poll_interval`) run on the server thread exactly like the GUI's own background helpers. `start_recording(interactive=False)` is the dialog-free start (refusals raise `ControlError`, warnings go to the log). Never open a dialog from a control path.
+- **Headless loop.** `HeadlessApp.run()` owns the main thread: `recorder.run()` blocks until a stop; `stop` (control) calls `recorder.stop()` and finishes cleanup on a thread; `quit` sets `should_stop` so the main thread does the full `finish_headless_session`. Recording of the enabled channels still starts at once. Ctrl+C behaves as before.
+- **Status file.** `StatusWriter` rewrites `msr_status.json` every `[Control] status_interval_seconds` (3) and on `poke()` after each command. Channel names go through `status.display_name` (custom URLs -> host). Settings shown by `config_get` are masked when `history.is_sensitive`.
+- **Confirmation.** Library actions, history restore and update install need `confirm=true`; a permanent delete needs `confirm` equal to `Plan.confirm_word` (the GUI's typed word). A library action with no filter at all is refused. The `Guard` rules above apply unchanged (busy channels via `busy_from_status`).
+- **Offline edits.** `msr_ctl.py` falls back to `OfflineApp` only when no copy answers **and** `status.is_running(streams_dir)` is false; otherwise it exits 3 and changes nothing.
+- **Off switch.** `[Control] enabled = false` or `MSR_CONTROL=0`. Tests: `tests/test_control.py` (fake recorder, temp data folders).
+
+| GUI feature | Command (`msr_ctl.py`) |
+| --- | --- |
+| Status table, roster, Live/Recording groups | `status`, `channels`; `msr_status.json` |
+| + Add channel / Remove / tick / untick | `channel_add`, `channel_remove`, `channel_enable`, `channel_disable` (`add`, `remove`, `enable`, `disable`) |
+| Move up/down/top/bottom, Sort | `channel_move`, `channel_sort` |
+| (rename: no GUI equivalent) | `channel_edit` (refused while that channel records) |
+| Start / Stop Recording, tray Start/Stop | `start`, `stop` |
+| Right-click Start / Stop / Check Now, Check Now button | `record_start`, `record_stop`, `check` |
+| Clip Now, Screenshot Now | `clip`, `screenshot` |
+| Polling and Clip Length selectors, config.ini | `config_get`, `config_set` (poll interval live; the GUI selectors follow), `config_reload` |
+| Logs tab, Open log file | `logs` (redacted) |
+| Update banner / install | `update_check`, `update_install` (GUI mode only: it restarts the window) |
+| Library tab numbers | `library_summary` |
+| Files / PendingDeletion / Clean up tabs, Delete... dialog | `library_files`, `library_plan` (dry run), `library_execute`, `library_pending`, `library_batches`, `library_restore` (Undo) |
+| Restore previous channel list / settings | `history_list`, `history_restore`, `channels_reload` |
+| Quit (window X, tray, Ctrl+Q) | `quit` |
+
+Left out on purpose (window-only): theme and theme dialog, window size/place and column widths, roster search/filter/view, live preview strip, tray show/hide, desktop notifications, About, Open folder / open in browser / Copy name, Library charts and Count hours (ffprobe over the whole library; `library_summary` gives the numbers without it), clean-up *suggestions*, and Open themes folder. They change only what the window shows, or open something on the desktop, which an agent can do itself from the paths in the replies.
 
 ## Instant clips (`create_clip` in `msr/worker.py`)
 

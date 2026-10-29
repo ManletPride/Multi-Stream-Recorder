@@ -83,11 +83,24 @@ if __name__ != "__mp_main__":
         raise
 
 
+def _start_control(app):
+    """The local control channel + msr_status.json (msr/control.py). Never stops a start."""
+    try:
+        from msr import control
+        return control.Service.start_for(app)
+    except Exception as e:
+        logging.warning(f"Control: not available ({type(e).__name__}: {e})")
+        return None
+
+
 def main_headless(config):
     """Run recording without a GUI.  Suitable for background tasks or services.
 
+    Recording of the enabled channels starts at once. While it runs, msr_ctl.py (or any client
+    of msr/control.py) can stop/start the session, edit the roster and settings, and quit.
     Ctrl+C performs a clean shutdown.
     """
+    from msr.control import HeadlessApp
     channels_file = config.get('Paths', 'channels_file')
     channels = []
     try:
@@ -101,26 +114,32 @@ def main_headless(config):
             )
         channels = [r["name"] for r in records if r.get("enabled", True)]
     except FileNotFoundError:
-        logging.error(f"Channels file not found: {channels_file}")
-        logging.error("Create a channels.json with a list of channels, e.g.: [\"twitch:zackrawrr\", \"asmongold\"]")
-        sys.exit(1)
+        logging.warning(f"Channels file not found: {channels_file} - starting with an empty list "
+                        "(add channels with msr_ctl.py add <name>)")
     except Exception as e:
         logging.error(f"Error loading channels: {e}")
         sys.exit(1)
 
-    if not channels:
+    app = HeadlessApp(config, lambda keys: StreamRecorder(keys, config))
+    service = _start_control(app)
+
+    if not channels and service is None:
         logging.error("No channels configured.  Add channels to channels.json first.")
         sys.exit(1)
 
     print("\n" + "=" * 80)
-    print(f"Multi-Stream Recorder v{__version__} — HEADLESS MODE")
-    print("Starting recording session...")
+    print(f"Multi-Stream Recorder v{__version__} - HEADLESS MODE")
+    if channels:
+        print("Starting recording session...")
+    else:
+        print("No channel is enabled yet - waiting for commands (msr_ctl.py).")
     for ch in channels:
-        print(f"  • {ch}")
+        print(f"   {ch}")
+    if service is not None:
+        print("Control: msr_ctl.py status | stop | start | quit   (see README, Agent control)")
     print("Press Ctrl+C to stop.")
     print("=" * 80 + "\n")
 
-    recorder = StreamRecorder(channels, config)
     shutdown_requested = threading.Event()
 
     def signal_handler(signum, frame):
@@ -135,10 +154,13 @@ def main_headless(config):
     signal.signal(signal.SIGTERM, signal_handler)
 
     try:
-        recorder.run()
+        app.run(start_now=bool(channels))
     except KeyboardInterrupt:
         shutdown_requested.set()
-    finish_headless_session(recorder)
+    if service is not None:
+        service.stop()
+    if app.last_recorder is not None:
+        finish_headless_session(app.last_recorder)
 
 
 def _safe_console():

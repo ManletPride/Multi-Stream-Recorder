@@ -27,6 +27,40 @@ PLATFORM_LABELS = {
 ADD_PLATFORMS = ["kick", "twitch", "youtube", "rumble", "tiktok", "fishtank", "custom"]
 
 
+def move_list_items(seq, indices, to="top"):
+    """Move entries at *indices* to the top or bottom of *seq* (in place).
+
+    The moved block keeps its relative order, as does the rest of the list.
+    Invalid indices are ignored. Returns the new indices of the moved
+    entries (sorted, in list order).
+    """
+    if not seq:
+        return []
+    want = []
+    seen = set()
+    for raw in indices:
+        try:
+            i = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if i < 0 or i >= len(seq) or i in seen:
+            continue
+        seen.add(i)
+        want.append(i)
+    want.sort()
+    if not want:
+        return []
+    moving = [seq[i] for i in want]
+    rest = [item for i, item in enumerate(seq) if i not in seen]
+    if to == "bottom":
+        seq[:] = rest + moving
+        start = len(rest)
+    else:
+        seq[:] = moving + rest
+        start = 0
+    return list(range(start, start + len(moving)))
+
+
 def split_channel_key(key):
     """Return ``(platform, rest)`` for a stored channel key.
 

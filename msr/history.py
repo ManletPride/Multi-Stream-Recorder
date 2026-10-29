@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -165,6 +166,19 @@ def snapshot(path, *, keep: int = KEEP, min_interval: float = 0, now: datetime |
         return None
 
 
+def _replace(tmp, path, tries: int = 20) -> None:
+    """os.replace, retried briefly: on Windows it fails while another program (a script reading
+    channels.json, an antivirus scan) has the old file open."""
+    for attempt in range(tries):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == tries - 1:
+                raise
+            time.sleep(0.05)
+
+
 def atomic_write(path, data: bytes) -> None:
     """Write via a temp file in the same folder and os.replace, so a crash can't leave half a file."""
     path = Path(path)
@@ -172,7 +186,7 @@ def atomic_write(path, data: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
-        os.replace(tmp, path)
+        _replace(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)
