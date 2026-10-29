@@ -2,7 +2,7 @@
 
 Read this before changing code. The project is **not** a single-file script anymore. Several clip and GUI bugs were already fixed; reintroducing the old approaches will regress them.
 
-**Ship status (2026-10-29):** `release/3.0` prepares **v3.0.0** (Clip Editor, Library, themes, agent control, own `.venv`, Updates dialog, app icon, hardening); the last public release is v2.1.0. `__version__` is not bumped yet.
+**Ship status (2026-10-29):** `release/3.0` prepares **v3.0.0** (Clip Editor, Library, themes, agent control, own `.venv`, Updates dialog, app icon, hardening); the last public release is v2.1.0. `__version__` is `3.0.0`; release date TBD.
 
 Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 
@@ -41,7 +41,7 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 | `msr/library_manage.py` | `Manager` + the **Files**, **PendingDeletion** and **Clean up** tabs; `ManageContext` is what `gui.py` hands over (busy callback, log paths, openers) |
 | `msr/preview_state.py` | Preview strip memory, **no tkinter**: per-channel `last_ok`, the working seek `LADDER` rung (retry a shorter one every 10 good grabs), back-off after failed grabs (4, 8, 16, 32, 60 s), the age / `ended` text and the tile / pane colours (theme tokens only). Tested in `tests/test_preview_state.py` |
 | `msr/iometer.py` | Status-header disk write / NIC download rates (`IoSampler`) |
-| `msr/__init__.py` | `__version__` (currently `2.1.0`; the only version string, read by the updater, `--version`, About and `msr_ctl ping`) |
+| `msr/__init__.py` | `__version__` (currently `3.0.0`; the only version string, read by the updater, `--version`, About and `msr_ctl ping`) |
 | `msr/paths.py` | `--data-dir` / `MSR_HOME`: resolves and activates the data folder (chdir) |
 | `msr/venv.py` | MSR's own `.venv` (stdlib only, imported by `run_msr.pyw` before any package exists): check / create / install / rebuild, opt-out (`MSR_NO_VENV`, `[Advanced] use_venv`), first-run progress window, `in_venv()` |
 | `msr/depsupdate.py` | Tk-free dependency rows (installed via importlib.metadata, latest via PyPI / GitHub), pip update with rollback (only inside a venv), daily-check bookkeeping in window_state.json |

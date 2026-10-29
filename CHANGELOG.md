@@ -2,9 +2,13 @@
 
 ## v3.0.0 (unreleased, date TBD)
 
-The biggest release so far (55 commits since v2.1.0): a **Clip Editor** for cutting clips while a stream records, a **Library** tab that shows and safely cleans up what your recordings take, **agent and headless control** (`msr_ctl.py`) for scripts, bots and AI agents, MSR's **own Python environment** set up on first launch, an **Updates** dialog for yt-dlp/streamlink and the other packages, **sixteen themes**, an **app icon**, and a long list of safety fixes (drive loss, verified remuxes, redacted logs, hidden consoles, all-or-nothing updates, recording starts at once after a crash). No new Python packages; your `config.ini`, `channels.json`, cookies and recordings are used as before. Release notes: `docs/release_notes_3.0.0.md`.
+The biggest release so far (55 commits since v2.1.0): a **Clip Editor** for cutting clips while a stream records, a **Library** tab that shows and safely cleans up what your recordings take, **agent and headless control** (`msr_ctl.py`) for scripts, bots and AI agents, MSR's **own Python environment** set up on first launch, an **Updates** dialog for yt-dlp/streamlink and the other packages, **sixteen themes**, an **app icon**, and a long list of safety fixes (drive loss, verified remuxes, redacted logs, hidden consoles, all-or-nothing updates, recording starts at once after a crash). No new Python packages; your `config.ini`, `channels.json`, cookies and recordings are used as before. Release notes: [docs/release_notes/RELEASE_NOTES_v3.0.0.md](docs/release_notes/RELEASE_NOTES_v3.0.0.md).
 
-**Upgrading from 2.1.0:** download the new release (ZIP or `git pull`) rather than the in-app update. The 2.1.0 updater only replaces `Multi-Stream-Recorder.py`, `requirements.txt`, `channels_fishtank.json` and `msr/`, so it would not bring the new `run_msr.pyw` (the `.venv` setup), `msr_ctl.py`, `create_shortcut.py`, `assets/` or `docs/`. The app still runs after an in-app update, without those.
+**Upgrading from 2.1.0:** download the new release (ZIP or `git pull`) rather than the in-app update. The 2.1.0 updater only replaces `Multi-Stream-Recorder.py`, `requirements.txt`, `channels_fishtank.json` and `msr/`, so it would not bring the new `run_msr.pyw` (the `.venv` setup), `msr_ctl.py`, `create_shortcut.py`, `assets/` or `docs/`. The app still runs after an in-app update, without those. From 3.0 on, in-app updates bring all of them (launchers, `msr_ctl.py`, `create_shortcut.py`, `assets/`, `docs/`), never user files or `.venv`.
+
+### Removed
+- `[Advanced] concurrent_fragments`: it was never used. An existing `config.ini` that still has it loads normally and the value is ignored.
+- `screenshots/fill.txt` (empty placeholder). Old release notes moved from the repository root to `docs/release_notes/`.
 
 ### Added
 
@@ -86,6 +90,7 @@ The biggest release so far (55 commits since v2.1.0): a **Clip Editor** for cutt
 - Each channel's first live check now runs at once when recording starts or a channel is added (there was a random wait of up to 10 seconds first); later checks keep their spacing. Same in the window and headless.
 - `msr_ctl.py`: Ctrl+C exits with a short "Interrupted." and code 130 instead of a traceback, also during `wait`; `record-stop` says per channel whether a recording was stopped or the channel was idle; `wait --event finished` warns when the channel is not recording.
 - Headless start with an empty channel list no longer says "Add channels via the GUI": it names `msr_ctl.py add NAME`.
+- **In-app updates are complete.** Besides `Multi-Stream-Recorder.py`, `requirements.txt` and `msr/`, an update now also installs `run_msr.pyw`, `run_msr.bat`, `msr_ctl.py`, `create_shortcut.py`, `assets/` and `docs/`; private files (config, cookies, channels, logs, history) and `.venv` are never taken from the download or touched. When `requirements.txt` changed, the notice says the next launch installs the new packages into `.venv`.
 - **An in-app update can no longer leave a half-updated install.** The update now checks that every downloaded Python file is intact, keeps the current program files in `msr_update_backup/`, checks each copied file, and puts the old files back (removing any the update added) if anything goes wrong; the reason is shown at the next start. If the update changes `requirements.txt`, the next start says to run `pip install -r requirements.txt` (with MSR's own `.venv`, the launcher installs them by itself).
 - **The Fishtank password is no longer copied into `msr_history/`.** History copies of `config.ini` hold a placeholder instead of any password, secret or token, and **Restore previous...** keeps your current password. Copies made before this version are unchanged (delete `msr_history/config.ini/` to remove them). The password can also be given in the `MSR_FISHTANK_PASSWORD` environment variable instead of `config.ini`.
 - The window state and the Kick channel id cache are written atomically, so a crash or a full disk mid-save keeps the previous file.
@@ -162,20 +167,20 @@ New roster panel, Kick realtime fix, reconnect fix, install cleanup.
 
 ## v2.0.2
 
-User-facing summary: [RELEASE_NOTES_v2.0.2.md](RELEASE_NOTES_v2.0.2.md).
+User-facing summary: [RELEASE_NOTES_v2.0.2.md](docs/release_notes/RELEASE_NOTES_v2.0.2.md).
 
 - Fishtank As Seen On mini-season (catalog 2026-09-07): stream ids are slugs (`director-as-seen-on`) rather than `name-5`. Raw hyphenated catalog ids are accepted; `fishtank:director` records the current Director cam (S5 `dirc-5` still works as a raw id). `channels_fishtank.json` is the new house roster. Grid mosaic (`grid-as-seen-on`) is treated as live when it appears only in `liveStreamStatus`.
 
 ## v2.0.1
 
-User-facing summary: [RELEASE_NOTES_v2.0.1.md](RELEASE_NOTES_v2.0.1.md).
+User-facing summary: [RELEASE_NOTES_v2.0.1.md](docs/release_notes/RELEASE_NOTES_v2.0.1.md).
 
 - Size splits are **make-before-break**: when a file hits `max_file_size_gb`, the next capture starts while the current one is still writing. The old file is closed only after the new `.ts` has data, so the seam overlaps instead of dropping live seconds. Remux of the closed file still runs in a background thread; status stays Recording with a `remuxing N%` suffix (row uses the remux color). Clip Now / Screenshot keep working. If the next file does not appear in time, it falls back to a short gap. Resolution-change splits still stop the old file first (mixed resolutions in one file corrupt playback). Stream-end remux is still on the worker. Previously an 8 GB Kick split paused capture for ~90s of remux (kimmee 2026-09-03: 21:11:51–21:13:32).
 - TikTok: when yt-dlp reports offline, confirm via `/api-live/user/room`, `roomId` on the profile **and** `/live` page, then both Webcast hosts. Misses log at info (24/7 news LIVEs such as `@aljazeeraenglish` often omit `roomId` on the profile, so the old fallback stayed silent).
 
 ## v2.0.0
 
-User-facing summary and upgrade steps: [RELEASE_NOTES_v2.0.0.md](RELEASE_NOTES_v2.0.0.md).
+User-facing summary and upgrade steps: [RELEASE_NOTES_v2.0.0.md](docs/release_notes/RELEASE_NOTES_v2.0.0.md).
 
 Code lives in the `msr` package; `Multi-Stream-Recorder.py` is the launcher only. Fully quit and relaunch after pulling these changes — a running GUI does not reload modules. This is a major version because v1.8.0 was a single file; installing v2 without `msr/` will not run.
 
@@ -232,4 +237,4 @@ Live 15s Clip Now checked on Kick, YouTube, TikTok, Twitch (after the duration f
 
 ## v1.8.0
 
-See [RELEASE_NOTES_v1.8.0.md](RELEASE_NOTES_v1.8.0.md).
+See [RELEASE_NOTES_v1.8.0.md](docs/release_notes/RELEASE_NOTES_v1.8.0.md).

@@ -1,6 +1,6 @@
-# Multi-Stream Recorder 3.0.0 (draft release notes)
+# Multi-Stream Recorder 3.0.0
 
-> Draft. Version number and date to be confirmed. The version string is not bumped yet (`msr/__init__.py`).
+> Draft release notes. Release date: TBD.
 
 Multi-Stream Recorder watches your favourite live channels on Kick, Twitch, YouTube, Rumble, TikTok, Fishtank.live and any yt-dlp site, and records each one automatically as an MP4. 3.0 is the biggest update so far.
 
@@ -35,10 +35,11 @@ Everything the window does can be done from the command line with `msr_ctl.py`, 
 - **Recording starts immediately** after a crash; leftover files are converted in the background.
 - **Unplugged drive?** Recording continues in a fallback folder and moves back when the drive returns.
 - **Your footage is protected:** every MP4 is checked before the original `.ts` is moved, a failed conversion keeps the original, a stalled ffmpeg is stopped.
-- **In-app updates are all-or-nothing** with a backup and automatic rollback.
+- **In-app updates are all-or-nothing** with a backup and automatic rollback, and from 3.0 on they bring every program file (launchers, `msr_ctl.py`, icon, docs) while never touching your settings, cookies or `.venv`.
 - **Privacy:** stream URLs, tokens and passwords are redacted from logs, status files and settings history.
 - **No console windows** flash up for ffmpeg, yt-dlp or streamlink.
 - Faster startup (the window appears in about half the time), `max_record_hours` is enforced, Fishtank token handling fixed, and many smaller fixes. Full list in `CHANGELOG.md`.
+- Removed: the unused `[Advanced] concurrent_fragments` setting (old configs that have it still load).
 
 ## Upgrading from 2.1.0
 - **Download this release** (ZIP from the GitHub release, or `git pull`) instead of using the in-app update. The 2.1.0 in-app updater only replaces the main program files, so it would skip the new launcher (`.venv` setup), `msr_ctl.py`, the icon files and the docs.

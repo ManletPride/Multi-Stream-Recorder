@@ -75,7 +75,6 @@ def _coerce_specs():
         ("Cleanup", "auto_purge_days", "int", 7, 0, None),
         ("Cleanup", "max_log_size_mb", "float", 20.0, 0.0, None),
         ("Cleanup", "log_backup_count", "int", 3, 0, None),
-        ("Advanced", "concurrent_fragments", "int", 3, 1, None),
         ("Clipping", "clip_length_seconds", "int", 30, 5, 1800),
         ("Clipping", "screenshot_quality", "int", 2, 0, 100),
         ("Recording", "split_on_resolution_change", "bool", True, None, None),
@@ -161,7 +160,6 @@ class Config:
             'ffmpeg_path': 'ffmpeg',
             # false = do not create/use MSR's own .venv (you manage the Python environment)
             'use_venv': 'true',
-            'concurrent_fragments': '3',
             # yt-dlp --extractor-args youtube:player_client value.
             # Blank = let yt-dlp choose (recommended).  Its defaults favour
             # clients that don't require a PO Token; pinning the wrong one

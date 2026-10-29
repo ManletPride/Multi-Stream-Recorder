@@ -40,18 +40,37 @@ def wait_for_pid(pid, timeout=120):
 
 BACKUP_DIR = "msr_update_backup"     # the previous program files, kept until the next update
 NOTICE_FILE = "msr_update_notice.txt"
-ROOT_FILES = ("Multi-Stream-Recorder.py", "requirements.txt", "channels_fishtank.json")
+# Same lists as msr/update.py (this helper may not import msr; a test keeps them in step).
+ROOT_FILES = ("Multi-Stream-Recorder.py", "requirements.txt", "channels_fishtank.json",
+              "run_msr.pyw", "run_msr.bat", "msr_ctl.py", "create_shortcut.py")
+PROGRAM_DIRS = ("msr", "assets", "docs")
+PRIVATE_NAMES = frozenset({
+    "config.ini", "channels.json", "cookies.txt", "window_state.json", "kick_channel_ids.json",
+    "msr_control.json", "msr_status.json", "library_cache.json", "library_moves.json",
+    "library_actions.log", ".env", "run_msr.local.bat",
+})
+PRIVATE_DIRS = frozenset({".venv", "venv", "msr_history", "msr_update_backup", "__pycache__", "themes"})
+
+
+def _private(rel):
+    parts = rel.replace("\\", "/").split("/")
+    name = parts[-1].lower()
+    if any(p.lower() in PRIVATE_DIRS for p in parts[:-1]):
+        return True
+    return (name in PRIVATE_NAMES or name.endswith((".pyc", ".pyo", ".har", ".log"))
+            or (name.startswith("cookies") and name.endswith(".txt")) or name.startswith("config.ini."))
 
 
 def _program_files(root):
-    """Relative paths of the program files under *root* (launcher, extras, ``msr/``)."""
+    """Relative paths of the program files under *root* (root files, ``msr/``, ``assets/``, ``docs/``)."""
     out = [name for name in ROOT_FILES if os.path.isfile(os.path.join(root, name))]
-    msr_dir = os.path.join(root, "msr")
-    for dirpath, dirnames, filenames in os.walk(msr_dir):
-        dirnames[:] = [d for d in dirnames if d != "__pycache__"]
-        for name in filenames:
-            if not name.endswith((".pyc", ".pyo")):
-                out.append(os.path.relpath(os.path.join(dirpath, name), root))
+    for top in PROGRAM_DIRS:
+        for dirpath, dirnames, filenames in os.walk(os.path.join(root, top)):
+            dirnames[:] = [d for d in dirnames if d.lower() not in PRIVATE_DIRS]
+            for name in filenames:
+                rel = os.path.relpath(os.path.join(dirpath, name), root)
+                if not _private(rel):
+                    out.append(rel)
     return out
 
 
@@ -80,7 +99,7 @@ def check_staging(staging):
             not os.path.isfile(os.path.join(staging, "msr", "__init__.py")):
         raise RuntimeError("staging folder is missing Multi-Stream-Recorder.py or msr/")
     for rel in _program_files(staging):
-        if rel.endswith(".py"):
+        if rel.endswith((".py", ".pyw")):
             path = os.path.join(staging, rel)
             try:
                 with open(path, "rb") as fh:
@@ -128,8 +147,10 @@ def apply_staged_update(staging, target):
     if os.path.isfile(new_requirements) and \
             _requirement_lines(old_requirements) != _requirement_lines(new_requirements):
         _write_text(os.path.join(target, NOTICE_FILE),
-                    "This update changed requirements.txt. If MSR reports a missing module, run:\n"
-                    "  pip install -r requirements.txt\n"
+                    "This update changed requirements.txt. The next launch through run_msr.pyw installs "
+                    "the new packages into MSR's own environment (.venv) by itself.\n"
+                    "If you run MSR on your own Python (MSR_NO_VENV), run there:\n"
+                    "  python -m pip install -r requirements.txt\n"
                     f"in {target}")
 
 

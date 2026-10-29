@@ -23,12 +23,43 @@ ALLOWED_HOSTS = frozenset({
     "api.github.com",
     "objects.githubusercontent.com",
 })
+# Program files an update may bring. Keep in step with msr/apply_update.py (a test checks).
+# Never user data: config, cookies, channels, logs, history, caches, .venv (see is_private).
 ALLOWED_FILES = frozenset({
     "Multi-Stream-Recorder.py",
     "requirements.txt",
     "channels_fishtank.json",
+    "run_msr.pyw",
+    "run_msr.bat",
+    "msr_ctl.py",
+    "create_shortcut.py",
 })
-ALLOWED_DIR = "msr"
+ALLOWED_DIRS = ("msr", "assets", "docs")
+ALLOWED_DIR = "msr"   # the package; kept for older callers
+PRIVATE_NAMES = frozenset({
+    "config.ini", "channels.json", "cookies.txt", "window_state.json", "kick_channel_ids.json",
+    "msr_control.json", "msr_status.json", "library_cache.json", "library_moves.json",
+    "library_actions.log", ".env", "run_msr.local.bat",
+})
+PRIVATE_DIRS = frozenset({".venv", "venv", "msr_history", "msr_update_backup", "__pycache__", "themes"})
+
+
+def is_private(rel):
+    """True for anything that is user data or build output, wherever it sits."""
+    parts = rel.replace("\\", "/").split("/")
+    name = parts[-1].lower()
+    if any(p.lower() in PRIVATE_DIRS for p in parts[:-1]):
+        return True
+    return (name in PRIVATE_NAMES or name.endswith((".pyc", ".pyo", ".har", ".log"))
+            or (name.startswith("cookies") and name.endswith(".txt")) or name.startswith("config.ini."))
+
+
+def is_program_file(rel):
+    """Relative path (with /) that an update installs."""
+    if is_private(rel):
+        return False
+    parts = rel.split("/")
+    return rel in ALLOWED_FILES or (len(parts) > 1 and parts[0] in ALLOWED_DIRS)
 MAX_ZIP_BYTES = 50 * 1024 * 1024
 MAX_UNCOMPRESSED_BYTES = 80 * 1024 * 1024
 MAX_MEMBER_BYTES = 8 * 1024 * 1024
@@ -82,17 +113,11 @@ def _safe_relpath(filename, prefix):
     parts = rel.split("/")
     if any(p in ("", ".", "..") for p in parts):
         return None
-    if rel in ALLOWED_FILES:
-        return rel
-    if parts[0] == ALLOWED_DIR:
-        if "__pycache__" in parts or parts[-1].endswith((".pyc", ".pyo")):
-            return None
-        return rel
-    return None
+    return rel if is_program_file(rel) else None
 
 
 def extract_allowlisted(zip_path, staging_dir):
-    """Extract only the launcher, ``msr/``, and a couple of root extras.
+    """Extract only the program files (ALLOWED_FILES and ALLOWED_DIRS, never private files).
 
     Returns the list of relative paths written. Raises on a zip-bomb-ish
     archive or if nothing allowlisted is present.
