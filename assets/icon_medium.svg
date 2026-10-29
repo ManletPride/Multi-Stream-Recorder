@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>Multi-Stream Recorder</title>
+  <rect x="0" y="0" width="256" height="256" rx="52" fill="#0B1630"/>
+  <g transform="translate(128 128) scale(1.12) translate(-130.5 -126)">
+    <rect x="52" y="75" width="115" height="102" rx="15" fill="#2E86FF"/>
+    <path d="M160 106 L205 84 L205 168 L160 146 Z" fill="#2E86FF" stroke="#2E86FF"
+          stroke-width="9" stroke-linejoin="round"/>
+    <circle cx="82" cy="105" r="15" fill="#FF1E2D"/>
+  </g>
+</svg>

@@ -6,6 +6,11 @@ A big interface release: a Library tab that shows (and can clean up) what your r
 
 ### Added
 
+**App icon (new)**
+- Multi-Stream Recorder has its own icon: a blue video camera with a red record dot (drawn as a vector in `assets/icon.svg`, with thicker shapes and a bigger dot at 16-48 px), as a Windows `.ico` (16-256 px) and PNGs (16-512 px).
+- The window, every dialog and the Clip Editor show it; the taskbar groups MSR as its own app (not "Python") with this icon; the tray icon is the camera with the record dot red while recording and grey when idle.
+- `python create_shortcut.py` makes a desktop shortcut with the icon (never replaces an existing one); `--set-icon` changes only the icon of an existing shortcut; `--linux` prints a `.desktop` file. Headless mode is unchanged.
+
 **Clip Editor (new)**
 - A small DVR-style editor for cutting a clip out of a recording, also while it is still recording. Open it with **Shift+click on Clip Now**, **right-click a channel > Clip Editor…** (its recording in progress, or its newest finished recording), or **Library > Files > right-click > Clip Editor…** for any finished file.
 - Timeline over the whole recording so far (the live edge keeps growing; **Jump to live**), click or drag to scrub with a preview frame (a far jump shows the nearest keyframe at once, then the exact frame; newer positions cancel older ones; recent frames are cached), **Play with sound** and a **Volume** slider so you can cut on dialogue (smooth playback: one continuous decoded stream at preview size at the recording's own frame rate, up to 60 fps, kept in step with the sound; late frames are skipped rather than lagging; **Limit preview to 30 fps** for slower PCs, remembered), **Mark In / Mark Out** (I / O keys), nudge buttons, **Replay In / Out** (2 s around the point) and the clip length.

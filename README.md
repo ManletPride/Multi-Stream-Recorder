@@ -119,6 +119,14 @@ From the app: click **vX available** in the status bar. It downloads that releas
 
 From git: `git pull`, then `pip install -r requirements.txt`. Fully quit and relaunch; a running MSR does not reload its code.
 
+### Desktop shortcut and icon
+
+MSR has its own icon (`assets/icon.ico`, `assets/icon.svg`) and its own taskbar entry, separate from other Python programs.
+
+- New shortcut on the desktop: `python create_shortcut.py` (add `--data-dir D:\msr-data` for another data folder). Existing shortcuts are left alone.
+- Give an existing shortcut the icon: `python create_shortcut.py --set-icon "%USERPROFILE%\Desktop\Your shortcut.lnk"`, or right-click it > Properties > Change Icon... > Browse to `assets\icon.ico`.
+- Linux: `python3 create_shortcut.py --linux > ~/.local/share/applications/multi-stream-recorder.desktop`
+
 ## Adding channels
 
 Use **+ Add channel** (or Enter in the dialog). Accepted forms:

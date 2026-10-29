@@ -200,8 +200,13 @@ def save_window_state(state_file, state):
 def create_tray_icon_image(recording=False):
     """Create a simple tray icon image using PIL.
 
-    Green circle when recording, grey when idle.
+    The app icon (assets/icon_64.png): red record dot when recording, grey when idle. Falls
+    back to a plain circle if the file is missing.
     """
+    from msr import appicon
+    img = appicon.tray_image(recording)
+    if img is not None:
+        return img
     size = 64
     img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -285,7 +290,10 @@ def main_gui(config):
     _themes.set_current(_themes.resolve_saved(config.get('GUI', 'theme', fallback=''), _legacy_dark))
 
     # ── Create root window ──
+    from msr import appicon as _appicon
+    _appicon.set_app_id()  # own taskbar group and icon, not python's
     root = tk.Tk()
+    _appicon.apply(root)   # every later Toplevel inherits it
     # MSR_SMOKE_TEST=1 (tests/test_gui_smoke.py): build the whole window, never show it, exit
     # shortly after the first refresh ticks. A crash while building the UI exits non-zero.
     smoke_test = os.environ.get("MSR_SMOKE_TEST") == "1"
