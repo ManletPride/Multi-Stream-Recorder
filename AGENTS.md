@@ -43,6 +43,7 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 | `msr/iometer.py` | Status-header disk write / NIC download rates (`IoSampler`) |
 | `msr/__init__.py` | `__version__` (currently `3.0.0`; the only version string, read by the updater, `--version`, About and `msr_ctl ping`) |
 | `msr/paths.py` | `--data-dir` / `MSR_HOME`: resolves and activates the data folder (chdir) |
+| `msr/about.py` | The About text (Tk-free): tools, packages, environment, folders, msr_ctl pointer, responsibility notice |
 | `msr/venv.py` | MSR's own `.venv` (stdlib only, imported by `run_msr.pyw` before any package exists): check / create / install / rebuild, opt-out (`MSR_NO_VENV`, `[Advanced] use_venv`), first-run progress window, `in_venv()` |
 | `msr/depsupdate.py` | Tk-free dependency rows (installed via importlib.metadata, latest via PyPI / GitHub), pip update with rollback (only inside a venv), daily-check bookkeeping in window_state.json |
 | `msr/deps_dialog.py` | The **Updates** dialog (worker thread + queue + `after()`) |
@@ -141,7 +142,7 @@ Verified live 15s clips (video start is AAC/B-frame delay, not a freeze):
 
 Related UI:
 
-- **Clip Now** and **Screenshot** buttons on the Status header (same actions as right-click). Debounced per channel+kind.
+- Status header buttons, left to right: **Clip Now** (`Accent.TButton`), **DVR** (Clip Editor, = Shift+click Clip Now), **Clips**, **Screenshot**, **Streams**; packed `side=RIGHT` in reverse order. Clip/Screenshot are debounced per channel+kind. `tests/test_gui_smoke.py` checks order, tooltips and that the row fits at the 1060 px minimum. About text: `msr/about.py` (Tk-free, tested).
 - **Streams** button (left of Clips) opens `streams_dir` (blank falls back to the default folder) through `msr.util.open_existing_folder`, which uses the same `open_local_path` as Clips, creates nothing, and shows a themed message if the folder is missing. Keep the header row's requested width under the 1060 px minimum window (`tests/test_gui_smoke.py::StreamsButtonTests` measures it); put anything more on a row of its own.
 - **Clips** button (left of Screenshot) opens that channel’s clips/screenshots folder (`clips_dir` or `streams_dir/Clips`). Does not need an active recording. Same action as right-click **Open Clips Folder**.
 - Clip/screenshot **filenames** use `channel_file_stem(username_dir)` (last folder only). Do not interpolate a nested `username_dir` (`chaturbate\\mode_bad`) into the filename — Windows treats the `\\` as another directory.

@@ -115,7 +115,14 @@ def fake_mainloop(self, n=0):
         streams, clips = find(self, "Streams"), find(self, "Clips")
         out["found"] = streams is not None and clips is not None
         out["same_row"] = streams.master is clips.master
-        out["left_of_clips"] = streams.winfo_x() < clips.winfo_x()
+        order = ["Clip Now", "DVR", "Clips", "Screenshot", "Streams"]
+        btns = [find(self, t) for t in order]
+        out["all_found"] = all(b is not None for b in btns)
+        out["xs"] = [b.winfo_x() for b in btns]
+        out["same_header"] = all(b.master is clips.master for b in btns)
+        out["clip_style"] = btns[0].cget("style")
+        out["tooltips"] = [bool(b.bind("<Enter>")) for b in btns]
+        out["shift_click"] = bool(btns[0].bind("<Shift-Button-1>"))
         header = clips.master
         out["header_req"], out["header_width"] = header.winfo_reqwidth(), header.winfo_width()
         out["root_width"] = self.winfo_width()
@@ -130,6 +137,9 @@ def fake_mainloop(self, n=0):
             out["opened_after_missing"] = len(opener.call_args_list)
             out["popup"] = [str(a) for a in info.call_args.args[1:]] if info.called else None
             out["recreated"] = os.path.exists(sys.argv[3])
+            info.reset_mock()
+            btns[1].invoke()                      # DVR with nothing selected: a helpful message
+            out["dvr_popup"] = [str(a) for a in info.call_args.args[1:]] if info.called else None
     except BaseException:
         import traceback; traceback.print_exc(file=sys.stderr)
     sys.stdout.write(json.dumps(out)); sys.stdout.flush(); os._exit(0)
@@ -160,7 +170,11 @@ class StreamsButtonTests(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr[-3000:])
         self.assertNotIn("Traceback", done.stderr)
         out = json.loads(done.stdout)
-        self.assertTrue(out["found"] and out["same_row"] and out["left_of_clips"], out)
+        self.assertTrue(out["found"] and out["same_row"] and out["all_found"] and out["same_header"], out)
+        self.assertEqual(out["xs"], sorted(out["xs"]), out)            # Clip Now | DVR | Clips | Screenshot | Streams
+        self.assertEqual(out["clip_style"], "Accent.TButton")
+        self.assertTrue(all(out["tooltips"]) and out["shift_click"], out)
+        self.assertIn("Select a channel", " ".join(out["dvr_popup"]))
         self.assertEqual(out["opened"], [str(rec)])                       # same helper as Clips
         self.assertEqual(out["popups_when_present"], 0)
         self.assertEqual(out["opened_after_missing"], 1)                  # nothing more opened

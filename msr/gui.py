@@ -119,6 +119,12 @@ class NotificationThrottle:
 _notif_throttle = NotificationThrottle()
 
 
+def _show_about(root, config):
+    """About: version, sites, tools and packages, environment, folders, msr_ctl, disclaimer."""
+    from msr.about import about_for
+    _dialogs.show_info(root, f"About Multi-Stream Recorder v{__version__}", about_for(config, __version__))
+
+
 def send_notification(title, message, timeout=5, category="info", channel="", detail=""):
     """Send a desktop toast notification with rate limiting.
 
@@ -1325,39 +1331,7 @@ def main_gui(config):
             state_file=state_file, note="Restart Multi-Stream Recorder to use the restored settings.")
 
     def _about_dialog():
-        deps = []
-        deps.append(f"yt-dlp {YTDLP_VERSION}" if HAS_YTDLP else "yt-dlp: not found")
-        deps.append(f"streamlink {STREAMLINK_VERSION}" if HAS_STREAMLINK else "streamlink: not found")
-        deps.append(f"ffmpeg {_deps.FFMPEG_VERSION}" if _deps.HAS_FFMPEG else "ffmpeg: not found")
-        deps.append(f"deno {DENO_VERSION}" if HAS_DENO else "deno: not found (YouTube nsig)")
-        deps.append(f"psutil: {'yes' if HAS_PSUTIL else 'no'}")
-        deps.append(f"pystray: {'yes' if HAS_TRAY else 'no'}")
-        deps.append(f"curl_cffi: {'yes' if HAS_CURL_CFFI else 'no'} (browser impersonation)")
-        deps.append(f"websocket-client: {'yes' if HAS_WEBSOCKET else 'no'} (Kick push notifications)")
-        deps_str = "\n".join(deps)
-
-        streams = config.get('Paths', 'streams_dir')
-        clips = config.get('Clipping', 'clips_dir', fallback='').strip()
-        if not clips:
-            clips = os.path.join(streams, 'Clips')
-        cfg_path = os.path.abspath(getattr(config, 'config_file', 'config.ini'))
-
-        _dialogs.show_info(
-            root,
-            f"Multi-Stream Recorder v{__version__}",
-            f"Multi-Stream Recorder v{__version__}\n\n"
-            f"Kick, Twitch, YouTube, Rumble, TikTok,\n"
-            f"Fishtank.live, and custom URLs (yt-dlp).\n\n"
-            f"Dependencies:\n{deps_str}\n\n"
-            f"Recordings:\n{streams}\n\n"
-            f"Clips & screenshots:\n{clips}\n\n"
-            f"To change those folders, edit streams_dir\n"
-            f"(and optional clips_dir) in:\n{cfg_path}\n"
-            f"then fully quit and relaunch.\n\n"
-            f"Personal archival only — follow each site's terms.\n"
-            f"cookies.txt is your login; do not share it.\n"
-            f"Chaturbate and similar custom URLs are adult."
-        )
+        _show_about(root, config)
 
     root.bind("<Control-q>", lambda e: _full_quit())
     root.bind("<F1>", lambda e: _about_dialog())
@@ -1378,7 +1352,7 @@ def main_gui(config):
     status_header = tk.Frame(status_tab)
     status_header.pack(fill=tk.X, padx=10, pady=(10, 6))
     # The disk/network meter lives on its own thin row under the header: the header's buttons
-    # (Clip Now, Screenshot, Clips, Streams) already fill the row at the default window width.
+    # (Clip Now, DVR, Clips, Screenshot, Streams) already fill the row at the default window width.
     status_meter_row = tk.Frame(status_tab)
     # Shown under the header only while the recordings folder is unreachable (an unplugged drive).
     storage_notice_label = tk.Label(status_tab, text="", anchor="w", justify="left",
@@ -1715,7 +1689,10 @@ def main_gui(config):
         finished recording."""
         ch_name = _get_selected_status_channel()
         if not ch_name:
-            logging.info("Clip Editor: select a channel in the status list first")
+            _dialogs.show_info(root, "DVR / Clip Editor",
+                               "Select a channel in the status list first.\n\n"
+                               "While it records you can scrub back and cut a clip; otherwise its "
+                               "newest finished recording opens.")
             return "break"
         raw = None
         if recorder and recorder.is_running:
@@ -1771,41 +1748,45 @@ def main_gui(config):
         if not ok:
             _dialogs.show_info(root, "Streams folder", why)
 
-    # pack(side=RIGHT) first = rightmost. Clip Now is the primary action.
-    clip_now_btn = ttk.Button(status_header, text="Clip Now",
-                              command=_clip_selected_channel, width=10)
-    clip_now_btn.pack(side=tk.RIGHT)
-    clip_now_btn.bind("<Shift-Button-1>", _clip_editor_selected_channel)
-    _Tooltip(clip_now_btn,
-             "Cut a clip of the channel selected in the\n"
-             "status list, using the Clip Length setting.\n"
-             "Shift+click: open the Clip Editor (pick In/Out,\n"
-             "with sound). Right-click a recording for both.")
+    # Left to right: Clip Now (primary, accent) | DVR | Clips | Screenshot | Streams.
+    # pack(side=RIGHT) puts the first packed button rightmost, so they are packed in reverse.
+    streams_folder_btn = ttk.Button(status_header, text="Streams",
+                                    command=_open_recordings_folder, width=8)
+    streams_folder_btn.pack(side=tk.RIGHT)
+    _Tooltip(streams_folder_btn,
+             "Open the recordings folder\n"
+             "(streams_dir: Recorded, Processed, Clips...).")
 
     screenshot_now_btn = ttk.Button(status_header, text="Screenshot",
-                                    command=_screenshot_selected_channel, width=12)
+                                    command=_screenshot_selected_channel, width=11)
     screenshot_now_btn.pack(side=tk.RIGHT, padx=(0, 6))
     _Tooltip(screenshot_now_btn,
              "Grab a still frame from the channel\n"
-             "selected in the status list.\n"
-             "Right-click a recording for the same action.")
+             "selected in the status list.")
 
     clips_folder_btn = ttk.Button(status_header, text="Clips",
-                                  command=_open_selected_clips_dir, width=7)
+                                  command=_open_selected_clips_dir, width=6)
     clips_folder_btn.pack(side=tk.RIGHT, padx=(0, 6))
     _Tooltip(clips_folder_btn,
              "Open the clips & screenshots folder\n"
-             "for the channel selected in the\n"
-             "status list. Right-click a row for\n"
-             "the same action.")
+             "of the channel selected in the status list.")
 
-    streams_folder_btn = ttk.Button(status_header, text="Streams",
-                                    command=_open_recordings_folder, width=8)
-    streams_folder_btn.pack(side=tk.RIGHT, padx=(0, 6))
-    _Tooltip(streams_folder_btn,
-             "Open the recordings folder\n"
-             "(streams_dir from config.ini:\n"
-             "Recorded, Processed, Clips...).")
+    dvr_btn = ttk.Button(status_header, text="DVR",
+                         command=_clip_editor_selected_channel, width=6)
+    dvr_btn.pack(side=tk.RIGHT, padx=(0, 6))
+    _Tooltip(dvr_btn,
+             "Scrub back through a live recording and cut a clip\n"
+             "(Clip Editor: In/Out marks, sound, live edge).\n"
+             "Not recording? Opens the channel's newest finished recording.")
+
+    clip_now_btn = ttk.Button(status_header, text="Clip Now", style="Accent.TButton",
+                              command=_clip_selected_channel, width=9)
+    clip_now_btn.pack(side=tk.RIGHT, padx=(0, 6))
+    clip_now_btn.bind("<Shift-Button-1>", _clip_editor_selected_channel)
+    _Tooltip(clip_now_btn,
+             "Cut the last N seconds (Clip Length setting)\n"
+             "of the channel selected in the status list.\n"
+             "Shift+click or DVR: open the Clip Editor.")
 
     # Whole-disk write + NIC download, right-aligned on its own row under the header.
     # Hidden when psutil is missing — there is no fallback counter.

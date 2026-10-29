@@ -7,7 +7,7 @@ Multi-Stream Recorder watches your favourite live channels on Kick, Twitch, YouT
 ## Highlights
 
 ### Clip Editor
-Cut a clip out of a recording, even while it is still recording. Open it with **Shift+click on Clip Now**, from a channel's right-click menu, or from **Library > Files**.
+Cut a clip out of a recording, even while it is still recording. Open it with the new **DVR** button right next to **Clip Now**, from a channel's right-click menu, or from **Library > Files**.
 - Timeline over the whole recording with **Jump to live**; scrub with an instant preview.
 - **Play with sound** and a volume slider, so you can cut right on a line of dialogue.
 - Smooth preview at the stream's own frame rate up to 60 fps, or **Limit preview to 30 fps** on slower PCs.

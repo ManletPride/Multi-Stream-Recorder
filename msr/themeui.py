@@ -67,6 +67,13 @@ def apply_ttk(root: tk.Misc, style: ttk.Style, t: themes.Theme) -> None:
     style.map("TButton", background=[("active", t["btn_hover"]), ("pressed", t["btn_hover"])],
               foreground=[("disabled", t["disabled_fg"]), ("active", t["btn_hover_fg"]),
                           ("pressed", t["btn_hover_fg"])])
+    # The primary action (Clip Now): accent colours, audited as a contrast pair in msr/themes.py.
+    style.configure("Accent.TButton", background=t["accent"], foreground=t["accent_fg"], padding=[8, 4],
+                    **frame_edge)
+    style.map("Accent.TButton", background=[("active", t["btn_hover"]), ("pressed", t["btn_hover"]),
+                                            ("disabled", t["btn_bg"])],
+              foreground=[("disabled", t["disabled_fg"]), ("active", t["btn_hover_fg"]),
+                          ("pressed", t["btn_hover_fg"])])
     style.configure("TMenubutton", background=t["btn_bg"], foreground=t["btn_fg"], arrowcolor=t["fg"],
                     padding=[8, 4], **frame_edge)
     style.map("TMenubutton", background=[("active", t["btn_hover"]), ("pressed", t["btn_hover"])],

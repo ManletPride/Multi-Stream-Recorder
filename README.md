@@ -41,11 +41,10 @@ This README describes **v3.0.0**. Full history: [CHANGELOG.md](CHANGELOG.md).
 **Status tab**
 - Per-channel status with measured resolution, fps and bitrate; disk write and network meters.
 - Live preview strip of every recording; click a tile to select, double-click to pin a larger preview. A stale preview shows its age.
-- **Clip Now** (last N seconds, stream copy) and **Screenshot**, without interrupting the recording.
-- **Clips** and **Streams** buttons open the clips folder of the selected channel and the recordings folder.
+- The button row, left to right: **Clip Now** (last N seconds, stream copy), **DVR** (open the Clip Editor to scrub back through the recording and cut a clip), **Clips** (the selected channel's clips folder), **Screenshot** and **Streams** (the recordings folder). None of them interrupts the recording.
 
 **Clip Editor**
-- Open it with **Shift+click on Clip Now**, **right-click a channel > Clip Editor…**, or **Library > Files > right-click > Clip Editor…** for any finished recording.
+- Open it with the **DVR** button next to Clip Now (or Shift+click Clip Now), **right-click a channel > Clip Editor…**, or **Library > Files > right-click > Clip Editor…** for any finished recording.
 - A timeline over the whole recording so far, with **Jump to live** while it is still recording. Click or drag to scrub; a far jump shows the nearest keyframe at once, then the exact frame.
 - **Play with sound** and a **Volume** slider, so you can cut on dialogue. Playback runs at the recording's frame rate up to 60 fps; tick **Limit preview to 30 fps** on slower PCs (remembered).
 - **Mark In / Mark Out** (I / O keys), nudge buttons, **Replay In / Out** and the clip length.
