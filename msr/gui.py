@@ -26,6 +26,7 @@ from msr import library as _library
 from msr import library_actions as _library_actions
 from msr import library_manage as _library_manage
 from msr import library_window as _library_window
+from msr import preview_state as _preview_state
 from msr import winstate as _winstate
 from msr import restore_dialog as _restore_dialog
 from msr import logview
@@ -1415,6 +1416,9 @@ def main_gui(config):
     _preview_busy = [False]
     _preview_big = [None]
     _preview_big_photo = [None]
+    _pstate = _preview_state.PreviewState()  # last_ok, working seek, back-off per channel (Tk-free)
+    _preview_after = [None]   # the pending _tick_previews timer, so a kick can replace it
+    _preview_kick = [False]   # an immediate tick is already queued
 
     preview_wrap = tk.Frame(status_tab)
     preview_wrap.pack(fill=tk.X, padx=10, pady=(0, 6))
@@ -2431,8 +2435,11 @@ def main_gui(config):
         if _preview_big[0] == ch_name:
             _hide_big_preview()
             return
+        if _pstate.status(ch_name).kind == "ended":
+            return  # only its last frame is left; nothing to pin
         _preview_big[0] = ch_name
         preview_big_name.configure(text=_get_display_name(ch_name))
+        _style_big_preview(_themes.current())
         try:
             packed = bool(preview_big_frame.pack_info())
         except tk.TclError:
@@ -2492,16 +2499,32 @@ def main_gui(config):
             except tk.TclError:
                 continue
 
+    def _style_preview_tile(ch_name, t, selected):
+        """Border, name and age text of one tile: selected, stale ("12 s"), or ended."""
+        tile = _preview_tiles.get(ch_name)
+        if not tile:
+            return
+        look = _preview_state.tile_look(_pstate.status(ch_name), t, selected)
+        tile["frame"].configure(highlightbackground=look.border, highlightthickness=look.thickness)
+        tile["name"].configure(text=_get_display_name(ch_name) + look.suffix, fg=look.name_fg)
+
+    def _style_big_preview(t):
+        ch_name = _preview_big[0]
+        if not ch_name:
+            return
+        st = _pstate.status(ch_name)
+        look = _preview_state.tile_look(st, t)
+        border = _preview_state.pane_border(st, t)
+        preview_big_frame.configure(highlightbackground=border, highlightcolor=border)
+        preview_big_name.configure(text=_get_display_name(ch_name) + look.suffix, fg=look.name_fg)
+
     def _paint_preview_selection(ch_name):
-        """Accent the active tile. No update_idletasks — that nested the Tk loop."""
+        """Accent the active tile and show each tile's age. No update_idletasks: that nested the Tk loop."""
         t = _themes.current()
         _preview_selected[0] = ch_name
-        for name, tile in _preview_tiles.items():
-            on = name == ch_name
-            tile["frame"].configure(
-                highlightbackground=t["accent"] if on else t["border"],
-                highlightthickness=2 if on else 1,
-            )
+        for name in _preview_tiles:
+            _style_preview_tile(name, t, name == ch_name)
+        _style_big_preview(t)
 
     def _scroll_nav_into_view(ch_name):
         if not ch_name:
@@ -2571,21 +2594,29 @@ def main_gui(config):
 
     def _sync_preview_tiles(keys):
         t = _themes.current()
+        for ch_name in keys:
+            _pstate.mark_active(ch_name)
+        shown = list(keys)
         for ch_name in list(_preview_tiles):
-            if ch_name not in keys:
-                _preview_tiles[ch_name]["frame"].destroy()
-                _preview_tiles.pop(ch_name, None)
-                _preview_photos.pop(ch_name, None)
-        if not keys:
-            preview_empty.pack(side=tk.LEFT)
-            preview_canvas.configure(height=28)
-            _hide_big_preview()
-            return
+            if ch_name in keys:
+                continue
+            _pstate.mark_ended(ch_name)
+            if _pstate.keep_ended(ch_name):
+                shown.append(ch_name)  # its last frame stays for a while, labelled "ended"
+                continue
+            _preview_tiles[ch_name]["frame"].destroy()
+            _preview_tiles.pop(ch_name, None)
+            _preview_photos.pop(ch_name, None)
+            _pstate.forget(ch_name)
         if _preview_big[0] and _preview_big[0] not in keys:
             _hide_big_preview()
+        if not shown:
+            preview_empty.pack(side=tk.LEFT)
+            preview_canvas.configure(height=28)
+            return
         preview_empty.pack_forget()
-        preview_canvas.configure(height=PREVIEW_H + 28)
-        for ch_name in keys:
+        preview_canvas.configure(height=PREVIEW_H + 42)  # room for a name that wraps to two lines
+        for ch_name in shown:
             if ch_name in _preview_tiles:
                 continue
             tile = tk.Frame(preview_inner, padx=4, pady=4,
@@ -2614,10 +2645,10 @@ def main_gui(config):
                 if tile["frame"] is child:
                     packed.append(name)
                     break
-        if packed != list(keys):
-            for ch_name in keys:
+        if packed != shown:
+            for ch_name in shown:
                 _preview_tiles[ch_name]["frame"].pack_forget()
-            for ch_name in keys:
+            for ch_name in shown:
                 _preview_tiles[ch_name]["frame"].pack(side=tk.LEFT, padx=(0, 6))
         _paint_preview_selection(_preview_selected[0])
 
@@ -2651,20 +2682,33 @@ def main_gui(config):
                     png_path=big_path,
                     from_small=_preview_photos.get(ch_name),
                 )
+        _paint_preview_selection(_preview_selected[0])  # ages: a channel whose grabs fail goes stale
 
     def _tick_previews():
+        _preview_kick[0] = False
         try:
             if not root.winfo_exists():
                 return
         except tk.TclError:
             return
-        root.after(PREVIEW_MS, _tick_previews)
+        if _preview_after[0] is not None:
+            try:
+                root.after_cancel(_preview_after[0])  # a kick must not leave two timer chains running
+            except tk.TclError:
+                pass
+        _preview_after[0] = root.after(PREVIEW_MS, _tick_previews)
+        try:
+            if not preview_wrap.winfo_viewable():
+                return  # Status tab hidden or window minimised: nobody can see it, so no ffmpeg
+        except tk.TclError:
+            return
         if _preview_busy[0]:
             return
         jobs = _recording_preview_jobs()
         keys = [ch for ch, _path in jobs]
         if not jobs:
             _sync_preview_tiles([])
+            _paint_preview_selection(_preview_selected[0])
             return
         _preview_busy[0] = True
         ffmpeg_path = config.get("Advanced", "ffmpeg_path", fallback="ffmpeg")
@@ -2677,17 +2721,29 @@ def main_gui(config):
                         ch_name, "screenshot"
                     ) in _media_jobs_in_flight:
                         continue
+                    _pstate.note_source(ch_name, raw_file)
+                    if not _pstate.due(ch_name):
+                        continue  # every seek failed lately; wait out the back-off
                     out = _preview_cache_file(ch_name)
-                    ok, _msg = create_preview_frame(
+                    started = _pstate.clock()
+                    report = {}
+                    ok, msg = create_preview_frame(
                         raw_file, out, ffmpeg_path, logging,
                         width=PREVIEW_W, height=PREVIEW_H,
+                        attempts=_pstate.plan(ch_name), report=report,
                     )
+                    if ok:
+                        _pstate.record_success(ch_name, report.get("attempt"))
+                    else:
+                        wait = _pstate.record_failure(ch_name, started)
+                        logging.debug("Preview grab failed for %s (%s); next try in %.0f s", ch_name, msg, wait)
                     big_out = None
                     if ok and _preview_big[0] == ch_name:
                         big_path = _preview_cache_file(ch_name, "_big")
                         ok_big, _msg = create_preview_frame(
                             raw_file, big_path, ffmpeg_path, logging,
                             width=PREVIEW_BIG_W, height=PREVIEW_BIG_H,
+                            attempts=_pstate.plan(ch_name, allow_retry=False),
                         )
                         if ok_big:
                             big_out = big_path
@@ -2700,6 +2756,21 @@ def main_gui(config):
                 _preview_busy[0] = False
 
         threading.Thread(target=_work, daemon=True, name="preview-grab").start()
+
+    def _kick_previews(_event=None):
+        """Grab now (the strip just became visible) instead of waiting for the next timer."""
+        if _preview_kick[0]:
+            return
+        _preview_kick[0] = True
+        try:
+            root.after_idle(_tick_previews)
+        except tk.TclError:
+            _preview_kick[0] = False
+
+    preview_wrap.bind("<Map>", _kick_previews, add="+")
+    notebook.bind("<<NotebookTabChanged>>", _kick_previews, add="+")
+    # Restoring a minimised window maps only the toplevel, not the strip inside it.
+    root.bind("<Map>", lambda e: _kick_previews() if e.widget is root else None, add="+")
 
     def _reorder_status_rows():
         """Apply roster order, with Recording/Remuxing first when enabled."""

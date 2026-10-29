@@ -22,6 +22,7 @@ from msr.config import (
     parser_getint,
 )
 from msr.deps import HAS_CURL_CFFI, HAS_YTDLP
+from msr.preview_state import build_ladder
 from msr.platforms import (
     FishtankAuth,
     build_recording_command_ffmpeg_merge,
@@ -756,12 +757,20 @@ def preview_scale_filter(width=160, height=90):
 
 
 def create_preview_frame(raw_file, output_file, ffmpeg_path, logger,
-                         width=160, height=90, offset_seconds=3.0, timeout=12):
+                         width=160, height=90, offset_seconds=3.0, timeout=12,
+                         attempts=None, report=None):
     """Grab a small still from near the live edge of *raw_file* for the GUI.
 
     Same seek-before-EOF idea as ``create_screenshot`` (incomplete last GOP),
     but scales to a thumbnail, writes PNG (tk.PhotoImage), and hides the
     ffmpeg console. Failures are quiet — previews are best-effort.
+
+    *attempts* is the seeks to try, in order, as ``(mode, seconds, fast)`` rungs of
+    ``msr.preview_state.LADDER`` (the GUI passes the channel's remembered one first). When it is
+    None the first three rungs for *offset_seconds* are used. *fast* adds ``-skip_frame nokey``:
+    only key frames are decoded, which costs a fraction of the CPU but means the picture can be up
+    to one key-frame interval older than the live edge. Every attempt runs on one decoder thread
+    (``-threads 1``). If *report* is a dict, ``report["attempt"]`` is set to the rung that worked.
     """
     if not raw_file or not os.path.exists(raw_file):
         return False, "recording file not found"
@@ -776,14 +785,12 @@ def create_preview_frame(raw_file, output_file, ffmpeg_path, logger,
     # Prefer -sseof so a 4s GUI tick does not ffprobe every channel first.
     # Fall back to elapsed -ss (same as screenshots) if the live tail is junk.
     duration = None
-    attempts = [
-        ("sseof", offset_seconds),
-        ("sseof", offset_seconds * 2),
-        ("ss", offset_seconds),
-    ]
+    if attempts is None:
+        attempts = build_ladder(offset_seconds)[:3]
     last_error = "no frame"
 
-    for mode, offset in attempts:
+    for rung in attempts:
+        mode, offset, fast = rung
         if mode == "ss":
             if duration is None:
                 duration = _probe_duration(ffmpeg_path, raw_file)
@@ -792,8 +799,12 @@ def create_preview_frame(raw_file, output_file, ffmpeg_path, logger,
             seek_args = ["-ss", f"{max(0.0, duration - offset):.2f}"]
         else:
             seek_args = ["-sseof", f"-{offset:.2f}"]
+        # Input options (before -i) apply to the decoder: one thread, and for the fast rungs key
+        # frames only. A default multi-threaded decode of every frame since the seek cost 2-10x more CPU.
+        decode_args = ["-threads", "1"] + (["-skip_frame", "nokey"] if fast else [])
         cmd = [
             ffmpeg_path, "-hide_banner", "-y",
+            *decode_args,
             *seek_args,
             "-i", raw_file,
             "-map", "0:v:0", "-an",
@@ -823,6 +834,8 @@ def create_preview_frame(raw_file, output_file, ffmpeg_path, logger,
 
         wrote = os.path.exists(output_file) and os.path.getsize(output_file) > 200
         if result.returncode == 0 and wrote:
+            if report is not None:
+                report["attempt"] = rung
             return True, "ok"
         if os.path.exists(output_file) and not wrote:
             try:
