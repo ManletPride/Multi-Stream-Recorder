@@ -63,7 +63,7 @@ def dir_rows(paths) -> list[DirRow]:
     return rows
 
 
-def visible_recs(recs, extra_orphan_sidecars: bool = True) -> list:
+def visible_recs(recs) -> list:
     """The rows to list: the info files (.meta.json) that go along with a video are not listed
     separately; lone ones are."""
     stems = {os.path.splitext(r.path)[0].lower() for r in recs if r.kind != "sidecar"}

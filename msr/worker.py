@@ -22,7 +22,7 @@ from msr.config import (
     parser_getint,
 )
 from msr import storage
-from msr.deps import HAS_CURL_CFFI, HAS_PSUTIL, HAS_YTDLP
+from msr.deps import HAS_PSUTIL
 from msr.preview_state import build_ladder
 from msr.platforms import (
     FishtankAuth,
@@ -1487,8 +1487,6 @@ def _run_remux_cmd(ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file, logger, timeout,
 
     Returns ``(returncode, stderr_text)``.
     """
-    import re as _re
-
     # Probe source duration so we can compute % complete from out_time_ms.
     total_secs = _probe_duration(ffmpeg_path, raw_file)
 

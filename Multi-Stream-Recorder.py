@@ -53,30 +53,34 @@ import signal
 import sys
 import threading
 
-try:
-    from msr import __version__
-    from msr.config import Config
-    from msr.paths import ENV_VAR as DATA_DIR_ENV, activate_data_dir, resolve_data_dir
-    from msr import deps as _deps
-    from msr.deps import (
-        DENO_VERSION, HAS_CURL_CFFI, HAS_DENO,
-        HAS_NOTIFICATIONS, HAS_PSUTIL, HAS_STREAMLINK, HAS_TRAY, HAS_YTDLP,
-        STREAMLINK_VERSION, YTDLP_VERSION,
-    )
-    from msr.gui import main_gui
-    from msr.recorder import StreamRecorder, finish_headless_session, purge_old_pending_files
-    from msr.util import (
-        activate_existing_instance,
-        coerce_channel_records,
-        kill_orphan_recording_processes,
-        redact_for_log,
-        setup_logging,
-        try_acquire_single_instance,
-        validate_startup,
-    )
-except Exception as _import_error:  # no console under pythonw: leave a trace instead of vanishing
-    _startup_error.report_crash(_import_error, headless='--headless' in sys.argv)
-    raise
+# A spawned recording worker re-runs this file as ``__mp_main__`` before it unpickles
+# ``msr.worker.record_worker``. Skip the GUI-side imports there: they loaded tkinter, the
+# whole GUI and the tray/notification libraries into every worker (about 1.3 s per start).
+if __name__ != "__mp_main__":
+    try:
+        from msr import __version__
+        from msr.config import Config
+        from msr.paths import ENV_VAR as DATA_DIR_ENV, activate_data_dir, resolve_data_dir
+        from msr import deps as _deps
+        from msr.deps import (
+            DENO_VERSION, HAS_CURL_CFFI, HAS_DENO,
+            HAS_NOTIFICATIONS, HAS_PSUTIL, HAS_STREAMLINK, HAS_TRAY, HAS_YTDLP,
+            STREAMLINK_VERSION, YTDLP_VERSION,
+        )
+        from msr.gui import main_gui
+        from msr.recorder import StreamRecorder, finish_headless_session, purge_old_pending_files
+        from msr.util import (
+            activate_existing_instance,
+            coerce_channel_records,
+            kill_orphan_recording_processes,
+            redact_for_log,
+            setup_logging,
+            try_acquire_single_instance,
+            validate_startup,
+        )
+    except Exception as _import_error:  # no console under pythonw: leave a trace instead of vanishing
+        _startup_error.report_crash(_import_error, headless='--headless' in sys.argv)
+        raise
 
 
 def main_headless(config):

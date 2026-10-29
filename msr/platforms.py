@@ -2,8 +2,8 @@
 import base64
 import datetime
 import html as _html
+import http.cookiejar
 import json
-import logging
 import os
 import re
 import subprocess
@@ -78,7 +78,7 @@ def check_stream_kick_api(channel_name, logger, timeout=15, cookies_file=None):
         if result.stderr:
             stderr_lower = result.stderr.lower()
             if "403" in stderr_lower:
-                logger.warning(f"Kick streamlink: 403 in stderr")
+                logger.warning("Kick streamlink: 403 in stderr")
                 return None, None, "403 (Cloudflare)"
             elif "no plugin" in stderr_lower:
                 logger.warning("Kick streamlink: no plugin for Kick URLs")
@@ -124,7 +124,6 @@ def parse_rumble_channel_html(page_html, logger):
     Returns (live_url: str | None, title: str | None, hls_url: str | None).
     """
     import re as _re
-    import html as _html
 
     # ── Primary: the embedded JSON grid payload ──
     # Capture the whole script body (not \{.*?\} which stops at the first
@@ -178,9 +177,6 @@ def fetch_rumble_page(page_url, logger, timeout=20, cookies_file=None):
     Returns (html: str | None, error: str | None).  Raising is avoided so
     callers can treat a fetch failure the same as "nothing live found".
     """
-    import urllib.request
-    import urllib.error
-    import http.cookiejar
 
     opener = urllib.request.build_opener()
     if cookies_file:
@@ -283,7 +279,6 @@ def _find_rumble_live_url(url, logger, timeout, cookies_file, impersonate=False)
     Only called when ``url`` looks like a Rumble channel/user page (not a
     direct video URL).
     """
-    import re as _re
     cmd = ["yt-dlp", "--flat-playlist", "--dump-json"]
     if impersonate and HAS_CURL_CFFI:
         cmd.extend(["--impersonate", "chrome"])
@@ -439,8 +434,6 @@ def check_tiktok_live_webcast(username, cookies_file, logger, timeout=30):
 
     Returns (is_live, room_id, title, error).
     """
-    import urllib.request
-    import http.cookiejar
 
     handle = (username or "").lstrip("@")
     cj = http.cookiejar.MozillaCookieJar()
@@ -1042,7 +1035,6 @@ class FishtankAuth:
             # Discover the real serving host for each online stream via thumbnail.
             # Use the loadBalancer host as the starting point for the thumbnail
             # request — the thumbnail always responds from the real node.
-            import urllib.request, urllib.error
             for sid in list(streams.keys()):
                 candidate_host = lb.get(sid, self._stream_host)
                 thumb_url = (
@@ -1102,7 +1094,6 @@ class FishtankAuth:
                     f"[fishtank] curl_cffi fetch failed ({e}), retrying with urllib")
 
         # ── urllib fallback ────────────────────────────────────────────────
-        import urllib.request, urllib.error
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=15) as resp:
@@ -1122,7 +1113,6 @@ class FishtankAuth:
 
         Returns the JWT string, or None if not found / already expired.
         """
-        import urllib.parse, base64
         if not self._cookies_file or not os.path.isfile(self._cookies_file):
             return None
         try:
@@ -1171,7 +1161,6 @@ class FishtankAuth:
 
         If all paths fail, self._jwt is set to None and the error is logged.
         """
-        import urllib.request, urllib.error, http.cookiejar
         self._logger.info("[fishtank] Refreshing JWT")
 
         # ── Strategy 1: POST login with email+password (most reliable) ────
@@ -1260,7 +1249,6 @@ class FishtankAuth:
             if HAS_CURL_CFFI:
                 try:
                     from curl_cffi import requests as cffi_requests
-                    import http.cookiejar as _cj_mod
                     cffi_headers = self._common_headers()
                     r2 = cffi_requests.get(
                         self._AUTH_URL, headers=cffi_headers,
@@ -1350,7 +1338,6 @@ class FishtankAuth:
                 return None
 
             # urllib fallback
-            import urllib.request, urllib.error
             req = urllib.request.Request(
                 self._LOGIN_URL,
                 data=payload,
@@ -1384,7 +1371,6 @@ class FishtankAuth:
 
         Returns a unix timestamp, defaulting to (now + 23h) if decoding fails.
         """
-        import base64
         try:
             payload_b64 = jwt_string.split(".")[1]
             # Add padding if needed
@@ -1439,7 +1425,6 @@ def check_stream_fishtank(stream_id, auth, logger, timeout=20):
 
     Returns (is_live: bool, stream_name: str | None, error: str | None).
     """
-    import urllib.request, urllib.error
 
     resolved_id = auth.resolve_stream_id(stream_id)
 
@@ -1541,7 +1526,7 @@ def resolve_best_fishtank_variant(master_url, jwt, logger, timeout=10):
     Returns the best-variant URL string, or master_url unchanged if the playlist
     cannot be fetched/parsed (fail-open so recording still proceeds).
     """
-    import urllib.request, urllib.error, re as _re
+    import re as _re
 
     try:
         req = urllib.request.Request(

@@ -20,7 +20,7 @@ import urllib.request
 from msr import deps
 from msr.nowindow import no_window_kwargs
 from msr.deps import (
-    HAS_CURL_CFFI, HAS_DENO, HAS_PSUTIL,
+    HAS_DENO, HAS_PSUTIL,
     HAS_STREAMLINK, HAS_YTDLP, psutil,
 )
 
@@ -517,9 +517,6 @@ def check_for_updates(current_version, callback=None):
     """
     def _check():
         try:
-            import urllib.request
-            import urllib.error
-
             url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
             req = urllib.request.Request(url, headers={
                 'Accept': 'application/vnd.github+json',
@@ -1319,7 +1316,7 @@ def window_title_is_msr(title):
 def single_instance_mutex_name(streams_dir):
     """Windows mutex name, unique per recordings folder."""
     key = os.path.normcase(os.path.abspath(streams_dir or "default"))
-    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha1(key.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
     return f"Local\\MultiStreamRecorder-{digest}"
 
 
@@ -1334,7 +1331,6 @@ def try_acquire_single_instance(streams_dir, logger=None):
     Fail-open: if the lock cannot be created, this process continues so a
     mutex/flock error never prevents recording.
     """
-    global _instance_lock
     if _instance_lock is not None:
         return True
     if os.name == "nt":
@@ -1593,6 +1589,19 @@ def _plan_orphan_kills(procs, streams_dir, keep_pids, spawn_open_paths=None):
     return sorted(workers), sorted(leftover_captures)
 
 
+def _ppid_map():
+    """``{pid: parent pid}`` for every process from one system snapshot.
+
+    Asking each process for its ``ppid`` cost about 1 s for ~300 processes on Windows (psutil
+    7), on the main thread before the window and before any recording could start. The
+    snapshot takes a few ms. Empty if this psutil has no such call (callers then ask per process).
+    """
+    try:
+        return dict(psutil._psplatform.ppid_map())
+    except Exception:
+        return {}
+
+
 def _descendant_pids(pid):
     if not HAS_PSUTIL:
         return set()
@@ -1628,7 +1637,9 @@ def kill_orphan_recording_processes(logger=None, streams_dir=None, keep_pid=None
     if HAS_PSUTIL:
         try:
             rows = []
-            for proc in psutil.process_iter(["pid", "name", "cmdline", "ppid"]):
+            parents = _ppid_map()
+            attrs = ["pid", "name", "cmdline"] + ([] if parents else ["ppid"])
+            for proc in psutil.process_iter(attrs):
                 try:
                     info = proc.info
                     pid = info.get("pid")
@@ -1638,7 +1649,7 @@ def kill_orphan_recording_processes(logger=None, streams_dir=None, keep_pid=None
                         "pid": pid,
                         "name": info.get("name") or "",
                         "cmdline": info.get("cmdline") or [],
-                        "parent_pid": info.get("ppid") or 0,
+                        "parent_pid": parents.get(pid, 0) if parents else (info.get("ppid") or 0),
                     })
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
@@ -1743,7 +1754,7 @@ def redact_for_log(text):
     text = str(text)
 
     def _param(m):
-        sep, key, _val = m.group(1), m.group(2), m.group(3)
+        sep, key = m.group(1), m.group(2)
         kl = key.lower()
         if kl in _SENSITIVE_QUERY_KEYS or any(p in kl for p in _SENSITIVE_QUERY_SUBSTR):
             return f"{sep}{key}=***"

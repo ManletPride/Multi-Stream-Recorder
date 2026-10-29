@@ -1,5 +1,6 @@
 """Optional/required tool detection (yt-dlp, streamlink, ffmpeg, …)."""
 import importlib.util
+import json
 import os
 import sys
 import subprocess
@@ -53,35 +54,42 @@ except ImportError:
     HAS_PSUTIL = False
 
 try:
-    from colorama import init as colorama_init, Fore, Style
+    from colorama import init as colorama_init
     colorama_init(autoreset=True)
     HAS_COLORAMA = True
 except ImportError:
     HAS_COLORAMA = False
 
-try:
-    import pystray
-    from PIL import Image, ImageDraw
-    HAS_TRAY = True
-except ImportError:
-    HAS_TRAY = False
-    pystray = None
-    Image = None
-    ImageDraw = None
-except Exception:
-    # On Linux, pystray's Xorg backend tries to connect to a display at
-    # import time and raises Xlib.error.DisplayNameError (not ImportError)
-    HAS_TRAY = False
-    pystray = None
-    Image = None
-    ImageDraw = None
+# Tray and notification libraries are only needed by the GUI. They are imported on first
+# use (module __getattr__ below), so recording workers never load pystray, PIL or plyer.
+_LAZY_GUI_NAMES = ("HAS_TRAY", "pystray", "Image", "ImageDraw",
+                   "HAS_NOTIFICATIONS", "plyer_notification")
 
-try:
-    from plyer import notification as plyer_notification
-    HAS_NOTIFICATIONS = True
-except ImportError:
-    HAS_NOTIFICATIONS = False
-    plyer_notification = None
+
+def _load_gui_extras():
+    found = {}
+    try:
+        import pystray as _pystray
+        from PIL import Image as _Image, ImageDraw as _ImageDraw
+        found.update(HAS_TRAY=True, pystray=_pystray, Image=_Image, ImageDraw=_ImageDraw)
+    except Exception:
+        # ImportError, or on Linux pystray's Xorg backend raising
+        # Xlib.error.DisplayNameError at import time without a display
+        found.update(HAS_TRAY=False, pystray=None, Image=None, ImageDraw=None)
+    try:
+        from plyer import notification as _plyer_notification
+        found.update(HAS_NOTIFICATIONS=True, plyer_notification=_plyer_notification)
+    except ImportError:
+        found.update(HAS_NOTIFICATIONS=False, plyer_notification=None)
+    globals().update(found)
+
+
+def __getattr__(name):
+    if name in _LAZY_GUI_NAMES:
+        _load_gui_extras()
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 def check_ytdlp():
     """Check if yt-dlp is installed and return version string or None."""
@@ -149,12 +157,31 @@ def check_ffprobe(path="ffprobe"):
         return False
 
 
-YTDLP_VERSION = check_ytdlp()
-HAS_YTDLP = YTDLP_VERSION is not None
-STREAMLINK_VERSION = check_streamlink()
-HAS_STREAMLINK = STREAMLINK_VERSION is not None
-FFMPEG_VERSION = check_ffmpeg()
-HAS_FFMPEG = FFMPEG_VERSION is not None
+# The four "--version" probes run once, in parallel, in the main process; the results are
+# handed to recording workers (spawned children inherit the environment) through
+# TOOL_VERSIONS_ENV, so a worker start does not launch four more processes.
+TOOL_VERSIONS_ENV = "MSR_TOOL_VERSIONS"
+
+
+def _tool_versions():
+    cached = os.environ.get(TOOL_VERSIONS_ENV)
+    if cached:
+        try:
+            found = json.loads(cached)
+            if isinstance(found, dict):
+                return found
+        except ValueError:
+            pass
+    from concurrent.futures import ThreadPoolExecutor
+    checks = {"yt-dlp": check_ytdlp, "streamlink": check_streamlink,
+              "ffmpeg": check_ffmpeg, "deno": check_deno}
+    with ThreadPoolExecutor(max_workers=len(checks)) as pool:
+        futures = {name: pool.submit(fn) for name, fn in checks.items()}
+        found = {name: f.result() for name, f in futures.items()}
+    os.environ[TOOL_VERSIONS_ENV] = json.dumps(found)
+    return found
+
+
 # The ffmpeg the program is configured to use. Starts as the PATH lookup above;
 # ``configure_ffmpeg`` re-points it at ``[Advanced] ffmpeg_path`` once the config is known.
 FFMPEG_PATH = "ffmpeg"
@@ -181,7 +208,6 @@ def configure_ffmpeg(path):
 # Check if curl_cffi is available for browser impersonation (needed for Cloudflare-protected sites)
 HAS_CURL_CFFI = False
 try:
-    import importlib.util
     HAS_CURL_CFFI = importlib.util.find_spec("curl_cffi") is not None
 except Exception:
     pass
@@ -191,7 +217,6 @@ except Exception:
 # instead of waiting for the next poll).  pip install websocket-client
 HAS_WEBSOCKET = False
 try:
-    import importlib.util
     HAS_WEBSOCKET = importlib.util.find_spec("websocket") is not None
 except Exception:
     pass
@@ -220,5 +245,12 @@ def check_deno():
         return None
 
 
-DENO_VERSION = check_deno()
+_VERSIONS = _tool_versions()
+YTDLP_VERSION = _VERSIONS.get("yt-dlp")
+HAS_YTDLP = YTDLP_VERSION is not None
+STREAMLINK_VERSION = _VERSIONS.get("streamlink")
+HAS_STREAMLINK = STREAMLINK_VERSION is not None
+FFMPEG_VERSION = _VERSIONS.get("ffmpeg")
+HAS_FFMPEG = FFMPEG_VERSION is not None
+DENO_VERSION = _VERSIONS.get("deno")
 HAS_DENO = DENO_VERSION is not None
