@@ -3,7 +3,6 @@
 ``record_worker`` is the multiprocessing target — it must stay a top-level
 function in this module so Windows ``spawn`` can pickle it.
 """
-import configparser
 import datetime
 import json
 import logging
@@ -17,6 +16,7 @@ import time
 from msr import __version__
 from msr.config import (
     default_streams_dir,
+    new_parser,
     parser_getboolean,
     parser_getfloat,
     parser_getint,
@@ -1933,7 +1933,7 @@ def record_worker(args):
     (channel_entry, config_dict, stop_event, status_queue, wake_event, runtime) = args
 
     # Reconstruct config in child process
-    config = configparser.ConfigParser()
+    config = new_parser()
     config.read_dict(config_dict)
 
     channel_key = channel_entry

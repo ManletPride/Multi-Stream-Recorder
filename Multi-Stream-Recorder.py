@@ -43,6 +43,7 @@ so Windows spawn does not re-run the GUI.
 """
 
 import msr.nowindow  # noqa: F401  (must come first: hides child console windows)
+from msr import startup_error as _startup_error
 import argparse
 import json
 import logging
@@ -52,25 +53,30 @@ import signal
 import sys
 import threading
 
-from msr import __version__
-from msr.config import Config
-from msr.paths import ENV_VAR as DATA_DIR_ENV, activate_data_dir, resolve_data_dir
-from msr.deps import (
-    DENO_VERSION, FFMPEG_VERSION, HAS_CURL_CFFI, HAS_DENO, HAS_FFMPEG,
-    HAS_NOTIFICATIONS, HAS_PSUTIL, HAS_STREAMLINK, HAS_TRAY, HAS_YTDLP,
-    STREAMLINK_VERSION, YTDLP_VERSION,
-)
-from msr.gui import main_gui
-from msr.recorder import StreamRecorder, purge_old_pending_files
-from msr.util import (
-    activate_existing_instance,
-    coerce_channel_records,
-    kill_orphan_recording_processes,
-    redact_for_log,
-    setup_logging,
-    try_acquire_single_instance,
-    validate_startup,
-)
+try:
+    from msr import __version__
+    from msr.config import Config
+    from msr.paths import ENV_VAR as DATA_DIR_ENV, activate_data_dir, resolve_data_dir
+    from msr import deps as _deps
+    from msr.deps import (
+        DENO_VERSION, HAS_CURL_CFFI, HAS_DENO,
+        HAS_NOTIFICATIONS, HAS_PSUTIL, HAS_STREAMLINK, HAS_TRAY, HAS_YTDLP,
+        STREAMLINK_VERSION, YTDLP_VERSION,
+    )
+    from msr.gui import main_gui
+    from msr.recorder import StreamRecorder, finish_headless_session, purge_old_pending_files
+    from msr.util import (
+        activate_existing_instance,
+        coerce_channel_records,
+        kill_orphan_recording_processes,
+        redact_for_log,
+        setup_logging,
+        try_acquire_single_instance,
+        validate_startup,
+    )
+except Exception as _import_error:  # no console under pythonw: leave a trace instead of vanishing
+    _startup_error.report_crash(_import_error, headless='--headless' in sys.argv)
+    raise
 
 
 def main_headless(config):
@@ -114,11 +120,12 @@ def main_headless(config):
     shutdown_requested = threading.Event()
 
     def signal_handler(signum, frame):
+        # Only ask the main thread to unwind: the stop and the cleanup that follows it run
+        # below, in order, instead of inside a signal handler followed by an instant exit.
         if not shutdown_requested.is_set():
             shutdown_requested.set()
-            print("\nShutdown requested — stopping all recordings...")
-            recorder.stop()
-            sys.exit(0)
+            print("\nShutdown requested - stopping all recordings...")
+            raise KeyboardInterrupt
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -126,10 +133,8 @@ def main_headless(config):
     try:
         recorder.run()
     except KeyboardInterrupt:
-        if not shutdown_requested.is_set():
-            shutdown_requested.set()
-            print("\nKeyboardInterrupt — stopping all recordings...")
-            recorder.stop()
+        shutdown_requested.set()
+    finish_headless_session(recorder)
 
 
 def _safe_console():
@@ -197,10 +202,12 @@ examples:
 
     setup_logging(config.get('Paths', 'streams_dir'), config)
 
+    _deps.configure_ffmpeg(config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg'))
+
     logging.info(f"Multi-Stream Recorder v{__version__} starting...")
     logging.info(f"yt-dlp available: {HAS_YTDLP} (version: {YTDLP_VERSION})")
     logging.info(f"streamlink available: {HAS_STREAMLINK} (version: {STREAMLINK_VERSION})")
-    logging.info(f"ffmpeg available: {HAS_FFMPEG} (version: {FFMPEG_VERSION})")
+    logging.info(f"ffmpeg available: {_deps.HAS_FFMPEG} (version: {_deps.FFMPEG_VERSION})")
     logging.info(f"psutil available: {HAS_PSUTIL}")
     logging.info(f"curl_cffi available: {HAS_CURL_CFFI} (browser impersonation)")
     logging.info(f"deno available: {HAS_DENO} (version: {DENO_VERSION}) (YouTube n-challenge solving)")
@@ -257,35 +264,14 @@ examples:
         for e in errors:
             logging.error(f"STARTUP ERROR: {e.splitlines()[0]}")
 
-        if not args.headless:
-            try:
-                import tkinter as tk
-                from tkinter import messagebox
-                _err_root = tk.Tk()
-                _err_root.withdraw()
-                detail = "\n\n".join(errors)
-                messagebox.showerror(
-                    "Multi-Stream Recorder — Missing Dependencies",
-                    f"The following critical issues were found:\n\n{detail}\n\n"
-                    "The program cannot start until these are resolved.",
-                    parent=_err_root,
-                )
-                _err_root.destroy()
-            except Exception:
-                pass
-
-            print("\n" + "=" * 60)
-            print("FATAL: Cannot start — missing critical dependencies:")
-            print("=" * 60)
-            for e in errors:
-                print(f"\n  ✗ {e}")
-            print()
-            sys.exit(1)
-        else:
-            print("\nFATAL: Cannot start — missing critical dependencies:")
-            for e in errors:
-                print(f"  ✗ {e}")
-            sys.exit(1)
+        detail = "\n\n".join(errors)
+        _startup_error.report_failure(
+            "Multi-Stream Recorder - Cannot start",
+            f"The following critical issues were found:\n\n{detail}\n\n"
+            "The program cannot start until these are resolved.",
+            headless=args.headless,
+        )
+        sys.exit(1)
 
     if warnings:
         for w in warnings:
@@ -308,4 +294,10 @@ examples:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except BaseException as _error:
+        _startup_error.report_crash(_error, headless='--headless' in sys.argv)
+        raise

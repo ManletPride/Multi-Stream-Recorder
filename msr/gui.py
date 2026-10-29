@@ -13,12 +13,13 @@ from tkinter import ttk
 
 from msr import __version__
 from msr.deps import (
-    DENO_VERSION, FFMPEG_VERSION, HAS_CURL_CFFI, HAS_DENO, HAS_FFMPEG,
+    DENO_VERSION, HAS_CURL_CFFI, HAS_DENO,
     HAS_NOTIFICATIONS, HAS_PSUTIL, HAS_STREAMLINK, HAS_TRAY, HAS_WEBSOCKET,
     HAS_YTDLP, STREAMLINK_VERSION, YTDLP_VERSION,
     Image, ImageDraw, plyer_notification, pystray,
 )
 from msr import channel_panel as cp
+from msr import deps as _deps  # read _deps.HAS_FFMPEG at use time: configure_ffmpeg updates it
 from msr.config import default_streams_dir
 from msr import dialogs as _dialogs
 from msr import history as _history
@@ -1340,7 +1341,7 @@ def main_gui(config):
         deps = []
         deps.append(f"yt-dlp {YTDLP_VERSION}" if HAS_YTDLP else "yt-dlp: not found")
         deps.append(f"streamlink {STREAMLINK_VERSION}" if HAS_STREAMLINK else "streamlink: not found")
-        deps.append(f"ffmpeg {FFMPEG_VERSION}" if HAS_FFMPEG else "ffmpeg: not found")
+        deps.append(f"ffmpeg {_deps.FFMPEG_VERSION}" if _deps.HAS_FFMPEG else "ffmpeg: not found")
         deps.append(f"deno {DENO_VERSION}" if HAS_DENO else "deno: not found (YouTube nsig)")
         deps.append(f"psutil: {'yes' if HAS_PSUTIL else 'no'}")
         deps.append(f"pystray: {'yes' if HAS_TRAY else 'no'}")
@@ -2222,7 +2223,7 @@ def main_gui(config):
         dep_parts.append(f"yt-dlp {YTDLP_VERSION}")
     if HAS_STREAMLINK:
         dep_parts.append(f"streamlink {STREAMLINK_VERSION}")
-    if HAS_FFMPEG:
+    if _deps.HAS_FFMPEG:
         dep_parts.append(f"ffmpeg")
     dep_str = " | ".join(dep_parts) if dep_parts else "No recording tools found"
 
@@ -2958,7 +2959,7 @@ def main_gui(config):
             names = ", ".join(ytdlp_channels[:3])
             issues.append(f"Kick/YouTube/custom channels ({names}) require yt-dlp, which is not installed.")
 
-        if not HAS_FFMPEG:
+        if not _deps.HAS_FFMPEG:
             issues.append("ffmpeg is not installed — recordings cannot be remuxed to MP4.")
 
         if issues:

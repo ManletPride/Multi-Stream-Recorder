@@ -1,9 +1,18 @@
 """config.ini defaults and accessors."""
+import datetime
 import logging
 import os
+import shutil
 import configparser
 
 from msr import history
+
+# Values are literal: a ``%`` in a password or a filename pattern must not be read as
+# interpolation (the default parser raises on ``100%`` and on ``P@ss%word``).
+# Every ConfigParser in the program is built through this.
+def new_parser(**kwargs):
+    kwargs.setdefault("interpolation", None)
+    return configparser.ConfigParser(**kwargs)
 
 
 def default_streams_dir():
@@ -175,15 +184,50 @@ class Config:
 
     def __init__(self, config_file='config.ini'):
         self.config_file = config_file
-        self.config = configparser.ConfigParser()
+        self.config = new_parser()
         self.coerce_warnings = []
+        # Set when config.ini could not be read as it is. ``load_problem`` is a short,
+        # secret-free description; ``_unreadable`` means the settings in memory are
+        # the built-in defaults (the file on disk is left untouched until a save).
+        self.load_problem = None
+        self._unreadable = False
+        self._backed_up = False
         self._load_or_create()
+
+    def _backup_broken_file(self):
+        """Copy a config.ini we could not read cleanly to ``config.ini.broken-<stamp>`` (once)."""
+        if self._backed_up or not self.load_problem or not os.path.isfile(self.config_file):
+            return
+        self._backed_up = True
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        target = f"{self.config_file}.broken-{stamp}"
+        n = 1
+        while os.path.exists(target):
+            n += 1
+            target = f"{self.config_file}.broken-{stamp}-{n}"
+        try:
+            shutil.copy2(self.config_file, target)
+            logging.warning(
+                f"config.ini had a problem ({self.load_problem}); the original is saved as "
+                f"{os.path.basename(target)} before it is rewritten")
+        except OSError as e:
+            logging.warning(f"Could not save a copy of the unreadable config.ini first: {e}")
 
     def _write(self):
         # Keep the file as it is now in the history (Restore previous...) before overwriting it.
+        self._backup_broken_file()
         history.snapshot(self.config_file)
         with open(self.config_file, 'w', encoding='utf-8') as f:
             self.config.write(f)
+
+    def _write_startup(self):
+        """Write needed by loading itself (missing defaults, coerced values).
+
+        Skipped while the in-memory settings are only the fallback defaults: the file the
+        user wrote must not be replaced by defaults just because it failed to parse.
+        """
+        if not self._unreadable:
+            self._write()
 
     def save(self):
         """Write config.ini (the previous version goes to the history first)."""
@@ -191,13 +235,65 @@ class Config:
 
     def reload(self):
         """Re-read config.ini, e.g. after a restore, so a later save does not undo it."""
-        self.config = configparser.ConfigParser()
+        self.config = new_parser()
+        self.load_problem = None
+        self._unreadable = False
+        self._backed_up = False
         self._load_or_create()
+
+    def _read_existing(self):
+        """Parse config.ini into ``self.config``; never raises.
+
+        A UTF-8 BOM (Notepad) is accepted and a non-UTF-8 file is tried as cp1252. A file
+        that only breaks the strict parser (a duplicate option) is read leniently, the last
+        value wins. Anything else (no section header, unreadable) leaves the defaults in
+        memory. The problem text names a line or an option, never a value (it may be a
+        password).
+        """
+        problem = None
+        for encoding in ('utf-8-sig', 'cp1252'):
+            parser = new_parser()
+            try:
+                with open(self.config_file, 'r', encoding=encoding) as f:
+                    parser.read_file(f)
+            except UnicodeDecodeError:
+                problem = "it is not valid UTF-8 text"
+                continue
+            except (configparser.DuplicateOptionError, configparser.DuplicateSectionError) as e:
+                option = getattr(e, 'option', None)
+                problem = (f"option '{option}' appears twice in [{e.section}] (line {e.lineno})"
+                           if option else f"section [{e.section}] appears twice (line {e.lineno})")
+                lenient = new_parser(strict=False)
+                try:
+                    with open(self.config_file, 'r', encoding=encoding) as f:
+                        lenient.read_file(f)
+                    self.config = lenient
+                    self.load_problem = problem
+                    return
+                except (configparser.Error, UnicodeDecodeError, OSError):
+                    break
+            except configparser.MissingSectionHeaderError as e:
+                problem = f"line {e.lineno} is outside any [section]"
+                break
+            except configparser.Error as e:
+                problem = f"{type(e).__name__} near line {getattr(e, 'lineno', None) or '?'}"
+                break
+            except OSError as e:
+                problem = f"it cannot be read ({e.strerror or type(e).__name__})"
+                break
+            else:
+                self.config = parser
+                if encoding != 'utf-8-sig':
+                    self.load_problem = "it is not UTF-8 text (read as Windows-1252)"
+                return
+        self.load_problem = problem or "it could not be parsed"
+        self._unreadable = True
+        self.config = new_parser()
 
     def _load_or_create(self):
         defaults = self.DEFAULT_CONFIG
         if os.path.exists(self.config_file):
-            self.config.read(self.config_file, encoding='utf-8')
+            self._read_existing()
             updated = False
             for section, options in defaults.items():
                 if not self.config.has_section(section):
@@ -210,7 +306,7 @@ class Config:
                         self.config.set(section, key, value)
                         updated = True
             if updated:
-                self._write()
+                self._write_startup()
         else:
             for section, options in defaults.items():
                 self.config.add_section(section)
@@ -222,6 +318,14 @@ class Config:
             logging.info(f"Created default config file: {self.config_file}")
 
         self.coerce_warnings = self._coerce_values()
+        if self.load_problem:
+            if self._unreadable:
+                note = (f"config.ini could not be read ({self.load_problem}): using the built-in "
+                        "settings for this run. The file was left as it is.")
+            else:
+                note = (f"config.ini has a problem ({self.load_problem}); it was read as well as "
+                        "possible. A copy is saved before the file is next rewritten.")
+            self.coerce_warnings.insert(0, note)
 
     def _coerce_values(self):
         """Replace unparseable or out-of-range values with defaults. Persist if needed."""
@@ -294,7 +398,7 @@ class Config:
 
         if changed:
             try:
-                self._write()
+                self._write_startup()
             except OSError as e:
                 logging.warning(f"Could not write coerced config.ini: {e}")
         return warnings

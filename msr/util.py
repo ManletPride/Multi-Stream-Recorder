@@ -11,13 +11,15 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
 import urllib.request
 
+from msr import deps
 from msr.deps import (
-    HAS_CURL_CFFI, HAS_DENO, HAS_FFMPEG, HAS_PSUTIL,
+    HAS_CURL_CFFI, HAS_DENO, HAS_PSUTIL,
     HAS_STREAMLINK, HAS_YTDLP, psutil,
 )
 
@@ -49,12 +51,31 @@ def validate_startup(config):
     warnings.extend(getattr(config, 'coerce_warnings', None) or [])
 
     # ── Required dependencies ──
-    if not HAS_FFMPEG:
-        errors.append(
-            "ffmpeg not found in PATH.  ffmpeg is required for remuxing recordings.\n"
-            "  Install: https://ffmpeg.org/download.html\n"
-            "  Windows: download, extract, add bin/ folder to system PATH"
-        )
+    # ffmpeg: honour [Advanced] ffmpeg_path (the worker runs exactly that), so a configured
+    # path is enough even when ffmpeg is not on PATH.
+    ffmpeg_path = (config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg') or 'ffmpeg').strip() or 'ffmpeg'
+    if deps.configure_ffmpeg(ffmpeg_path) is None:
+        if ffmpeg_path == 'ffmpeg':
+            errors.append(
+                "ffmpeg not found in PATH.  ffmpeg is required for remuxing recordings.\n"
+                "  Install: https://ffmpeg.org/download.html\n"
+                "  Windows: download, extract, add bin/ folder to system PATH\n"
+                "  Or set ffmpeg_path in the [Advanced] section of config.ini"
+            )
+        else:
+            errors.append(
+                f"ffmpeg did not run from the configured ffmpeg_path.\n"
+                f"  Current value: {ffmpeg_path}\n"
+                "  Fix ffmpeg_path in the [Advanced] section of config.ini, or install ffmpeg "
+                "and set it back to: ffmpeg"
+            )
+    else:
+        ffprobe_path = ffprobe_from_ffmpeg(ffmpeg_path)
+        if not deps.check_ffprobe(ffprobe_path):
+            warnings.append(
+                f"ffprobe did not run ({ffprobe_path}).  Clips, previews and stream info need "
+                "it; it normally sits next to ffmpeg."
+            )
 
     if not HAS_YTDLP:
         warnings.append(
@@ -1771,9 +1792,36 @@ def _log_limits_from_env():
     return max_bytes, backups
 
 
+def resolve_log_dir(root_path):
+    """The folder stream_recorder.log goes in: ``root_path``, or a fallback if it is unusable.
+
+    ``root_path`` is the recordings folder. If its drive is unplugged or it cannot be created or
+    written, logging must still start, or the friendly startup message (``validate_startup``)
+    never gets a chance to appear. Fallback: the current folder (the data folder, where
+    config.ini lives), else a folder in the system temp dir. Returns ``(directory, problem)``;
+    ``problem`` is None when ``root_path`` is used.
+    """
+    problem = None
+    try:
+        os.makedirs(root_path, exist_ok=True)
+        if os.access(root_path, os.W_OK):
+            return root_path, None
+        problem = "it is not writable"
+    except (OSError, ValueError, TypeError) as e:
+        problem = getattr(e, "strerror", None) or type(e).__name__
+    for candidate in (os.getcwd(), os.path.join(tempfile.gettempdir(), "MultiStreamRecorder")):
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            if os.access(candidate, os.W_OK):
+                return candidate, problem
+        except OSError:
+            continue
+    return tempfile.gettempdir(), problem
+
+
 def setup_logging(root_path, config=None):
-    """Setup logging for main process."""
-    os.makedirs(root_path, exist_ok=True)
+    """Setup logging for main process. Returns the log file path."""
+    root_path, log_problem = resolve_log_dir(root_path)
     log_file = os.path.join(root_path, "stream_recorder.log")
 
     # Rotate before the handler opens the file, and before any worker
@@ -1809,10 +1857,16 @@ def setup_logging(root_path, config=None):
     logging.root.addHandler(file_handler)
     logging.root.addHandler(console_handler)
     _ensure_redact_filter(logging.root)
+    if log_problem:
+        logging.warning(
+            f"The recordings folder is not usable for the log file ({log_problem}); "
+            f"logging to {log_file} instead")
+    return log_file
 
 
 def setup_child_logging(root_path, channel_key):
     """Setup logging for child process."""
+    root_path, _problem = resolve_log_dir(root_path)
     log_file = os.path.join(root_path, "stream_recorder.log")
 
     for handler in logging.root.handlers[:]:

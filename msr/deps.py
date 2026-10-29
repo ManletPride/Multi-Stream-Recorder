@@ -110,20 +110,37 @@ def check_streamlink():
         return None
 
 
-def check_ffmpeg():
-    """Check if ffmpeg is installed and return version string or None."""
+def check_ffmpeg(path="ffmpeg"):
+    """Check if ffmpeg runs and return its version string or None.
+
+    ``path`` is the ``[Advanced] ffmpeg_path`` value: the bare name ``ffmpeg`` is looked
+    up on PATH, an absolute or relative path is run as given.
+    """
+    path = (path or "ffmpeg").strip() or "ffmpeg"
     try:
         result = subprocess.run(
-            ["ffmpeg", "-version"],
+            [path, "-version"],
             capture_output=True, text=True, timeout=5
         )
         if result.returncode == 0:
             # First line like "ffmpeg version N-113753-..."
             first_line = result.stdout.split('\n')[0]
-            return first_line.replace("ffmpeg version ", "").split(" ")[0]
+            return first_line.replace("ffmpeg version ", "").split(" ")[0] or "unknown"
         return None
-    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+    except (OSError, subprocess.TimeoutExpired):
         return None
+
+
+def check_ffprobe(path="ffprobe"):
+    """True if the ffprobe binary at ``path`` runs (pass ``util.ffprobe_from_ffmpeg(...)``)."""
+    try:
+        result = subprocess.run(
+            [path or "ffprobe", "-version"],
+            capture_output=True, text=True, timeout=5
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 YTDLP_VERSION = check_ytdlp()
@@ -132,6 +149,28 @@ STREAMLINK_VERSION = check_streamlink()
 HAS_STREAMLINK = STREAMLINK_VERSION is not None
 FFMPEG_VERSION = check_ffmpeg()
 HAS_FFMPEG = FFMPEG_VERSION is not None
+# The ffmpeg the program is configured to use. Starts as the PATH lookup above;
+# ``configure_ffmpeg`` re-points it at ``[Advanced] ffmpeg_path`` once the config is known.
+FFMPEG_PATH = "ffmpeg"
+
+
+def configure_ffmpeg(path):
+    """Use ``path`` (from config.ini) as the ffmpeg to check; update the ``FFMPEG_*`` flags.
+
+    The bare default ``ffmpeg`` reuses the result already measured at import, so it does not
+    start another process. Returns the version string, or None if it does not run. Read
+    these through ``deps.HAS_FFMPEG`` / ``deps.FFMPEG_VERSION`` (not ``from ... import``)
+    to see the update.
+    """
+    global FFMPEG_PATH, FFMPEG_VERSION, HAS_FFMPEG
+    path = (path or "ffmpeg").strip() or "ffmpeg"
+    if path == FFMPEG_PATH and FFMPEG_VERSION is not None:
+        HAS_FFMPEG = True
+        return FFMPEG_VERSION
+    FFMPEG_PATH = path
+    FFMPEG_VERSION = check_ffmpeg(path)
+    HAS_FFMPEG = FFMPEG_VERSION is not None
+    return FFMPEG_VERSION
 
 # Check if curl_cffi is available for browser impersonation (needed for Cloudflare-protected sites)
 HAS_CURL_CFFI = False

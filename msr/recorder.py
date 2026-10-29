@@ -5,6 +5,7 @@ import multiprocessing as mp
 import os
 import random
 import shutil
+import signal
 import threading
 import time
 
@@ -318,6 +319,38 @@ class BackgroundCleaner:
             logging.info("Cleanup: No unprocessed .ts files found")
 
         return found_locked
+
+
+def finish_headless_session(recorder, say=print):
+    """Stop a headless session and wait for the cleanup that follows a stop, then release the Manager.
+
+    A GUI session leaves the cleanup to a background thread while the window stays open. A
+    headless process exits when this returns, so it must wait here or leftover recordings stay
+    as raw .ts until the next start. Ctrl+C while waiting skips the rest (the files are picked up
+    on the next start). Safe to call after ``stop()`` already ran.
+    """
+    recorder.stop()
+    say("Recording stopped. Finishing cleanup of leftover files (Ctrl+C to skip)...")
+
+    def _skip(signum, frame):
+        raise KeyboardInterrupt
+
+    previous = None
+    try:
+        previous = signal.signal(signal.SIGINT, _skip)  # the entry script ignores a second Ctrl+C
+    except ValueError:  # not the main thread
+        pass
+    try:
+        recorder.wait_for_cleanup()
+    except KeyboardInterrupt:
+        say("Cleanup skipped; leftover files are handled on the next start.")
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGINT, previous)
+    try:
+        recorder.manager.shutdown()
+    except Exception:
+        pass
 
 
 # ────────────────────────────────────────────────
@@ -1372,6 +1405,20 @@ class StreamRecorder:
             self.manager.shutdown()
         except Exception:
             pass
+
+    def wait_for_cleanup(self, timeout=None):
+        """Block until the post-stop cleanup (remux of leftover .ts files) has finished.
+
+        ``stop()`` starts that cleanup on a daemon thread. A GUI keeps running, so it finishes;
+        a program that exits right after ``stop()`` (headless) would cut it off, so it calls
+        this first. Unlike ``shutdown()`` this does not cancel the cleanup. Returns True if
+        the cleanup is finished (or never ran), False if ``timeout`` ran out.
+        """
+        thread = self.cleaner._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout)
+            return not thread.is_alive()
+        return True
 
     def run(self):
         if self.is_running:

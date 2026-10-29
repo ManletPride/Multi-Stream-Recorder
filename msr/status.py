@@ -15,7 +15,7 @@ import shutil
 import sys
 
 from msr import __version__
-from msr.config import Config, default_streams_dir
+from msr.config import Config, default_streams_dir, new_parser
 from msr.history import is_sensitive
 
 # Shown from config.ini; Paths, Fishtank and anything that looks secret are never copied.
@@ -24,11 +24,11 @@ PATH_KEYS = {"ffmpeg_path", "clips_dir", "window_state_file"}  # may hold a pers
 
 
 def _read_config(path: str) -> tuple[configparser.ConfigParser, bool]:
-    parser = configparser.ConfigParser()
+    parser = new_parser()
     present = os.path.isfile(path)
     if present:
         try:
-            parser.read(path, encoding="utf-8")
+            parser.read(path, encoding="utf-8-sig")
         except (configparser.Error, OSError, UnicodeDecodeError):
             present = False
     return parser, present
@@ -183,6 +183,9 @@ def build_status(config_path: str = "config.ini", tools: dict | None = None, lib
     streams = (parser.get("Paths", "streams_dir", fallback="") or "").strip() or default_streams_dir()
     channels_path = parser.get("Paths", "channels_file", fallback="") or "channels.json"
     channels = channel_summary(channels_path)
+    if tools is None:
+        from msr import deps
+        deps.configure_ffmpeg(parser.get("Advanced", "ffmpeg_path", fallback="ffmpeg"))
     tool_info = tools if tools is not None else _tools()
 
     free = _free_gb(streams)

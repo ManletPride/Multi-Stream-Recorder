@@ -47,11 +47,17 @@ A big interface release: a Library tab that shows (and can clean up) what your r
 - A preview that stops updating is now visible: after 10 s without a fresh frame the tile name and the large pane title show the age (for example `binxbasilisk · 12 s`) and the border turns to the theme's warning colour. A channel that stopped recording keeps its last frame for 90 s, marked `ended`, instead of vanishing.
 - Streams whose key frames are about 4 s apart (the old fixed 3 s seek found no frame there, so every tick ran a second seek) are grabbed with one ffmpeg run once the working seek is known.
 - Starting from a redirected Windows console (cp1252) no longer fails on characters the console cannot show.
+- A `%` in `config.ini` is no longer a crash. A Fishtank password such as `P@ss%word` or a `filename_pattern` with `100%` used to make the settings unreadable, so MSR did not start or no worker could start. Values are read as typed. (If you ever wrote `%%` to work around this, write a single `%` now.)
+- A `config.ini` that cannot be parsed (an option twice, text before the first `[section]`, a file saved in another encoding) no longer stops MSR from starting silently. A UTF-8 BOM or a Windows-1252 file is simply read. Otherwise MSR runs with its built-in settings, says so in the log, and leaves your file as it is. Only when it has to rewrite the file does it first save a copy next to it as `config.ini.broken-<date>-<time>`.
+- A recordings folder on a drive that is not there (an unplugged external disk) now shows the "Drive ... does not exist" message instead of MSR vanishing. The log file goes to the data folder until the drive is back.
+- A start that fails under `pythonw` (the double-click launcher) now leaves `msr_startup_error.log` in the data folder, with the error and no passwords or tokens, and shows a message window when it can.
+- Headless mode (`--headless`): Ctrl+C now stops, then finishes the clean-up of leftover `.ts` files (about 30 s plus the remux time; press Ctrl+C again to skip) before it exits. It used to exit at once and leave them for the next start.
+- `ffmpeg_path` in `[Advanced]` is honoured at start-up: ffmpeg no longer has to be on PATH when the configured path works, a wrong path is reported with the setting's name, and ffprobe next to it is checked (a warning if it is missing).
 
 ### Developer notes
 - Every colour comes from `msr/themes.py` (semantic tokens) and the palette data in `msr/theme_palettes.py`; a test fails on any hard-coded colour elsewhere. Adding a theme is one entry in `msr/theme_palettes.py`.
 - The test suite grew from 299 to 652 tests, including a hidden-window smoke test that launches the real UI in every theme. `AGENTS.md` documents the new modules.
-- New files that stay out of git: `themes/`, `msr_history/`, `library_cache.json`, `library_moves.json`, `library_actions.log`.
+- New files that stay out of git: `themes/`, `msr_history/`, `library_cache.json`, `library_moves.json`, `library_actions.log`, `msr_startup_error.log`, `config.ini.broken-*`.
 
 ## v2.1.0 (2026-10)
 
