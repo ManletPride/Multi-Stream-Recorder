@@ -2359,11 +2359,9 @@ def record_worker(args):
             f"(auth method: {auth_method})")
         fishtank_auth.start_background_refresh()
 
-    # Initial stagger: randomize the very first check so workers don't all fire at once
-    initial_delay = random.uniform(0, min(poll_base_seconds, 10))
-    if initial_delay > 1:
-        logger.info(f"Initial stagger: waiting {initial_delay:.0f}s before first check")
-        time.sleep(initial_delay)
+    # The first live check runs at once (no initial stagger): a channel that is live when MSR
+    # starts or when it is added must start recording without a random 0-10 s delay. Later
+    # polls keep their jittered spacing below, so workers still drift apart after the first.
 
     proc = None              # the running capture, reaped on every error path
     overlap_handoff = {}     # a size/time split's next capture, if one was started

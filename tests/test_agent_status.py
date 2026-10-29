@@ -354,5 +354,91 @@ class SmallTextTests(unittest.TestCase):
         self.assertEqual(app.update_state["tag"], "9.9.9")
 
 
+class PolishTests(unittest.TestCase):
+    """Ctrl+C and timeouts in msr_ctl, record_stop's per-channel result, the immediate first check."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data, _ = make_data(self.tmp.name, [{"name": "knut", "enabled": True},
+                                                 {"name": "twitch:two", "enabled": True}])
+        self.h = Headless(self.data, start_now=False)
+
+    def tearDown(self):
+        self.h.close()
+        self.tmp.cleanup()
+
+    def test_ctrl_c_during_wait_exits_130_without_traceback(self):
+        import _thread
+        err = io.StringIO()
+        timer = threading.Timer(1.0, _thread.interrupt_main)
+        started = time.monotonic()
+        with mock.patch("sys.stderr", err), mock.patch("sys.stdout", io.StringIO()):
+            timer.start()
+            code = msr_ctl.run(["--data-dir", self.data, "wait", "--event", "live", "--timeout", "60"])
+        self.assertEqual(code, 130)
+        self.assertLess(time.monotonic() - started, 10, "Ctrl+C is seen while blocked in recv")
+        self.assertIn("Interrupted.", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+
+    def test_client_timeout_holds_while_blocked_in_recv(self):
+        import socket
+        started = time.monotonic()
+        with self.assertRaises(socket.timeout):
+            control.call(self.data, "wait", {"events": ["live"], "timeout": 30}, timeout=1.5)
+        self.assertLess(time.monotonic() - started, 4)
+
+    def test_cli_wait_timeout_is_exit_6_and_the_client_outlives_the_server(self):
+        seen = {}
+        real = control.call
+
+        def spy(data_dir, cmd, args=None, timeout=600.0, token=None):
+            seen.setdefault(cmd, timeout)
+            return real(data_dir, cmd, args, timeout=timeout, token=token)
+
+        started = time.monotonic()
+        with mock.patch.object(msr_ctl.control, "call", side_effect=spy), \
+                mock.patch("sys.stderr", io.StringIO()), mock.patch("sys.stdout", io.StringIO()):
+            code = msr_ctl.run(["--data-dir", self.data, "--timeout", "1", "wait", "--event", "live",
+                                "--timeout", "2"])
+        self.assertEqual(code, 6)
+        self.assertGreaterEqual(time.monotonic() - started, 1.9)
+        self.assertGreater(seen["wait"], 2 + 20)
+
+    def test_record_stop_says_whether_a_recording_was_stopped(self):
+        class Rec:
+            is_running = True
+            status_dict = {"knut": {"status": "Checking..."}, "twitch:two": {"status": "Recording"}}
+            stopped = []
+
+            def stop_channel(self, key):
+                self.stopped.append(key)
+
+        app = control.OfflineApp(self.h.config)
+        app.recorder = Rec()
+        res = control.Controller(app).handle("record_stop", {"channels": ["knut", "twitch:two"]})["result"]
+        self.assertEqual([(c["name"], c["result"]) for c in res["channels"]],
+                         [("knut", "was_idle"), ("twitch:two", "stopped_recording")])
+        self.assertEqual(res["stopped"], ["knut", "twitch:two"])
+        self.assertIn("no 'finished' event", res["note"])
+
+    def test_wait_finished_warns_when_nothing_records(self):
+        rows = [{"name": "knut", "index": 1, "recording": False},
+                {"name": "twitch:two", "index": 2, "recording": True}]
+        reply = {"ok": True, "result": {"channels": rows}}
+        for channel, warned in (("knut", True), ("#2", False), ("", False)):
+            err = io.StringIO()
+            with mock.patch.object(msr_ctl.control, "call", return_value=reply), mock.patch("sys.stderr", err):
+                msr_ctl._warn_if_nothing_to_finish(self.data, {"events": ["finished"], "channel": channel})
+            self.assertEqual("not recording" in err.getvalue(), warned, channel)
+
+    def test_first_live_check_has_no_initial_stagger(self):
+        import inspect
+        from msr import worker
+        src = inspect.getsource(worker.record_worker)
+        self.assertNotIn("Initial stagger:", src)
+        self.assertNotIn("initial_delay", src)
+        self.assertIn("jittered_sleep", src, "later polls keep their spacing")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -984,9 +984,19 @@ class Controller:
         rec = self._recorder()
         recs = self.app.records()
         keys = [recs[resolve_channel(recs, r)]["name"] for r in _refs(args)]
+        before = _status_copy(rec)
+        results = []
         for key in keys:
+            status = str((before.get(key) or {}).get("status", "") or "")
+            recording = status.lower().startswith("recording")
             rec.stop_channel(key)
-        return {"stopped": [display_name(k) for k in keys]}
+            results.append({"name": display_name(key), "result": "stopped_recording" if recording else "was_idle",
+                            "status_before": status})
+        out = {"stopped": [display_name(k) for k in keys], "channels": results}
+        if any(r["result"] == "was_idle" for r in results):
+            out["note"] = ("A channel that was not recording has nothing to finish: no 'finished' event "
+                           "will come for it.")
+        return out
 
     def cmd_check(self, args):
         rec = self._recorder()
@@ -1611,12 +1621,22 @@ def call(data_dir, cmd, args=None, timeout=600.0, token=None):
     except OSError as e:  # refused: the copy that wrote the file is gone
         raise NotRunning(str(e)) from None
     with sock:  # a timeout from here on is a real one (socket.timeout), not "not running"
-        sock.settimeout(timeout)
+        deadline = time.monotonic() + float(timeout)
+        sock.settimeout(5)
         sock.sendall(json.dumps({"token": token if token is not None else info["token"],
                                  "cmd": cmd, "args": args or {}}).encode("utf-8") + b"\n")
         buf = b""
         while b"\n" not in buf:
-            chunk = sock.recv(65536)
+            # Short slices: Ctrl+C is seen within a second (Windows only delivers it between
+            # calls), and the overall timeout still holds.
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise socket.timeout("no reply in time")
+            sock.settimeout(min(1.0, left))
+            try:
+                chunk = sock.recv(65536)
+            except socket.timeout:
+                continue
             if not chunk:
                 break
             buf += chunk

@@ -8,7 +8,7 @@ as the app); session commands then exit with code 3.
 Data folder: --data-dir, else %MSR_HOME%, else %MSR_DATA%, else the current folder.
 
 Exit codes: 0 ok, 1 refused/failed, 2 usage, 3 not running (or running but not answering),
-4 wrong token, 5 needs confirmation (--yes / --confirm WORD), 6 timed out.
+4 wrong token, 5 needs confirmation (--yes / --confirm WORD), 6 timed out, 130 Ctrl+C.
 
 Examples:
   python msr_ctl.py status --json
@@ -38,6 +38,7 @@ import msr.nowindow  # noqa: F401,E402  (hide child console windows, as everywhe
 from msr import control  # noqa: E402
 
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_NOT_RUNNING, EXIT_AUTH, EXIT_CONFIRM, EXIT_TIMEOUT = range(7)
+EXIT_INTERRUPTED = 130  # Ctrl+C
 LIVE_ONLY = {"start", "stop", "quit", "record_start", "record_stop", "check", "clip", "screenshot",
              "update_install", "wait", "events"}
 CODE_EXIT = {"auth": EXIT_AUTH, "confirm_required": EXIT_CONFIRM, "not_running": EXIT_NOT_RUNNING,
@@ -375,7 +376,8 @@ def main(argv=None):
     try:
         timeout = a.timeout
         if cmd == "wait":
-            timeout = max(timeout, float(args.get("timeout", 300)) + 30)
+            timeout = max(timeout, float(args.get("timeout", 300)) + 30)  # outlives the server's wait
+            _warn_if_nothing_to_finish(data_dir, args)
         reply = control.call(data_dir, cmd, args, timeout=timeout)
     except control.NotRunning:
         reply, exit_code = run_offline(data_dir, cmd, args)
@@ -393,5 +395,29 @@ def main(argv=None):
     return exit_code
 
 
+def _warn_if_nothing_to_finish(data_dir, args):
+    """wait --event finished on a channel that is not recording would just run into the timeout."""
+    if "finished" not in (args.get("events") or []):
+        return
+    try:
+        rows = control.call(data_dir, "status", {}, timeout=10)["result"]["channels"]
+    except Exception:
+        return
+    want = str(args.get("channel") or "").lower()
+    picked = [r for r in rows if not want or want in (r["name"].lower(), f"#{r['index']}", str(r["index"]))]
+    if picked and not any(r["recording"] for r in picked):
+        who = picked[0]["name"] if want else "no channel"
+        print(f"warning: {who} is not recording now, so a 'finished' event comes only after a new "
+              "recording starts and ends.", file=sys.stderr)
+
+
+def run(argv=None):
+    try:
+        return main(argv)
+    except KeyboardInterrupt:
+        print("Interrupted.", file=sys.stderr)
+        return EXIT_INTERRUPTED
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run())

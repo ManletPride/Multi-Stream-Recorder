@@ -46,6 +46,8 @@ A big interface release: a Library tab that shows (and can clean up) what your r
 - The preview strip is not refreshed while the Status tab is hidden or the window is minimised or in the tray, and refreshes at once when it is shown again.
 
 ### Fixed
+- Each channel's first live check now runs at once when recording starts or a channel is added (there was a random wait of up to 10 seconds first); later checks keep their spacing. Same in the window and headless.
+- `msr_ctl.py`: Ctrl+C exits with a short "Interrupted." and code 130 instead of a traceback, also during `wait`; `record-stop` says per channel whether a recording was stopped or the channel was idle; `wait --event finished` warns when the channel is not recording.
 - Headless start with an empty channel list no longer says "Add channels via the GUI": it names `msr_ctl.py add NAME`.
 - **An in-app update can no longer leave a half-updated install.** The update now checks that every downloaded Python file is intact, keeps the current program files in `msr_update_backup/`, checks each copied file, and puts the old files back (removing any the update added) if anything goes wrong; the reason is shown at the next start. If the update changes `requirements.txt`, the next start says to run `pip install -r requirements.txt`.
 - **The Fishtank password is no longer copied into `msr_history/`.** History copies of `config.ini` hold a placeholder instead of any password, secret or token, and **Restore previous...** keeps your current password. Copies made before this version are unchanged (delete `msr_history/config.ini/` to remove them). The password can also be given in the `MSR_FISHTANK_PASSWORD` environment variable instead of `config.ini`.

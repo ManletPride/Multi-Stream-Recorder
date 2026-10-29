@@ -209,7 +209,7 @@ python msr_ctl.py edit twitch:old --name new
 python msr_ctl.py start                       # Start Recording
 python msr_ctl.py stop                        # Stop Recording
 python msr_ctl.py record-start kickname       # one channel, mid-session
-python msr_ctl.py record-stop kickname
+python msr_ctl.py record-stop kickname       # says per channel: stopped_recording or was_idle
 python msr_ctl.py check [kickname]            # Check Now
 python msr_ctl.py clip kickname --seconds 30  # Clip Now / Screenshot Now
 python msr_ctl.py screenshot kickname
@@ -245,11 +245,11 @@ python msr_ctl.py quit                        # stops recording AND closes MSR (
 - In the window, adding a channel while recording starts it at once, as the + Add button does. When the window is not recording, `start` is the Start Recording button.
 - With no copy running, commands only change the files (`saved: files (MSR not running)`). Start MSR to record.
 
-**Waiting for something.** `wait` blocks until a channel goes live (`live`), a recording is finished (`finished`, also when its remux failed: see `remux_ok`) or an error is reported (`error`), for one `--channel` or any, and exits `6` after `--timeout` seconds (default 300, at most 3600) with nothing. Each event has a `seq`; pass `--after SEQ` to the next `wait` so nothing that happened in between is missed.
+**Waiting for something.** `wait` blocks until a channel goes live (`live`), a recording is finished (`finished`, also when its remux failed: see `remux_ok`) or an error is reported (`error`), for one `--channel` or any (it warns when that channel is not recording, since then no `finished` can come soon), and exits `6` after `--timeout` seconds (default 300, at most 3600) with nothing. Each event has a `seq`; pass `--after SEQ` to the next `wait` so nothing that happened in between is missed.
 
 **Update headless.** `update install --yes` downloads the release, stops recording (remuxing what was recorded), quits, lets the update helper copy the new files, and starts the same copy again with `--headless --data-dir <the same data folder>`. The restarted copy runs in the background with no console window; use `msr_ctl.py status` and `logs`.
 
-Anything that removes or replaces something needs `--yes` (a permanent delete needs `--confirm <word>`, the word `library plan permanent ...` shows). Exit codes: `0` ok, `1` refused or failed, `2` usage, `3` not running, `4` wrong token, `5` needs confirmation, `6` timed out. The protocol (one JSON line per request) is in `AGENTS.md`.
+Anything that removes or replaces something needs `--yes` (a permanent delete needs `--confirm <word>`, the word `library plan permanent ...` shows). Exit codes: `0` ok, `1` refused or failed, `2` usage, `3` not running, `4` wrong token, `5` needs confirmation, `6` timed out, `130` Ctrl+C (no traceback). The protocol (one JSON line per request) is in `AGENTS.md`.
 
 To try it next to a copy you already use, give the second one its own data folder with a different `streams_dir`. One copy per recordings folder can run at a time. In PowerShell:
 
