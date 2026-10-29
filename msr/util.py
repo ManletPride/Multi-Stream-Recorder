@@ -18,6 +18,7 @@ import traceback
 import urllib.request
 
 from msr import deps
+from msr.nowindow import no_window_kwargs
 from msr.deps import (
     HAS_CURL_CFFI, HAS_DENO, HAS_PSUTIL,
     HAS_STREAMLINK, HAS_YTDLP, psutil,
@@ -1132,7 +1133,8 @@ def _kill_process_tree_fallback(pid, logger=None):
         try:
             result = subprocess.run(
                 ['taskkill', '/F', '/T', '/PID', str(pid)],
-                capture_output=True, text=True, timeout=10
+                capture_output=True, text=True, timeout=10,
+                **no_window_kwargs()
             )
             if logger:
                 if result.returncode == 0:
@@ -1648,6 +1650,7 @@ def kill_orphan_recording_processes(logger=None, streams_dir=None, keep_pid=None
         result = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq ffmpeg.exe", "/FO", "CSV", "/NH"],
             capture_output=True, text=True, timeout=10,
+            **no_window_kwargs(),
         )
         if result.returncode != 0 or "ffmpeg" not in result.stdout.lower():
             return

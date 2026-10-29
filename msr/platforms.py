@@ -13,6 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from msr.nowindow import no_window_kwargs
 from msr.deps import HAS_CURL_CFFI, HAS_STREAMLINK, HAS_YTDLP
 from msr.util import redact_cmd_for_log, redact_for_log
 
@@ -39,7 +40,7 @@ def check_stream_kick_api(channel_name, logger, timeout=15, cookies_file=None):
     logger.info(f"Kick check (streamlink): {redact_cmd_for_log(check_cmd)}")
 
     try:
-        result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=timeout, **no_window_kwargs())
         logger.info(f"Kick streamlink check returncode={result.returncode}")
 
         if result.stdout:
@@ -292,7 +293,7 @@ def _find_rumble_live_url(url, logger, timeout, cookies_file, impersonate=False)
 
     logger.info(f"Rumble playlist scan: {redact_cmd_for_log(cmd)}")
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **no_window_kwargs())
     except subprocess.TimeoutExpired:
         logger.warning("Rumble playlist scan timed out")
         return None
@@ -586,7 +587,7 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
     logger.info(f"Check cmd (yt-dlp): {redact_cmd_for_log(check_cmd)}")
 
     try:
-        check = subprocess.run(check_cmd, capture_output=True, text=True, timeout=timeout)
+        check = subprocess.run(check_cmd, capture_output=True, text=True, timeout=timeout, **no_window_kwargs())
         logger.info(f"Check returncode={check.returncode}")
 
         # Check for outdated yt-dlp-ejs challenge solver regardless of returncode —
@@ -707,7 +708,7 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
                     impersonate_cmd.append(url)
                     try:
                         retry = subprocess.run(impersonate_cmd, capture_output=True,
-                                               text=True, timeout=timeout)
+                                               text=True, timeout=timeout, **no_window_kwargs())
                         if retry.returncode == 0 and retry.stdout:
                             data = json.loads(retry.stdout)
                             is_live = data.get("is_live", False) or data.get("live_status") == "is_live"
@@ -1796,7 +1797,7 @@ def check_stream_streamlink(url, logger, timeout=30):
     logger.info(f"Check cmd: {redact_cmd_for_log(check_cmd)}")
 
     try:
-        check = subprocess.run(check_cmd, capture_output=True, text=True, timeout=timeout)
+        check = subprocess.run(check_cmd, capture_output=True, text=True, timeout=timeout, **no_window_kwargs())
         logger.info(f"Check returncode={check.returncode}")
 
         title = None

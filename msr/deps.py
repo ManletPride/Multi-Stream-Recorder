@@ -4,6 +4,8 @@ import os
 import sys
 import subprocess
 
+from msr.nowindow import no_window_kwargs
+
 
 def interpreter_script_dirs(executable=None):
     """Folders where pip puts console scripts for *this* interpreter.
@@ -86,7 +88,8 @@ def check_ytdlp():
     try:
         result = subprocess.run(
             ["yt-dlp", "--version"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=5,
+            **no_window_kwargs()
         )
         if result.returncode == 0:
             return result.stdout.strip()
@@ -100,7 +103,8 @@ def check_streamlink():
     try:
         result = subprocess.run(
             ["streamlink", "--version"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=5,
+            **no_window_kwargs()
         )
         if result.returncode == 0:
             # Output is like "streamlink 6.11.0"
@@ -120,7 +124,8 @@ def check_ffmpeg(path="ffmpeg"):
     try:
         result = subprocess.run(
             [path, "-version"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=5,
+            **no_window_kwargs()
         )
         if result.returncode == 0:
             # First line like "ffmpeg version N-113753-..."
@@ -136,7 +141,8 @@ def check_ffprobe(path="ffprobe"):
     try:
         result = subprocess.run(
             [path or "ffprobe", "-version"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=5,
+            **no_window_kwargs()
         )
         return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
@@ -202,7 +208,8 @@ def check_deno():
     try:
         result = subprocess.run(
             ["deno", "--version"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=5,
+            **no_window_kwargs()
         )
         if result.returncode == 0:
             # First line is like "deno 2.3.1"

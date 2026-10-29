@@ -40,6 +40,8 @@ from msr.platforms import (
     check_tiktok_live_webcast,
     resolve_best_fishtank_variant,
 )
+from msr import nowindow as _nowindow
+from msr.nowindow import no_window_kwargs
 from msr.util import (
     PENDING_DELETION_FOLDER,
     build_filename,
@@ -409,7 +411,7 @@ def _find_clip_keyframe(ffmpeg_path, raw_file, clip_seconds, duration, logger, t
             raw_file,
         ]
         try:
-            return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **no_window_kwargs())
         except Exception:
             return None
 
@@ -420,6 +422,7 @@ def _find_clip_keyframe(ffmpeg_path, raw_file, clip_seconds, duration, logger, t
              "-show_entries", "format=start_time",
              "-of", "default=noprint_wrappers=1:nokey=1", raw_file],
             capture_output=True, text=True, timeout=timeout,
+            **no_window_kwargs(),
         )
         val = (st.stdout or "").strip()
         if val and val != "N/A":
@@ -554,7 +557,7 @@ def create_clip(raw_file, output_file, clip_seconds, ffmpeg_path, logger, timeou
 
     def _run(cmd):
         try:
-            return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **no_window_kwargs())
         except subprocess.TimeoutExpired:
             return "timeout"
         except FileNotFoundError:
@@ -703,7 +706,7 @@ def create_screenshot(raw_file, output_file, ffmpeg_path, logger, offset_seconds
         ]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **no_window_kwargs())
         except subprocess.TimeoutExpired:
             return False, "ffmpeg timed out"
         except FileNotFoundError:
@@ -741,9 +744,8 @@ def create_screenshot(raw_file, output_file, ffmpeg_path, logger, offset_seconds
 
 def _hidden_run(cmd, timeout):
     """subprocess.run with no console window on Windows."""
-    kwargs = {"capture_output": True, "text": True, "timeout": timeout}
-    if os.name == "nt":
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    kwargs = {"capture_output": True, "text": True, "timeout": timeout, **no_window_kwargs()}
+    if _nowindow.is_windows():
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         kwargs["startupinfo"] = startupinfo
@@ -998,6 +1000,7 @@ def _probe_stream_info_thread(raw_file, stream_info_ref, ffmpeg_path, logger, mi
             [ffprobe, "-v", "quiet", "-print_format", "json",
              "-show_streams", "-show_format", "-select_streams", "v:0", raw_file],
             capture_output=True, text=True, timeout=10,
+            **no_window_kwargs(),
         )
         data = _json.loads(result.stdout)
         streams = data.get("streams", [])
@@ -1060,7 +1063,7 @@ def _watch_resolution_change_thread(raw_file, resolution_change_ref, ffmpeg_path
             if extra_args:
                 cmd.extend(extra_args)
             cmd.append(raw_file)
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, **no_window_kwargs())
             data = _json.loads(result.stdout)
             streams = data.get("streams", [])
             if not streams:
@@ -1433,11 +1436,12 @@ def _lower_priority_popen_kwargs():
     """Popen kwargs that start a child at below-normal CPU priority.
 
     Used for background remuxes (startup leftovers) so a multi-GB remux does
-    not starve live recordings.  Windows: BELOW_NORMAL_PRIORITY_CLASS;
-    POSIX: ``nice(10)``.
+    not starve live recordings.  Windows: BELOW_NORMAL_PRIORITY_CLASS plus
+    CREATE_NO_WINDOW (a priority class on its own gives ffmpeg a console
+    window); POSIX: ``nice(10)``.
     """
-    if os.name == "nt":
-        return {"creationflags": getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)}
+    if _nowindow.is_windows():
+        return no_window_kwargs(getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000))
 
     def _nice():
         try:
@@ -1485,7 +1489,7 @@ def _run_remux_cmd(ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file, logger, timeout,
     stdout_lines = []
     stderr_lines = []
 
-    popen_kwargs = _lower_priority_popen_kwargs() if low_priority else {}
+    popen_kwargs = _lower_priority_popen_kwargs() if low_priority else no_window_kwargs()
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -1620,7 +1624,8 @@ def remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, timeout=600,
     try:
         probe = subprocess.run(
             [ffmpeg_path, "-i", raw_file, "-hide_banner"],
-            capture_output=True, text=True, timeout=10
+            capture_output=True, text=True, timeout=10,
+            **no_window_kwargs()
         )
         if "timed_id3" in probe.stderr.lower():
             has_timed_id3 = True
@@ -1816,7 +1821,8 @@ def _log_audio_track(mp4_file, ffmpeg_path, platform, logger):
             mp4_file,
         ]
         probe_result = subprocess.run(
-            probe_cmd, capture_output=True, text=True, timeout=30
+            probe_cmd, capture_output=True, text=True, timeout=30,
+            **no_window_kwargs()
         )
         if probe_result.returncode == 0:
             probe_data = json.loads(probe_result.stdout or "{}")
@@ -1877,7 +1883,8 @@ def finalize_recording_group(parts, group_base_name, processed_path, pending_dir
             "-i", list_file, "-c", "copy", merge_tmp,
         ]
         result = subprocess.run(
-            concat_cmd, capture_output=True, text=True, timeout=ffmpeg_timeout
+            concat_cmd, capture_output=True, text=True, timeout=ffmpeg_timeout,
+            **no_window_kwargs()
         )
 
         if result.returncode != 0 or not os.path.exists(merge_tmp) or os.path.getsize(merge_tmp) == 0:
@@ -2529,6 +2536,7 @@ def record_worker(args):
                     stderr=subprocess.PIPE,
                     text=True,
                     bufsize=1,
+                    **no_window_kwargs(),
                 )
 
             def _refresh_fishtank_url():
@@ -2858,6 +2866,7 @@ def record_worker(args):
                         stderr=subprocess.PIPE,
                         text=True,
                         bufsize=1,
+                        **no_window_kwargs(),
                     )
 
                     last_status, _ = monitor_recording_process(

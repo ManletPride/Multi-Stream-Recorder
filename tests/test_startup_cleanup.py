@@ -642,14 +642,18 @@ class RemuxPriorityAndCancelTests(unittest.TestCase):
     def test_default_is_normal_priority(self):
         (code, _), popen_calls, _ = self._run()
         self.assertEqual(code, 0)
-        self.assertNotIn("creationflags", popen_calls[0])
         self.assertNotIn("preexec_fn", popen_calls[0])
+        if os.name == "nt":
+            self.assertEqual(popen_calls[0]["creationflags"], 0x08000000)  # CREATE_NO_WINDOW only
+        else:
+            self.assertNotIn("creationflags", popen_calls[0])
 
     def test_low_priority_sets_below_normal(self):
         (code, _), popen_calls, _ = self._run(low_priority=True)
         self.assertEqual(code, 0)
         if os.name == "nt":
-            self.assertEqual(popen_calls[0]["creationflags"], 0x00004000)  # BELOW_NORMAL_PRIORITY_CLASS
+            # BELOW_NORMAL_PRIORITY_CLASS, and no console window for ffmpeg (see tests/test_no_console.py)
+            self.assertEqual(popen_calls[0]["creationflags"], 0x00004000 | 0x08000000)
         else:
             self.assertTrue(callable(popen_calls[0]["preexec_fn"]))
 

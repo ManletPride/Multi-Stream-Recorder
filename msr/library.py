@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable, NamedTuple
 
 from msr import storage
+from msr.nowindow import no_window_kwargs
 from msr.util import PENDING_DELETION_FOLDER, channel_key_to_dirs
 
 VIDEO_EXT = frozenset({".mp4", ".mkv", ".ts", ".webm", ".mov", ".m4v", ".flv", ".avi", ".m4a", ".mp3"})
@@ -571,10 +572,9 @@ def sidecar_seconds(video_path: str) -> float | None:
 def ffprobe_seconds(ffprobe: str, path: str, timeout: float = 20.0) -> float | None:
     """Length of one file via ffprobe (only used on demand, one file at a time)."""
     try:
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         out = subprocess.run(
             [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", path],
-            capture_output=True, text=True, timeout=timeout, creationflags=flags)
+            capture_output=True, text=True, timeout=timeout, **no_window_kwargs())
         value = float(out.stdout.strip().splitlines()[0])
         return value if value >= 0 else None
     except (OSError, ValueError, IndexError, subprocess.SubprocessError):
