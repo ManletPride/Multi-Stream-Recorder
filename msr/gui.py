@@ -28,6 +28,7 @@ from msr import library_actions as _library_actions
 from msr import library_manage as _library_manage
 from msr import library_window as _library_window
 from msr import preview_state as _preview_state
+from msr import storage as _storage
 from msr import winstate as _winstate
 from msr import restore_dialog as _restore_dialog
 from msr import logview
@@ -218,6 +219,9 @@ def save_window_state(state_file, state):
     try:
         with open(state_file, 'w') as f:
             json.dump(state, f, indent=2)
+        _storage.write_ok("the window state", state_file)
+    except OSError as e:
+        _storage.write_failed("the window state", state_file, e)
     except Exception:
         pass
 
@@ -394,6 +398,10 @@ def main_gui(config):
         except NameError:
             pass  # not yet defined on first apply_theme call during startup
         status_label.configure(bg=t['bg'], fg=t['fg'])
+        try:
+            storage_notice_label.configure(bg=t['bg'], fg=t['error_fg'])
+        except NameError:
+            pass  # not yet defined on first apply_theme call during startup
         poll_label.configure(bg=t['bg'], fg=t['fg'])
         clip_label.configure(bg=t['bg'], fg=t['fg'])
         try:
@@ -455,8 +463,11 @@ def main_gui(config):
         # The list as it was goes to the history first (a burst of quick edits keeps one copy).
         _history.snapshot(channels_file, min_interval=45)
         try:
-            with open(channels_file, "w") as f:
-                json.dump(channels, f, indent=2)
+            # replaced in one step: a failing disk must not leave half a channel list
+            _history.atomic_write(channels_file, json.dumps(channels, indent=2).encode("utf-8"))
+            _storage.write_ok("the channel list", channels_file)
+        except OSError as e:
+            _storage.write_failed("the channel list", channels_file, e)
         except Exception as e:
             logging.error(f"Failed to save channels: {e}")
         # Keep the push listener's presence-only (disabled) set in step.
@@ -1393,6 +1404,10 @@ def main_gui(config):
     # The disk/network meter lives on its own thin row under the header: the header's buttons
     # (Clip Now, Screenshot, Clips, Streams) already fill the row at the default window width.
     status_meter_row = tk.Frame(status_tab)
+    # Shown under the header only while the recordings folder is unreachable (an unplugged drive).
+    storage_notice_label = tk.Label(status_tab, text="", anchor="w", justify="left",
+                                    font=("Segoe UI", 9, "bold"), wraplength=820)
+    _storage_notice_shown = [""]
     status_label = tk.Label(status_header, text="Live Recording Status",
                             font=("Segoe UI", 13, "bold"), anchor="w")
     status_label.pack(side=tk.LEFT)
@@ -2804,7 +2819,24 @@ def main_gui(config):
         finally:
             _nav_lock[0] = False
 
+    def _show_storage_notice(text):
+        """Show/hide the recordings-folder warning; one toast when it appears."""
+        t = _themes.current()
+        storage_notice_label.configure(bg=t['bg'], fg=t['error_fg'], text=text)
+        if text and not storage_notice_label.winfo_manager():
+            storage_notice_label.pack(fill=tk.X, padx=10, pady=(0, 4), after=status_header)
+        elif not text and storage_notice_label.winfo_manager():
+            storage_notice_label.pack_forget()
+        if text and text != _storage_notice_shown[0] and notifications_enabled:
+            send_notification("Recordings folder", text, category="error", channel="storage",
+                              detail=text)
+        _storage_notice_shown[0] = text
+
     def refresh_status():
+        try:
+            _show_storage_notice(recorder.storage_notice() if recorder and recorder.is_running else "")
+        except Exception as e:
+            logging.debug(f"storage notice: {e}")
         if recorder and recorder.is_running:
             recorder.update_status_from_queue()
 

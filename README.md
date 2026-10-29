@@ -159,6 +159,7 @@ These are stored in plain text, which is one more reason `config.ini` is git-ign
 | Section / key | Default | Meaning |
 | --- | --- | --- |
 | `Paths/streams_dir` | Videos\Multi-Stream Recorder | Where `Recorded`, `Processed`, `Clips` and the log go |
+| `Paths/fallback_dir` | (blank) | Where recording continues if `streams_dir` becomes unreachable while MSR runs (an unplugged USB or external drive, a dropped share). Blank = `MultiStreamRecorder\Recordings` in the system temp folder; `off` = pause instead. What was recorded there is moved back to `streams_dir` when it returns. It is only used when the folder cannot be reached, not when it is low on space |
 | `Paths/cookies_file` | auto | Explicit cookies.txt path |
 | `Recording/quality` | best | Stream quality |
 | `Recording/max_file_size_gb` | 8 | Size split (0 = off) |

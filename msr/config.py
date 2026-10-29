@@ -1,11 +1,12 @@
 """config.ini defaults and accessors."""
 import datetime
+import io
 import logging
 import os
 import shutil
 import configparser
 
-from msr import history
+from msr import history, storage
 
 # Values are literal: a ``%`` in a password or a filename pattern must not be read as
 # interpolation (the default parser raises on ``100%`` and on ``P@ss%word``).
@@ -95,6 +96,10 @@ class Config:
             'streams_dir': '',  # filled with default_streams_dir() at load
             'channels_file': 'channels.json',
             'cookies_file': '',  # auto-detected if empty
+            # Where recording continues while streams_dir is unreachable (an unplugged drive).
+            # Blank = a folder in the system temp folder; 'off' = pause instead. Moved back when
+            # streams_dir returns.
+            'fallback_dir': '',
         },
         'Recording': {
             'quality': 'best',
@@ -214,11 +219,24 @@ class Config:
             logging.warning(f"Could not save a copy of the unreadable config.ini first: {e}")
 
     def _write(self):
+        """Write config.ini; returns False (and keeps the settings in memory) if the disk says no.
+
+        The file is replaced in one step, so a failing disk or a pulled plug cannot leave half a
+        file, and a read-only or missing folder is a warning, not a crash.
+        """
         # Keep the file as it is now in the history (Restore previous...) before overwriting it.
         self._backup_broken_file()
         history.snapshot(self.config_file)
-        with open(self.config_file, 'w', encoding='utf-8') as f:
-            self.config.write(f)
+        buffer = io.StringIO()
+        self.config.write(buffer)
+        data = buffer.getvalue().replace('\n', os.linesep).encode('utf-8')
+        try:
+            history.atomic_write(self.config_file, data)
+        except OSError as e:
+            storage.write_failed("config.ini", self.config_file, e)
+            return False
+        storage.write_ok("config.ini", self.config_file)
+        return True
 
     def _write_startup(self):
         """Write needed by loading itself (missing defaults, coerced values).
@@ -230,8 +248,8 @@ class Config:
             self._write()
 
     def save(self):
-        """Write config.ini (the previous version goes to the history first)."""
-        self._write()
+        """Write config.ini (the previous version goes to the history first). False if it failed."""
+        return self._write()
 
     def reload(self):
         """Re-read config.ini, e.g. after a restore, so a later save does not undo it."""

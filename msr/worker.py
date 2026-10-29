@@ -21,6 +21,7 @@ from msr.config import (
     parser_getfloat,
     parser_getint,
 )
+from msr import storage
 from msr.deps import HAS_CURL_CFFI, HAS_YTDLP
 from msr.preview_state import build_ladder
 from msr.platforms import (
@@ -43,7 +44,6 @@ from msr.util import (
     PENDING_DELETION_FOLDER,
     build_filename,
     channel_key_to_dirs,
-    check_disk_space,
     custom_url_folder_names,
     ffprobe_from_ffmpeg,
     parse_channel_key,
@@ -144,16 +144,19 @@ def find_active_recording_file(recorder, channel_key):
         platform, username_dir = channel_key_to_dirs(channel_key)
     except Exception:
         return None
-    channel_dir = os.path.join(recorder.recorded_base, platform, username_dir)
-    if not os.path.isdir(channel_dir):
-        return None
-    try:
-        ts_files = [
-            os.path.join(channel_dir, f) for f in os.listdir(channel_dir)
-            if f.lower().endswith('.ts')
-        ]
-    except Exception:
-        return None
+    ts_files = []
+    for base in (recorder.recorded_base, getattr(recorder, "fallback_recorded_base", None)):
+        # the fallback folder holds the live file while the main drive is unavailable
+        channel_dir = os.path.join(base, platform, username_dir) if base else None
+        if not channel_dir or not os.path.isdir(channel_dir):
+            continue
+        try:
+            ts_files += [
+                os.path.join(channel_dir, f) for f in os.listdir(channel_dir)
+                if f.lower().endswith('.ts')
+            ]
+        except Exception:
+            continue
     if not ts_files:
         return None
     return max(ts_files, key=os.path.getmtime)
@@ -1143,6 +1146,7 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
     tool_name = tool_name_override or ("yt-dlp" if platform in ["kick", "youtube", "rumble", "custom"] else "streamlink")
     zero_byte_strikes = 0
     file_appeared = False
+    file_gone_since = None   # when the file we were writing stopped existing (a drive that went away)
     split_requested = False
 
     # Stall detection: kill the process if the file stops growing for this long.
@@ -1200,6 +1204,7 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
         try:
             if os.path.exists(raw_file):
                 file_appeared = True
+                file_gone_since = None
                 size = os.path.getsize(raw_file)
 
                 # Track file growth for stall detection
@@ -1295,6 +1300,20 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                 )
                 kill_process_tree(proc.pid, logger)
                 break
+
+            elif file_appeared:
+                # The file we were writing is gone: the drive was unplugged or the share dropped.
+                # The capture tool can hang on a dead volume, so end it; the worker then records
+                # on into the fallback folder (or waits) instead of sitting here.
+                if file_gone_since is None:
+                    file_gone_since = time.monotonic()
+                elif time.monotonic() - file_gone_since > 30:
+                    logger.error(
+                        f"The recording file vanished 30s ago ({os.path.basename(raw_file)}) - the "
+                        f"drive may have been unplugged. Stopping {tool_name} (PID {proc.pid})"
+                    )
+                    kill_process_tree(proc.pid, logger)
+                    break
 
         except Exception as e:
             logger.warning(f"Error checking file size: {e}")
@@ -2023,19 +2042,28 @@ def record_worker(args):
         url = f"https://{platform}.com/{username}"
 
     # Directory paths (but DON'T create them yet — wait until we actually record)
-    recorded_base = os.path.join(root_path, "Recorded")
-    processed_base = os.path.join(root_path, "Processed")
-    pending_base = os.path.join(root_path, PENDING_DELETION_FOLDER)
-
     # Sanitize the username for use as a folder name: preserves leading underscores
     # and mid-string periods (e.g. _avamartinez, boo.tleg) but strips characters
     # that Windows forbids in folder names and trailing dots/spaces.
     # Custom URLs already have a sanitized (possibly nested) relative dir.
     if username_dir is None:
         username_dir = sanitize_path_component(username)
-    recorded_path = os.path.join(recorded_base, platform, username_dir)
-    processed_path = os.path.join(processed_base, platform, username_dir)
-    pending_dir = os.path.join(pending_base, platform, username_dir)
+
+    def _channel_dirs(root):
+        return (os.path.join(root, "Recorded", platform, username_dir),
+                os.path.join(root, "Processed", platform, username_dir),
+                os.path.join(root, PENDING_DELETION_FOLDER, platform, username_dir))
+
+    recorded_path, processed_path, pending_dir = _channel_dirs(root_path)
+
+    # The recordings folder can go away while we run (unplugged drive). `primary_root` is what
+    # the user configured; `root_path` is where this worker records right now (the fallback
+    # folder while the main one is unreachable). It is re-checked before every new recording,
+    # never in the middle of one.
+    primary_root = root_path
+    fallback_root = storage.fallback_root(config.get('Paths', 'fallback_dir', fallback=''))
+    storage_state = "ok"          # what was last logged: "ok", "fallback" or "down"
+    storage_logged_at = 0.0
 
     last_status = None
     stream_title = None  # populated on check
@@ -2169,18 +2197,43 @@ def record_worker(args):
             except Exception:
                 pass  # Manager may be unavailable during shutdown — keep last known value
 
-            # Check disk space
-            has_space, free_gb = check_disk_space(root_path, min_disk_space_gb)
-            if not has_space:
-                if free_gb is None:
-                    detail = "disk unreadable"
-                    log_msg = "Cannot measure or write to streams directory — pausing"
-                else:
-                    detail = f"Low disk space: {free_gb:.1f}GB"
+            # Check the recordings folder: reachable? enough space? else use the fallback folder
+            choice = storage.choose_root(primary_root, fallback_root, min_disk_space_gb)
+            if choice.ok:
+                new_state = "fallback" if choice.on_fallback else "ok"
+                if choice.path != root_path:
+                    # A new folder only between recordings: parts of an old session stay where
+                    # they are (they are already separate MP4s), and an unfinished stitch is dropped.
+                    if group_parts:
+                        logger.warning("Recordings folder changed - the reconnect parts recorded so far "
+                                       "stay as separate files")
+                    group_parts = []
+                    group_base_name = None
+                    root_path = choice.path
+                    recorded_path, processed_path, pending_dir = _channel_dirs(root_path)
+                if new_state != storage_state:
+                    if new_state == "fallback":
+                        logger.warning(
+                            f"Recordings folder {primary_root} is not available ({choice.reason}). "
+                            f"New recordings go to the fallback folder {root_path} and are moved back "
+                            f"when the main folder returns.")
+                    else:
+                        logger.info(f"Recordings folder {primary_root} is available again - "
+                                    "recording there from now on")
+                    storage_state = new_state
+            if not choice.ok:
+                if choice.low_space:
+                    detail = f"Low disk space: {choice.free_gb:.1f}GB"
                     log_msg = (
-                        f"Insufficient disk space: {free_gb:.1f}GB available, "
+                        f"Insufficient disk space: {choice.free_gb:.1f}GB available, "
                         f"{min_disk_space_gb}GB required"
                     )
+                    wait_seconds = 300
+                else:
+                    detail = "drive not available"
+                    log_msg = (f"Recordings folder {primary_root} is not available ({choice.reason}) - "
+                               "waiting for it to return")
+                    wait_seconds = 60   # look again soon: the drive may be back in a minute
                 new_status = {
                     "status": "Error",
                     "detail": detail,
@@ -2189,9 +2242,14 @@ def record_worker(args):
                 if new_status != last_status:
                     status_queue.put((channel_key, new_status))
                     last_status = new_status.copy()
-                logger.error(log_msg)
-                if interruptible_sleep(300, wake_event, stop_event):
-                    logger.info("Manual check requested — re-checking disk space now")
+                # One line per change, then a reminder every 30 minutes (not one per check).
+                new_state = "low" if choice.low_space else "down"
+                if new_state != storage_state or time.monotonic() - storage_logged_at > 1800:
+                    logger.error(log_msg)
+                    storage_logged_at = time.monotonic()
+                storage_state = new_state
+                if interruptible_sleep(wait_seconds, wake_event, stop_event):
+                    logger.info("Manual check requested — re-checking the recordings folder now")
                 continue
 
             if skip_checking_status:
@@ -2504,6 +2562,8 @@ def record_worker(args):
                     )
                 closing_parts = group_parts
                 closing_name = group_base_name
+                bg_processed_path = processed_path   # fixed now: the folder can change before it ends
+                bg_pending_dir = pending_dir
                 group_parts = []
                 group_base_name = None
 
@@ -2524,6 +2584,8 @@ def record_worker(args):
                     stream_title=closed_title,
                     closing_parts=closing_parts,
                     closing_name=closing_name,
+                    processed_path=bg_processed_path,
+                    pending_dir=bg_pending_dir,
                 ):
                     try:
                         time.sleep(2)
@@ -2989,6 +3051,15 @@ def record_worker(args):
             logger.info("KeyboardInterrupt received — exiting")
             break
         except Exception as e:
+            if isinstance(e, OSError) and storage.is_drive_error(e, root_path):
+                # The recordings drive went away under a recording. Not a crash: no long
+                # back-off; the loop top picks the fallback folder (or waits) and carries on.
+                logger.error(f"The recordings drive was lost while recording ({storage.classify(e)}) - "
+                             f"{root_path}. Looking for it again in a few seconds.")
+                status_queue.put((channel_key, {"status": "Error", "detail": "drive not available",
+                                                "size": "", "time": "", "progress": 0}))
+                time.sleep(5)
+                continue
             logger.error(f"Worker crashed: {e}", exc_info=True)
             status_queue.put((channel_key, {"status": "Error", "detail": str(e)[:50], "size": "", "time": "", "progress": 0}))
             logger.warning(f"Worker restarting in {_crash_backoff}s (backoff)")

@@ -9,6 +9,7 @@ import signal
 import threading
 import time
 
+from msr import storage
 from msr.deps import HAS_CURL_CFFI, HAS_WEBSOCKET
 from msr.util import (
     PENDING_DELETION_FOLDER,
@@ -970,8 +971,8 @@ class KickPushListener:
         try:
             with open(self._cache_path, "w", encoding="utf-8") as f:
                 json.dump(self._ids, f, indent=2)
-        except OSError:
-            pass
+        except OSError as e:
+            storage.write_failed("the Kick channel id cache", self._cache_path, e)
 
     # ── shared-state plumbing ──
 
@@ -989,6 +990,15 @@ class KickPushListener:
 class StreamRecorder:
     """Main recorder that manages worker processes."""
 
+    # Recordings folder watch state (see _storage_tick); defaults so a bare instance works too.
+    fallback_root = None
+    fallback_recorded_base = None
+    _storage_state = "ok"          # "ok", "fallback" (main folder gone, fallback in use) or "down"
+    _storage_notice = ""
+    _storage_next_check = 0.0
+    _fallback_next_scan = 0.0
+    _fallback_thread = None
+
     def __init__(self, channels, config, presence=None, watch_channels=None):
         self.channels = channels
         self.config = config
@@ -1001,9 +1011,20 @@ class StreamRecorder:
         self.processed_base = os.path.join(self.root_path, "Processed")
         self.pending_base = os.path.join(self.root_path, PENDING_DELETION_FOLDER)
 
-        os.makedirs(self.recorded_base, exist_ok=True)
-        os.makedirs(self.processed_base, exist_ok=True)
-        os.makedirs(self.pending_base, exist_ok=True)
+        # An unreachable drive must not stop the session from starting: the workers record into the
+        # fallback folder meanwhile (see msr/storage.py) and the watch in run() reports it.
+        try:
+            os.makedirs(self.recorded_base, exist_ok=True)
+            os.makedirs(self.processed_base, exist_ok=True)
+            os.makedirs(self.pending_base, exist_ok=True)
+        except OSError as e:
+            logging.warning(f"Recordings folder {self.root_path} is not available right now "
+                            f"({storage.REASONS[storage.classify(e)]}); it is checked again every few seconds")
+
+        # Recordings folder watch (a drive that is unplugged while we run).
+        self.fallback_root = storage.fallback_root(config.get('Paths', 'fallback_dir', fallback=''))
+        self.fallback_recorded_base = (os.path.join(self.fallback_root, "Recorded")
+                                       if self.fallback_root else None)
 
         self.manager = mp.Manager()
         self.status_queue = self.manager.Queue()
@@ -1420,6 +1441,83 @@ class StreamRecorder:
             return not thread.is_alive()
         return True
 
+    # ------------------------------------------------------------------
+    # Recordings folder watch
+    #
+    # Workers pick the folder themselves before every new recording (storage.choose_root). This
+    # side only reports the state once (log + GUI line) and, when the main folder is back, moves
+    # the footage recorded in the fallback folder into it.
+    # ------------------------------------------------------------------
+
+    STORAGE_CHECK_SECONDS = 10
+    FALLBACK_SCAN_SECONDS = 300
+
+    def storage_notice(self):
+        """A one-line warning for the GUI while the recordings folder is unreachable ('' = fine)."""
+        return self._storage_notice
+
+    def _storage_tick(self, force=False):
+        now = time.monotonic()
+        if not force and now < self._storage_next_check:
+            return
+        self._storage_next_check = now + self.STORAGE_CHECK_SECONDS
+        min_gb = self.config.getfloat('Recording', 'min_disk_space_gb', fallback=5.0)
+        choice = storage.choose_root(self.root_path, self.fallback_root, min_gb)
+        if choice.ok and not choice.on_fallback or choice.low_space:
+            state = "ok"
+        elif choice.on_fallback:
+            state = "fallback"
+        else:
+            state = "down"
+        if state != self._storage_state:
+            if state == "ok":
+                logging.info(f"Recordings folder {self.root_path} is available again")
+                self._storage_notice = ""
+                self._start_fallback_return()
+            elif state == "fallback":
+                self._storage_notice = (f"Recordings folder not available ({choice.reason}). "
+                                        f"Recording to {choice.path} until it returns.")
+                logging.warning(self._storage_notice)
+            else:
+                self._storage_notice = (f"Recordings folder not available ({choice.reason}). "
+                                        "Recording is paused until it returns.")
+                logging.warning(f"{self._storage_notice} ({self.root_path})")
+            self._storage_state = state
+        elif state == "ok" and now >= self._fallback_next_scan:
+            self._fallback_next_scan = now + self.FALLBACK_SCAN_SECONDS
+            if self.fallback_root and storage.has_files(self.fallback_root):
+                self._start_fallback_return()
+
+    def _start_fallback_return(self):
+        """Move the footage recorded in the fallback folder into the main folder (background thread)."""
+        if not self.fallback_root:
+            return
+        thread = self._fallback_thread
+        if thread is not None and thread.is_alive():
+            return
+        self._fallback_thread = threading.Thread(
+            target=self._fallback_return_main, daemon=True, name="FallbackReturn")
+        self._fallback_thread.start()
+
+    def _fallback_return_main(self):
+        try:
+            if not storage.has_files(self.fallback_root):
+                return
+            logging.info(f"Fallback recordings: moving what was recorded in {self.fallback_root} "
+                         f"back to {self.root_path}")
+            result = storage.reconcile_fallback(self.fallback_root, self.root_path, logging.getLogger(),
+                                                should_stop=self.should_stop)
+            logging.info(f"Fallback recordings: {result.moved} file(s) moved back"
+                         + (f", {result.young} still in use or too new (checked again later)" if result.young else "")
+                         + (f", {result.failed} could not be moved (they stay in the fallback folder)"
+                            if result.failed else ""))
+            if result.moved_ts:
+                # Unfinished raw recordings: the leftover pass turns them into MP4s like after a crash.
+                self._launch_startup_cleanup(self._plan_startup_cleanup())
+        except Exception:
+            logging.exception("Fallback recordings: moving them back failed - the files stay in the "
+                              "fallback folder and it is tried again later")
+
     def run(self):
         if self.is_running:
             return
@@ -1468,6 +1566,7 @@ class StreamRecorder:
         # Monitor processes — restart any that exit unexpectedly
         while self.is_running and not self.should_stop.is_set():
             self.update_status_from_queue()
+            self._storage_tick()
 
             for ch in list(self.processes.keys()):
                 if self.should_stop.is_set():

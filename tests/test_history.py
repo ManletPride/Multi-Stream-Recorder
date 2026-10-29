@@ -259,7 +259,7 @@ class WiringTests(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         self.assertIn("msr_history/", (root / ".gitignore").read_text(encoding="utf-8"))
         gui = (root / "msr" / "gui.py").read_text(encoding="utf-8")
-        self.assertLess(gui.index("_history.snapshot(channels_file"), gui.index('with open(channels_file, "w")'))
+        self.assertLess(gui.index("_history.snapshot(channels_file"), gui.index("_history.atomic_write(channels_file"))
         self.assertNotIn("config.config.write(f)", gui)
 
 

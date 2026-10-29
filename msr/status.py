@@ -147,6 +147,20 @@ def _free_gb(folder: str) -> float | None:
         return None
 
 
+def _drive_available(folder: str) -> bool | None:
+    """False when the drive (or share) the folder is on is not there. None = not a Windows path.
+    Read-only: unlike storage.probe_dir it creates nothing."""
+    drive = os.path.splitdrive(os.path.abspath(folder))[0] if os.name == "nt" else ""
+    if not drive:
+        return None
+    return os.path.exists(drive + os.sep)
+
+
+def _fallback_mode(setting: str) -> str:
+    value = (setting or "").strip()
+    return "off" if value.lower() == "off" else "custom" if value else "default"
+
+
 def _roster_keys(channels_path: str) -> list[str] | None:
     """The raw roster names (None when channels.json is missing or unreadable)."""
     from msr.util import coerce_channel_records
@@ -203,7 +217,11 @@ def build_status(config_path: str = "config.ini", tools: dict | None = None, lib
         problems.append(channels["error"])
     elif not channels["enabled"]:
         problems.append("no channel is enabled")
-    if not os.path.isdir(streams):
+    drive_ok = _drive_available(streams)
+    if drive_ok is False:
+        problems.append("the drive of the recordings folder is not available "
+                        "(unplugged? recording uses the fallback folder, or pauses, until it returns)")
+    elif not os.path.isdir(streams):
         problems.append("recordings folder does not exist yet")
     if free is not None and min_free and free < min_free:
         problems.append(f"free disk space ({free} GB) is below min_disk_space_gb ({min_free:g})")
@@ -218,7 +236,9 @@ def build_status(config_path: str = "config.ini", tools: dict | None = None, lib
             "file": os.path.basename(config_path),
             "found": present,
             "settings": safe_settings(parser),
-            "recordings_folder": {"exists": os.path.isdir(streams), "free_gb": free},
+            "recordings_folder": {"exists": os.path.isdir(streams), "free_gb": free,
+                                  "drive_available": drive_ok,
+                                  "fallback": _fallback_mode(parser.get("Paths", "fallback_dir", fallback=""))},
             "fishtank_login_set": bool(parser.get("Fishtank", "email", fallback="").strip()
                                        and parser.get("Fishtank", "password", fallback="").strip()),
             "cookies_file_set": bool(parser.get("Paths", "cookies_file", fallback="").strip()),

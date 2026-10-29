@@ -28,6 +28,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, NamedTuple
 
+from msr import storage
 from msr.util import PENDING_DELETION_FOLDER, channel_key_to_dirs
 
 VIDEO_EXT = frozenset({".mp4", ".mkv", ".ts", ".webm", ".mov", ".m4v", ".flv", ".avi", ".m4a", ".mp3"})
@@ -546,7 +547,9 @@ class DurationCache:
                 json.dump({"version": self.VERSION, "d": self.items}, fh, separators=(",", ":"))
             os.replace(tmp, self.path)
             self.dirty = False
-        except OSError:
+            storage.write_ok("the Library cache", self.path)
+        except OSError as e:
+            storage.write_failed("the Library cache", self.path, e)
             try:
                 os.remove(tmp)
             except OSError:

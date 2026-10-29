@@ -28,6 +28,9 @@ A big interface release: a Library tab that shows (and can clean up) what your r
 - `--json` prints a read-only status snapshot (settings, roster, tools, problems) and exits; no secrets and no personal paths. `--json --library` adds the Library numbers.
 - `llms.txt` is a manual for AI assistants.
 
+**Unplugged drives**
+- New setting `[Paths] fallback_dir` (blank = a folder in the system temp folder, `off` = pause): where recording continues if the recordings folder becomes unreachable while MSR runs. See Fixed below.
+
 ### Changed
 - The **Dark Mode** checkbox is replaced by the Theme window. The choice is saved as `[GUI] theme`. Existing installs migrate by themselves (`dark_mode = true` becomes PowerShell Blue, `false` becomes Light) and the old key is kept in step, so an older version still works.
 - All popups and dialogs are themed, centred and attached to the window; the native Windows message boxes are gone.
@@ -53,11 +56,15 @@ A big interface release: a Library tab that shows (and can clean up) what your r
 - A start that fails under `pythonw` (the double-click launcher) now leaves `msr_startup_error.log` in the data folder, with the error and no passwords or tokens, and shows a message window when it can.
 - Headless mode (`--headless`): Ctrl+C now stops, then finishes the clean-up of leftover `.ts` files (about 30 s plus the remux time; press Ctrl+C again to skip) before it exits. It used to exit at once and leave them for the next start.
 - `ffmpeg_path` in `[Advanced]` is honoured at start-up: ffmpeg no longer has to be on PATH when the configured path works, a wrong path is reported with the setting's name, and ffprobe next to it is checked (a warning if it is missing).
+- Unplugging the recordings drive (USB, external, a dropped network share) while MSR runs no longer ends in silent failures. Each channel notices before its next recording, keeps recording into a fallback folder (`fallback_dir`, default: a folder in the Windows temp folder; `off` = pause), and records into the main folder again once it is back. A live recording already running on the lost drive is ended after 30 s instead of hanging, and the channel carries on in the fallback at once instead of waiting through the 60 s crash back-off.
+- The Status tab shows a red line while the folder is unreachable (and one notification), `--json` reports `drive_available`, and the log says it once instead of once per check.
+- When the drive returns, what was recorded in the fallback folder is moved back to the same place under `streams_dir` (a copy is checked before the original is removed; a file that may still be written is left for a later pass; nothing is ever overwritten), and unfinished `.ts` files go through the same clean-up as after a crash.
+- Pressing Start while the drive is gone no longer fails; `config.ini` and `channels.json` are written in one step and a failed save is a warning (settings stay in memory, the old file is kept) instead of an error in the window; the Library cache and action log, window state and Kick id cache warn once instead of failing silently.
 
 ### Developer notes
 - Every colour comes from `msr/themes.py` (semantic tokens) and the palette data in `msr/theme_palettes.py`; a test fails on any hard-coded colour elsewhere. Adding a theme is one entry in `msr/theme_palettes.py`.
 - The test suite grew from 299 to 652 tests, including a hidden-window smoke test that launches the real UI in every theme. `AGENTS.md` documents the new modules.
-- New files that stay out of git: `themes/`, `msr_history/`, `library_cache.json`, `library_moves.json`, `library_actions.log`, `msr_startup_error.log`, `config.ini.broken-*`.
+- New files that stay out of git: `themes/`, `msr_history/`, `library_cache.json`, `library_moves.json`, `library_actions.log`, `msr_startup_error.log`, `config.ini.broken-*`. Recordings made while the drive was away are in `fallback_dir` (outside the repo).
 
 ## v2.1.0 (2026-10)
 

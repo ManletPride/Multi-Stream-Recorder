@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
 from msr import library as lib
+from msr import storage
 from msr.util import PENDING_DELETION_FOLDER, channel_key_to_dirs
 
 RECENT_SECONDS = 600           # a file touched this recently may still be in use
@@ -513,8 +514,10 @@ class ActionLog:
             os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
             with open(self.path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except OSError:
-            pass  # an unwritable log must not stop the user from cleaning up... the UI says so
+            storage.write_ok("the Library action log", self.path)
+        except OSError as e:
+            # an unwritable log must not stop the user from cleaning up... the UI says so
+            storage.write_failed("the Library action log", self.path, e)
 
     def writable(self) -> bool:
         if not self.path:
@@ -553,8 +556,9 @@ class Manifest:
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump({"moves": moves}, fh, ensure_ascii=False)
             os.replace(tmp, self.path)
-        except OSError:
-            pass
+            storage.write_ok("the Library undo list", self.path)
+        except OSError as e:
+            storage.write_failed("the Library undo list", self.path, e)
 
     def add(self, records: list[dict]) -> None:
         if records:

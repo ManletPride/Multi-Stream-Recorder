@@ -10,6 +10,8 @@ import re
 import tkinter as tk
 from pathlib import Path
 
+from msr import storage
+
 _GEOMETRY = re.compile(r"^(\d+)x(\d+)(?:([+-])(-?\d+)([+-])(-?\d+))?$")
 DIALOGS_KEY = "dialogs"
 KEEP_VISIBLE = 80  # px of the window that must stay on the monitor
@@ -77,8 +79,9 @@ def merge(path, values: dict, *, dialog: tuple[str, str] | None = None) -> None:
         with open(tmp, "w", encoding="utf-8") as handle:
             json.dump(state, handle, indent=2)
         os.replace(tmp, path)
-    except OSError:
-        pass
+        storage.write_ok("the window state", path)
+    except OSError as e:
+        storage.write_failed("the window state", path, e)
 
 
 def work_area_for(win: tk.Misc, geometry: str):
