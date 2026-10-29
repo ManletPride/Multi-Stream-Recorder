@@ -156,6 +156,24 @@ class CoerceChannelRecordsTests(unittest.TestCase):
 
 
 class RedactTests(unittest.TestCase):
+    def test_googlevideo_url_hides_ip_and_signatures(self):
+        url = ("https://manifest.googlevideo.com/api/manifest/hls_playlist/expire/1793321105/ei/MZTj/"
+               "ip/2600:4040:10fe:9200:b0d6:496f:b899:3cd6/id/MqdMmvG6TdM.1/itag/311/source/yt_live_broadcast/"
+               "sparams/expire,ei,ip/sig/AJfQdSswRQ/lsig/APaTxxM/playlist/index.m3u8")
+        cmd = ["ffmpeg", "-headers", "User-Agent: X\r\nCookie: a=b\r\n", "-i", url, "out.ts"]
+        out = redact_cmd_for_log(cmd)
+        self.assertIn("manifest.googlevideo.com \u2026 id=MqdMmvG6TdM itag=311 [redacted]", out)
+        for secret in ("2600:", "AJfQ", "APaT", "1793321105", "MZTj", "a=b"):
+            self.assertNotIn(secret, out)
+        self.assertIn(url, cmd)  # the real argv is untouched
+
+    def test_twitch_m3u8_tokens_and_ip_query(self):
+        out = redact_for_log("https://usher.ttvnw.net/api/channel/hls/saruei.m3u8?allow_source=true"
+                             "&sig=abc123&token=%7B%22user_ip%22%7D&ip=1.2.3.4&expire=99")
+        for secret in ("abc123", "user_ip", "1.2.3.4", "=99"):
+            self.assertNotIn(secret, out)
+        self.assertIn("allow_source=true", out)
+
     def test_jwt_query(self):
         text = "Error opening input: https://cdn.example/hls/index.m3u8?jwt=eyJabc.def"
         out = redact_for_log(text)

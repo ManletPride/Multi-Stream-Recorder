@@ -2588,6 +2588,9 @@ def record_worker(args):
                         # Grace period expired — stream didn't come back
                         logger.info("Reconnect grace period expired — resuming normal offline polling")
                         reconnect_mode = False
+                        status_queue.put((channel_key, {  # agent control: "ended" event
+                            "status": "Offline", "detail": "reconnect grace period over",
+                            "size": "", "time": "", "progress": 0, "event": "ended"}))
                         _finalize_pending_group()
 
                 # Normal offline — flat interval with jitter (no backoff)
@@ -2979,6 +2982,13 @@ def record_worker(args):
                     f"reconnect grace period (+{reconnect_extended_minutes}min at {RECONNECT_EXTENDED_POLL_INTERVAL}s), "
                     f"starting after remux"
                 )
+            if not stop_event.is_set() and not split_requested:
+                # agent control: the stream ended on its own -> "offline" event (msr.agent_status)
+                status_queue.put((channel_key, {
+                    "status": "Offline",
+                    "detail": "stream ended" + (", reconnect grace period" if reconnect_mode else ""),
+                    "size": "", "time": "", "progress": 0, "event": "offline", "was_recording": True,
+                    "duration_seconds": int(elapsed), "in_grace_period": bool(reconnect_mode)}))
 
             # ── Micro-fragment throttle ─────────────────────────────────────
             # If the server keeps dropping us after only a few seconds (e.g.

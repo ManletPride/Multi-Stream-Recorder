@@ -14,7 +14,7 @@ from collections import deque
 FINISHED_KEEP = 50        # finished recordings remembered this run
 FINISHED_IN_STATUS = 20   # of those, how many go into msr_status.json
 EVENTS_KEEP = 500
-EVENT_KINDS = ("live", "stopped", "remux_started", "finished", "error")
+EVENT_KINDS = ("live", "stopped", "remux_started", "finished", "error", "offline", "ended")
 HEALTH_EVERY = 30.0       # seconds between health checks for the status file
 QUEUE_EVERY = 15.0        # seconds between scans of Recorded/ for the cleanup queue
 
@@ -129,6 +129,17 @@ class Tracker:
             return
         if old == (status, detail):
             return
+        if st.get("event") in ("offline", "ended"):
+            # the stream ended on its own (worker marker): "offline" when the recording stops,
+            # "ended" when the reconnect grace period runs out without the stream coming back
+            self._live[key] = False
+            if st["event"] == "offline":
+                self.emit("offline", key, was_recording=bool(st.get("was_recording", was_recording)),
+                          duration_seconds=st.get("duration_seconds"),
+                          in_grace_period=bool(st.get("in_grace_period")))
+            else:
+                self.emit("ended", key)
+            return
         if low == "stopped" and was_recording and key not in self.finishing:
             self._stopping(key, True)   # stopped outside control (the window's right-click Stop)
         elif low == "completed":
@@ -162,7 +173,8 @@ class Tracker:
 
     def _error(self, info, key, text, now):
         info["errors"] += 1
-        info["last_error"] = text[:300]
+        from msr.util import redact_for_log
+        info["last_error"] = redact_for_log(text)[:300]
         info["last_error_at"] = now
         self.emit("error", key, error=info["last_error"])
 
@@ -206,6 +218,11 @@ class Tracker:
             return self._stopping(key, was_recording)
 
     def _stopping(self, key, was_recording):
+        if not was_recording:
+            # stopping an idle / offline / already stopped channel: nothing happened, no event
+            self.finishing.pop(key, None)
+            self._live[key] = False
+            return self.seq
         ev = self.emit("stopped", key, was_recording=bool(was_recording))
         self.stop_seq[key] = ev["seq"]
         self.stop_finished.discard(key)

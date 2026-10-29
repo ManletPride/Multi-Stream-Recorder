@@ -47,6 +47,9 @@ A big interface release: a Library tab that shows (and can clean up) what your r
 - The preview strip is not refreshed while the Status tab is hidden or the window is minimised or in the tray, and refreshes at once when it is shown again.
 
 ### Fixed
+- Signed stream URLs are redacted in the console, log file, status file and events: YouTube googlevideo URLs (which carry your IP address and signatures) are logged as `manifest.googlevideo.com … id=VIDEO itag=311 [redacted]`, and `sig`, `token`, `ip`, `expire` and similar query values (Twitch/Kick m3u8 and others) as `***`, including the "Starting recording" command line. The command that actually runs is unchanged.
+- Agent control: `record-stop` or `channel remove` on a channel that is not recording no longer emits a `stopped` event (the reply still says `was_idle`).
+- Agent control: new `offline` event when a stream ends on its own (with `was_recording`, `duration_seconds` and `in_grace_period`) and `ended` when the reconnect grace period runs out; `wait --event offline` works. Additive, `api_version` stays 1.
 - Agent control: a `live` event now fires for every recording start, including a restart or a channel removed and added again in the same session; `wait --event live --channel X` returns at once (`"already": true`) when X is already recording.
 - Agent control: removing a channel that is recording (by command or in the window) emits `stopped`, so `wait --event finished` works for it. Disabling a channel does not stop a running recording, so it emits nothing until that recording ends.
 - Per-channel cleanup after a stop no longer logs "some files were busy, retrying" because another channel is recording; it retries only while this channel's own raw files are still locked.

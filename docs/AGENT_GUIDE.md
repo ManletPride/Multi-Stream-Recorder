@@ -38,7 +38,11 @@ After a stop, the raw `.ts` is remuxed to `.mp4` in the background, usually with
 
 **Wait for anything**
 ```
-python msr_ctl.py wait --timeout 600                 # live | stopped | remux_started | finished | error
+python msr_ctl.py wait --timeout 600                 # live | stopped | remux_started | finished | error | offline | ended
+python msr_ctl.py wait --event offline --channel knut --timeout 3600
+# offline: the stream ended on its own (was_recording, duration_seconds, in_grace_period);
+# ended: the reconnect grace period ran out without the stream coming back.
+# stopped fires only when a recording was actually stopped (record-stop / remove of an idle channel: no event).
 python msr_ctl.py events --after 41                  # what happened since seq 41
 ```
 Each event has a `seq`. Pass the last `seq` you saw as `--after` and nothing is missed between calls. Exit 6 means nothing happened before the timeout.

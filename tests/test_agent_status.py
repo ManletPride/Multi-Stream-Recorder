@@ -580,6 +580,57 @@ class RestartAndRemoveTests(unittest.TestCase):
         self.assertEqual(reply.get("code"), "timeout", reply)
 
 
+class OfflineAndIdleStopTests(unittest.TestCase):
+    """A stream that ends on its own emits offline (and ended after the grace period);
+    stopping a channel that is not recording emits nothing."""
+
+    setUp = FinishingTests.setUp
+    tearDown = FinishingTests.tearDown
+
+    def kinds(self, key):
+        return [e["event"] for e in self.t.events() if e["channel"] == key]
+
+    def test_record_stop_on_an_idle_channel_is_was_idle_without_an_event(self):
+        st = self.app.recorder.status_dict
+        st["knut"] = {"status": "Offline", "detail": "next check ~60s"}
+        self.t.seen("knut", st["knut"])
+        row = self.c.handle("record_stop", {"channels": ["knut"]})["result"]["channels"][0]
+        self.assertEqual(row["result"], "was_idle")
+        self.c.handle("record_stop", {"channels": ["knut"]})   # and again, already stopped
+        self.assertEqual(self.kinds("knut"), [])
+
+    def test_remove_of_an_idle_channel_emits_nothing(self):
+        st = self.app.recorder.status_dict
+        st["knut"] = {"status": "Stopped"}
+        self.app.recorder.remove_channel = lambda key: st.pop(key, None)
+        self.c.handle("channel_remove", {"channels": ["knut"]})
+        self.assertEqual(self.kinds("knut"), [])
+
+    def test_stream_end_emits_offline_then_ended(self):
+        self.t.seen("knut", {"status": "Recording"})
+        mark = {"status": "Offline", "detail": "stream ended, reconnect grace period", "event": "offline",
+                "was_recording": True, "duration_seconds": 460, "in_grace_period": True}
+        self.t.seen("knut", mark)
+        self.t.seen("knut", dict(mark))          # the status file feed sees it again: no duplicate
+        ev = self.c.handle("wait", {"events": ["offline"], "channel": "knut", "after": 0, "timeout": 0})["result"]
+        self.assertEqual((ev["event"], ev["was_recording"], ev["duration_seconds"], ev["in_grace_period"]),
+                         ("offline", True, 460, True))
+        self.t.seen("knut", {"status": "Offline", "detail": "reconnecting (100s left)"})
+        self.t.seen("knut", {"status": "Offline", "detail": "reconnect grace period over", "event": "ended"})
+        self.assertEqual(self.kinds("knut"), ["live", "offline", "ended"])
+
+    def rows(self):
+        return {r["name"]: r for r in control.channel_rows(self.app)}
+
+    def test_status_detail_is_redacted(self):
+        self.app.recorder.status_dict["knut"] = {"status": "Error", "detail": (
+            "open https://rr1.googlevideo.com/videoplayback/expire/1/ip/2600:4040::1/id/abc.1/itag/311/sig/S")}
+        row = self.rows()["knut"]
+        for text in (row["detail"], row["error"]):
+            self.assertNotIn("2600:", text)
+            self.assertIn("id=abc itag=311 [redacted]", text)
+
+
 class CleanerReportTests(unittest.TestCase):
     def test_cleanup_pass_reports_remux_started_and_finished(self):
         from msr import recorder as recorder_mod

@@ -29,6 +29,7 @@ import time
 from collections import deque
 
 from msr import __version__
+from msr.util import redact_for_log
 
 CONTROL_FILE = "msr_control.json"
 STATUS_FILE = "msr_status.json"
@@ -627,14 +628,14 @@ def _row(index, key, enabled_flag, st, stopped, push, presence):
         "platform": _platform(key),
         "enabled": enabled_flag,
         "status": status,
-        "detail": str(st.get("detail", "") or ""),
+        "detail": redact_for_log(str(st.get("detail", "") or "")),
         "live": live,
         "recording": recording,
         "stopped": stopped,
         "file": os.path.basename(current) if current else "",
         "size": st.get("size", ""),
         "duration": st.get("time", ""),
-        "error": str(st.get("detail", "")) if "error" in low or "failed" in low else "",
+        "error": redact_for_log(str(st.get("detail", ""))) if "error" in low or "failed" in low else "",
         "kick_push": push,
     }
 
@@ -1297,7 +1298,7 @@ class Controller:
         return {"events": tracker.events(int(args.get("after", 0) or 0)), "seq": tracker.seq}
 
     def cmd_wait(self, args):
-        """Block until a live / stopped / remux_started / finished / error event (for one channel),
+        """Block until a live / stopped / remux_started / finished / error / offline / ended event (for one channel),
         or time out. A "finished" wait for a channel that was stopped starts at that stop, so a
         finish that happened between the stop and the wait is returned at once."""
         from msr.agent_status import EVENT_KINDS

@@ -1733,13 +1733,58 @@ _SENSITIVE_QUERY_KEYS = {
     'auth', 'authorization', 'sig', 'signature', 'key',
     'api_key', 'apikey', 'password', 'passwd', 'pwd', 'secret',
     'session', 'sessionid', 'playback_token', 'live_stream_token',
-    'hash',
+    'hash', 'ip', 'expire', 'expires', 'lsig', 'policy', 'key-pair-id',
 }
 _SENSITIVE_QUERY_SUBSTR = ('token', 'jwt', 'secret', 'passwd', 'password', 'signature')
 _SENSITIVE_HEADER_RE = re.compile(
     r'(?i)(\b(?:Authorization|Cookie|Set-Cookie|X-Api-Key)\s*:\s*)(.*?)(?=\r\n|$)',
 )
 _QUERY_PARAM_RE = re.compile(r'([?&])([^=&\s]+)=([^&\s]*)')
+
+
+# Path segments of signed CDN URLs (googlevideo: /expire/N/ei/X/ip/ADDR/.../sig/S/lsig/L)
+# whose following segment is a secret or identifies the user.
+_SENSITIVE_PATH_KEYS = {'ip', 'sig', 'lsig', 'signature', 'expire', 'ei', 'token', 'jwt', 'sparams', 'n'}
+_URL_RE = re.compile(r'https?://[^\s"\'<>]+')
+
+
+def _summarize_signed_url(url):
+    """A URL with secrets in its path (googlevideo: /ip/ADDR/.../sig/S) reduced to what helps
+    debugging: host and path up to the first secret segment, for googlevideo the video id and
+    itag. None when it has no such path secret (query secrets are masked by redact_for_log)."""
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    host = parts.hostname or ""
+    segs = parts.path.split("/")
+    path_keys = [s.lower() for s in segs[1::2]] + [s.lower() for s in segs[2::2]]
+    signed_path = any(k in _SENSITIVE_PATH_KEYS - {'n'} for k in path_keys)
+    qkeys = [kv.split("=", 1)[0].lower() for kv in parts.query.split("&") if kv]
+    signed_query = any(k in _SENSITIVE_QUERY_KEYS or any(p in k for p in _SENSITIVE_QUERY_SUBSTR)
+                       for k in qkeys)
+    # Query-only secrets elsewhere keep their keys with masked values (redact_for_log below).
+    if not (signed_path or (signed_query and host.endswith("googlevideo.com"))):
+        return None
+    if host.endswith("googlevideo.com"):
+        found = {}
+        for i, seg in enumerate(segs[:-1]):
+            if seg in ("id", "itag") and seg not in found:
+                found[seg] = segs[i + 1].split(".")[0]
+        for kv in parts.query.split("&"):
+            k, _, v = kv.partition("=")
+            if k in ("id", "itag") and k not in found:
+                found[k] = v.split(".")[0]
+        extra = " ".join(f"{k}={found[k]}" for k in ("id", "itag") if k in found)
+        return f"{host} \u2026 {extra} [redacted]".replace("  ", " ")
+    keep = []
+    for seg in segs:
+        if seg.lower() in _SENSITIVE_PATH_KEYS - {'n'}:
+            keep.append("\u2026")
+            break
+        keep.append(seg)
+    return f"{parts.scheme}://{host}{'/'.join(keep)} [redacted]"
 
 
 def redact_for_log(text):
@@ -1752,6 +1797,9 @@ def redact_for_log(text):
     if not text:
         return text
     text = str(text)
+    # Signed stream URLs (YouTube googlevideo with the user's IP, Twitch/Kick m3u8 tokens,
+    # CloudFront policies...) are replaced as a whole; anything else keeps the masking below.
+    text = _URL_RE.sub(lambda m: _summarize_signed_url(m.group(0)) or m.group(0), text)
 
     def _param(m):
         sep, key = m.group(1), m.group(2)
