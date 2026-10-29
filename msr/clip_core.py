@@ -179,6 +179,43 @@ def grab_frame(ffmpeg: str, src: str, t: float, width: int = 640) -> bytes | Non
     return r.stdout if r.returncode == 0 and r.stdout.startswith(b"P6") else None
 
 
+def video_info(src: str, ffprobe: str = "ffprobe", run=subprocess.run):
+    """(width, height, fps) of the first video stream, or None."""
+    try:
+        r = run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                 "stream=width,height,avg_frame_rate,r_frame_rate", "-of", "json", src],
+                capture_output=True, text=True, timeout=30, **no_window_kwargs())
+        st = (json.loads(r.stdout or "{}").get("streams") or [{}])[0]
+        w, h = int(st["width"]), int(st["height"])
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return None
+    fps = 30.0
+    for key in ("avg_frame_rate", "r_frame_rate"):
+        num, _, den = str(st.get(key, "")).partition("/")
+        try:
+            v = float(num) / float(den or 1)
+        except (ValueError, ZeroDivisionError):
+            continue
+        if 1 <= v <= 240:
+            fps = v
+            break
+    return w, h, fps
+
+
+def preview_size(w: int, h: int, width: int = 640) -> tuple[int, int]:
+    """Preview frame size for a w x h source: width wide (never upscaled), even height."""
+    width = min(width, w - w % 2)
+    return width, max(2, int(round(width * h / w / 2)) * 2)
+
+
+def raw_video_command(ffmpeg: str, src: str, t: float, size: tuple[int, int], fps: float) -> list[str]:
+    """One continuous stream of rgb24 frames at preview size for playback."""
+    w, h = size
+    return [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-ss", f"{max(0.0, t):.3f}", "-i", src,
+            "-an", "-sn", "-vf", f"fps={fps:g},scale={w}:{h}:flags=fast_bilinear", "-pix_fmt", "rgb24",
+            "-f", "rawvideo", "pipe:1"]
+
+
 def video_command(ffmpeg: str, src: str, t: float, fps: int = 12, width: int = 640) -> list[str]:
     return [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-ss", f"{max(0.0, t):.3f}", "-i", src,
             "-an", "-sn", "-vf", f"fps={fps},scale={width}:-2", "-f", "image2pipe", "-vcodec", "ppm", "pipe:1"]

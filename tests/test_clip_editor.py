@@ -344,6 +344,93 @@ class EditorWindowTests(unittest.TestCase):
         self.assertEqual((self.ed.marks.cut_in, self.ed.marks.cut_out), (10, 20))   # marks kept
 
 
+class PlaybackFeedTests(unittest.TestCase):
+    """Playback picture: one continuous rgb24 stream, newest due frame shown, late ones dropped."""
+
+    def test_video_info_preview_size_and_command(self):
+        out = '{"streams": [{"width": 1920, "height": 1080, "avg_frame_rate": "30000/1001"}]}'
+        run = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, out, "")  # noqa: E731
+        w, h, fps = core.video_info("x.ts", run=run)
+        self.assertEqual((w, h), (1920, 1080))
+        self.assertAlmostEqual(fps, 29.97, places=2)
+        self.assertIsNone(core.video_info("x.ts", run=lambda c, **k: subprocess.CompletedProcess(c, 1, "", "")))
+        self.assertEqual(core.preview_size(1920, 1080), (640, 360))
+        self.assertEqual(core.preview_size(320, 240), (320, 240))          # never upscaled
+        self.assertEqual(core.preview_size(1080, 1920)[1] % 2, 0)
+        cmd = core.raw_video_command("ffmpeg", "x.ts", 5, (640, 360), 30)
+        self.assertEqual(cmd[cmd.index("-f") + 1], "rawvideo")
+        self.assertIn("rgb24", cmd)
+        self.assertIn("fps=30,scale=640:360:flags=fast_bilinear", cmd)
+
+    def test_raw_frames_are_read_whole_and_late_ones_dropped(self):
+        import io
+        from msr import clip_editor
+        w, h = 4, 2
+        frames = b"".join(bytes([i]) * (w * h * 3) for i in range(5))
+
+        class Proc:
+            stdout = io.BufferedReader(io.BytesIO(frames), buffer_size=7)   # short reads
+
+            def kill(self):
+                pass
+        feed = clip_editor.VideoFeed("ffmpeg", "x.ts", 10.0, size=(w, h), fps=10, spawn=lambda cmd: Proc())
+        import time
+        end = time.monotonic() + 5
+        while feed.decoded < 5 and time.monotonic() < end:
+            time.sleep(0.01)
+        self.assertEqual(feed.decoded, 5)
+        self.assertIsNone(feed.take_until(9.9))                    # nothing due yet
+        f = feed.take_until(10.25)                                 # frames at 10.0, 10.1, 10.2 due
+        self.assertTrue(f.startswith(b"P6\n4 2\n255\n"))
+        self.assertEqual(f[-1], 2)                                 # the newest due one
+        self.assertEqual(feed.dropped, 2)                          # the two late ones
+        self.assertEqual(feed.take_until(10.45)[-1], 4)
+        feed.close()
+
+    def test_playback_uses_the_raw_stream_at_source_fps_capped(self):
+        from msr import clip_editor
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                src = os.path.join(d, "k.ts")
+                write_ts(src, [0, 90000])
+                with mock.patch.object(clip_editor, "VideoFeed") as feed:
+                    ed = clip_editor.ClipEditor(root, src, clips_base=d, show=False, audio_factory=FakeAudio,
+                                                frame_grabber=lambda *_a: PPM, length_reader=lambda _p: 60.0)
+                    ed._vinfo = (1920, 1080, 59.94)
+                    ed.toggle_play()
+                    kw = feed.call_args.kwargs
+                    self.assertEqual((kw["size"], kw["fps"]), ((640, 360), 30))
+                    ed._vinfo = None
+                    ed.toggle_play()
+                    ed.toggle_play()
+                    self.assertIsNone(feed.call_args.kwargs["size"])    # unknown: the PPM fallback
+                    ed.close()
+        finally:
+            root.destroy()
+
+    def test_same_size_frames_reuse_one_image(self):
+        from msr import clip_editor
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                src = os.path.join(d, "k.ts")
+                write_ts(src, [0, 90000])
+                ed = clip_editor.ClipEditor(root, src, clips_base=d, show=False, audio_factory=FakeAudio,
+                                            frame_grabber=lambda *_a: None, length_reader=lambda _p: 60.0)
+                ed._show(PPM)
+                first = ed._img
+                ed._show(b"P6\n2 2\n255\n" + b"\x10" * 12)
+                self.assertIs(ed._img, first)
+                ed._show(b"P6\n4 2\n255\n" + b"\x10" * 24)
+                self.assertIsNot(ed._img, first)
+                ed.close()
+        finally:
+            root.destroy()
+
+
 class AgentParityTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

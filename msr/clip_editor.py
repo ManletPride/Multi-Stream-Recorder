@@ -23,8 +23,11 @@ from msr import dialogs, themes
 from msr.nowindow import no_window_kwargs
 
 POLL_MS = 40
+PLAY_POLL_MS = 8          # while playing: show each frame within a few ms of its time
+QUEUE_FRAMES = 6          # about 0.2 s of decoded frames kept ahead
+MAX_FPS = 30
 LENGTH_EVERY_S = 2.0
-FPS = 12
+FPS = 30
 PREVIEW_W = 640
 NUDGE = 0.5
 REPLAY = 2.0
@@ -36,28 +39,54 @@ def _audio_player(src, ffmpeg):
 
 
 class VideoFeed:
-    """Decoded preview frames (PPM) from a position, paced by whoever takes them."""
+    """Playback picture: ONE ffmpeg decoding a continuous rgb24 stream at preview size, read on a
+    background thread into a small queue. The Tk side takes the newest frame due by the audio
+    clock and drops late ones (counted), so the picture never lags the sound."""
 
-    def __init__(self, ffmpeg: str, src: str, start: float, fps: int = FPS, width: int = PREVIEW_W):
-        self.start, self.fps = start, fps
-        self.frames: queue.Queue = queue.Queue(maxsize=8)
+    def __init__(self, ffmpeg: str, src: str, start: float, size: tuple[int, int] | None = None,
+                 fps: float = FPS, width: int = PREVIEW_W, spawn=None):
+        self.start, self.fps = start, float(fps)
+        self.frames: queue.Queue = queue.Queue(maxsize=QUEUE_FRAMES)
+        self.decoded = self.dropped = 0
         self._stop = threading.Event()
+        self.raw = size is not None
+        cmd = (core.raw_video_command(ffmpeg, src, start, size, self.fps) if self.raw
+               else core.video_command(ffmpeg, src, start, int(round(self.fps)), width))
+        if self.raw:
+            w, h = size
+            self._header = f"P6\n{w} {h}\n255\n".encode("ascii")
+            self._frame_bytes = w * h * 3
         try:
-            self.proc = subprocess.Popen(core.video_command(ffmpeg, src, start, fps, width), stdin=subprocess.DEVNULL,
-                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **no_window_kwargs())
+            self.proc = (spawn or self._spawn)(cmd)
         except OSError:
             self.proc = None
             return
         threading.Thread(target=self._run, daemon=True).start()
 
+    @staticmethod
+    def _spawn(cmd):
+        return subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                bufsize=1 << 20, **no_window_kwargs())
+
+    def _read_raw(self):
+        buf = bytearray(self._frame_bytes)
+        view, got = memoryview(buf), 0
+        while got < self._frame_bytes:
+            n = self.proc.stdout.readinto(view[got:])
+            if not n:
+                return None
+            got += n
+        return self._header + bytes(buf)
+
     def _run(self):
         n = 0
         while not self._stop.is_set():
-            frame = core.read_ppm(self.proc.stdout)
+            frame = self._read_raw() if self.raw else core.read_ppm(self.proc.stdout)
             if frame is None:
                 break
             item = (self.start + n / self.fps, frame)
             n += 1
+            self.decoded = n
             while not self._stop.is_set():
                 try:
                     self.frames.put(item, timeout=0.2)
@@ -66,7 +95,7 @@ class VideoFeed:
                     continue
 
     def take_until(self, t: float):
-        """The newest frame at or before t (older ones are dropped), or None."""
+        """The newest frame due at t, or None. Older due frames are dropped (late)."""
         last = None
         while True:
             try:
@@ -75,6 +104,8 @@ class VideoFeed:
                 item = None
             if item is None or item[0] > t:
                 return last
+            if last is not None:
+                self.dropped += 1
             last = self.frames.get_nowait()[1]
 
     def close(self):
@@ -110,8 +141,12 @@ class ClipEditor:
         self._saving = False
         self._gone = False
         self._img = None
+        self._img_size = b""
         self._closed = False
         self._job = None
+        self._vinfo = None          # (w, h, fps) of the source, read once in the background
+        self.shown = 0              # frames shown while playing (measurements, tests)
+        self._vinfo_reader = lambda p: core.video_info(p, self.ffprobe)
 
         self.win, body = dialogs.new_dialog(parent, f"Clip Editor \u2014 {title_name or os.path.basename(src)}",
                                             padding=10)
@@ -326,7 +361,11 @@ class ClipEditor:
         except Exception as e:  # no sound: the picture still plays on the wall clock
             self.audio = None
             self.say(f"No sound ({e}); playing the picture only.")
-        self.video = VideoFeed(self.ffmpeg, self.src, t)
+        size, fps = None, FPS
+        if self._vinfo:
+            w, h, src_fps = self._vinfo
+            size, fps = core.preview_size(w, h, PREVIEW_W), min(MAX_FPS, src_fps)
+        self.video = VideoFeed(self.ffmpeg, self.src, t, size=size, fps=fps)
         self._play_from = (t, time.monotonic())
         self.playing = True
         self._draw()
@@ -356,6 +395,7 @@ class ClipEditor:
         if self.video is not None:
             frame = self.video.take_until(p)
             if frame:
+                self.shown += 1
                 self._show(frame)
         self.pos = min(p, self.marks.length or p)
         ended = self.audio is not None and self.audio.ended() and p >= self.marks.length - 0.5
@@ -378,10 +418,14 @@ class ClipEditor:
 
     def _show(self, ppm: bytes) -> None:
         try:
+            if self._img is not None and self._img_size == ppm[:24].split(b"\n255\n")[0]:
+                self._img.configure(data=ppm, format="ppm")   # same size: reuse the image, no relayout
+                return
             img = tk.PhotoImage(data=ppm, format="ppm")
         except tk.TclError:
             return
         self._img = img
+        self._img_size = ppm[:24].split(b"\n255\n")[0]
         self.preview.configure(image=img, text="")
 
     # ------------------------------------------------------------- length / source
@@ -394,9 +438,16 @@ class ClipEditor:
         self._last_length_check, self._length_busy = now, True
         src = self.src
 
+        need_info = self._vinfo is None
+
         def work():
             exists = os.path.isfile(src)
             n = self._length(src) if exists else None
+            if exists and need_info:
+                try:
+                    self.q.put(("vinfo", src, self._vinfo_reader(src)))
+                except Exception:
+                    pass
             self.q.put(("length", src, exists, n))
         threading.Thread(target=work, daemon=True).start()
 
@@ -439,7 +490,7 @@ class ClipEditor:
 
     def _switch(self, path: str, note: str) -> None:
         self._stop_playback()
-        self.src, self.live = path, False
+        self.src, self.live, self._vinfo = path, False, None
         self.file_label.configure(text=os.path.basename(path))
         self.say(note)
         self._refresh_length(force=True)
@@ -503,6 +554,9 @@ class ClipEditor:
                         self._show(item[2])
                     elif item[1] == self._frame_gen and not item[2] and not self.playing and not self._img:
                         self.preview.configure(text="No preview at this point yet.")
+                elif kind == "vinfo":
+                    if item[1] == self.src and item[2]:
+                        self._vinfo = item[2]
                 elif kind == "length":
                     self._on_length(*item[1:])
                 elif kind == "saved":
@@ -512,7 +566,7 @@ class ClipEditor:
         if self.playing:
             self._tick_playback()
         self._refresh_length()
-        self._job = self.win.after(POLL_MS, self._poll)
+        self._job = self.win.after(PLAY_POLL_MS if self.playing else POLL_MS, self._poll)
 
     def close(self) -> None:
         self._closed = True
