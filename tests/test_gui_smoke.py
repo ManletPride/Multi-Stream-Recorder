@@ -182,7 +182,7 @@ def fake_mainloop(self, n=0):
     try:
         from msr import library_actions as act, library_dialog as ldialog, library_window as lw, dialogs
         self.update_idletasks(); self.update()
-        panel = next(o for o in gc.get_objects() if isinstance(o, lw.LibraryPanel))
+        panel = next(o for o in gc.get_objects() if type(o) is lw.LibraryPanel)  # not isinstance: it would wake plyer's lazy proxies
         tabs = panel.frame.master                      # the app's notebook
         tabs.select(panel.frame)                        # opening the tab starts the scan
         end = time.time() + 30
@@ -296,7 +296,7 @@ def fake_mainloop(self, n=0):
         from msr import library_window as lw, wintheme as wt
         self.update_idletasks(); self.update()
         top = self
-        panel = next(o for o in gc.get_objects() if isinstance(o, lw.LibraryPanel))
+        panel = next(o for o in gc.get_objects() if type(o) is lw.LibraryPanel)  # not isinstance: it would wake plyer's lazy proxies
         panel.frame.master.select(panel.frame)
         end = time.time() + 30
         while (panel.stats is None or panel.busy) and time.time() < end:

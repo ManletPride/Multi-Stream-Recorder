@@ -803,6 +803,15 @@ def create_preview_frame(raw_file, output_file, ffmpeg_path, logger,
             "-loglevel", "error",
             output_file,
         ]
+        # Never trust a file that is already there. When the seek lands where no frame decodes
+        # (no key frame in the last 3 s), ffmpeg exits 0 without writing anything, and an old PNG
+        # at this path (the cache is per channel and outlives the stream) would count as "wrote".
+        try:
+            os.remove(output_file)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            return False, str(e)
         try:
             result = _hidden_run(cmd, timeout)
         except subprocess.TimeoutExpired:

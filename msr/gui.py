@@ -2441,10 +2441,9 @@ def main_gui(config):
             preview_big_frame.pack(
                 fill=tk.X, side=tk.TOP, before=preview_canvas, pady=(0, 6),
             )
-        _set_big_preview_image(
-            png_path=_preview_cache_file(ch_name, "_big"),
-            from_small=_preview_photos.get(ch_name),
-        )
+        # Start from the strip tile (current), not from the cached ..._big.png: that file may be
+        # left over from an earlier stream of this channel. The next tick writes a fresh one.
+        _set_big_preview_image(from_small=_preview_photos.get(ch_name))
         _sync_nav(ch_name, "preview")
 
     preview_big_close.configure(command=_hide_big_preview)

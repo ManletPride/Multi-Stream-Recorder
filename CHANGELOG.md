@@ -40,6 +40,7 @@ A big interface release: a Library tab that shows (and can clean up) what your r
 - **Recording starts immediately after a crash or abrupt close.** Leftover `.ts` files used to be remuxed before any recorder launched, so a few big files meant minutes of missed stream. Recorders now start first and the leftovers are remuxed afterwards; only files that existed before launch are touched. If `filename_pattern` has no timestamp (a new recording could reuse a leftover's name) the old clean-up-first order is kept.
 - A partial MP4 left by a remux that a crash interrupted is detected and redone instead of being trusted.
 - Leftover `x.tsb.ts` style names map to `x.tsb.mp4` (only the extension is replaced).
+- The large preview and the strip tile no longer freeze on an old frame: when ffmpeg decoded no frame near the live edge (a key frame farther away than 3 s) it exited 0 and the PNG left by an earlier grab or stream was taken for a new one, so the later seeks were never tried. The grab now deletes the old file first, and pinning a tile starts from the current tile instead of the cached large PNG.
 - Starting from a redirected Windows console (cp1252) no longer fails on characters the console cannot show.
 
 ### Developer notes
