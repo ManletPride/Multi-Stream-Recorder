@@ -23,9 +23,12 @@ from msr import dialogs, themes
 from msr.nowindow import no_window_kwargs
 
 POLL_MS = 40
-PLAY_POLL_MS = 8          # while playing: show each frame within a few ms of its time
-QUEUE_FRAMES = 6          # about 0.2 s of decoded frames kept ahead
-MAX_FPS = 30
+PLAY_POLL_MS = 4          # while playing: show each frame within a few ms of its time (60 fps = 16.7 ms)
+QUEUE_SECONDS = 0.2       # decoded frames kept ahead (6 at 30 fps, 12 at 60)
+MAX_FPS = 60              # source rate up to this
+LIMITED_FPS = 30          # "Limit preview to 30 fps"
+LIMIT_KEY = "clip_editor_limit_30fps"
+CACHE_FRAMES = 16         # exact preview frames kept (about 11 MB at 640x360)
 LENGTH_EVERY_S = 2.0
 FPS = 30
 PREVIEW_W = 640
@@ -46,7 +49,7 @@ class VideoFeed:
     def __init__(self, ffmpeg: str, src: str, start: float, size: tuple[int, int] | None = None,
                  fps: float = FPS, width: int = PREVIEW_W, spawn=None):
         self.start, self.fps = start, float(fps)
-        self.frames: queue.Queue = queue.Queue(maxsize=QUEUE_FRAMES)
+        self.frames: queue.Queue = queue.Queue(maxsize=max(6, int(round(self.fps * QUEUE_SECONDS))))
         self.decoded = self.dropped = 0
         self._stop = threading.Event()
         self.raw = size is not None
@@ -144,6 +147,9 @@ class ClipEditor:
         self._img_size = b""
         self._closed = False
         self._job = None
+        self.state_file = state_file
+        self._cache: dict = {}        # (src, t to 0.01 s) -> exact PPM, most recent last
+        self._exact_gen = 0           # newest scrub position whose exact frame is on screen
         self._vinfo = None          # (w, h, fps) of the source, read once in the background
         self.shown = 0              # frames shown while playing (measurements, tests)
         self._vinfo_reader = lambda p: core.video_info(p, self.ffprobe)
@@ -226,6 +232,9 @@ class ClipEditor:
         b2("Replay Out", lambda: self.replay("out")).pack(side="left", padx=(4, 12))
         self.exact = tk.BooleanVar(value=False)
         ttk.Checkbutton(row2, text="Exact (re-encode)", variable=self.exact).pack(side="left")
+        self.limit_fps = tk.BooleanVar(value=self._load_limit())
+        ttk.Checkbutton(row2, text="Limit preview to 30 fps", variable=self.limit_fps,
+                        command=self._limit_changed).pack(side="left", padx=(8, 0))
         b2("Close", self.close).pack(side="right")
         b2("Clips folder", self.open_clips).pack(side="right", padx=(0, 6))
         self.save_btn = b2("Save Clip", self.save)
@@ -364,7 +373,7 @@ class ClipEditor:
         size, fps = None, FPS
         if self._vinfo:
             w, h, src_fps = self._vinfo
-            size, fps = core.preview_size(w, h, PREVIEW_W), min(MAX_FPS, src_fps)
+            size, fps = core.preview_size(w, h, PREVIEW_W), min(self.fps_cap(), src_fps)
         self.video = VideoFeed(self.ffmpeg, self.src, t, size=size, fps=fps)
         self._play_from = (t, time.monotonic())
         self.playing = True
@@ -405,16 +414,66 @@ class ClipEditor:
         self._draw()
 
     # ------------------------------------------------------------- preview frames
+    # ------------------------------------------------------------- settings
+    def _load_limit(self) -> bool:
+        if not self.state_file:
+            return False
+        from msr import winstate
+        return bool(winstate.load(self.state_file).get(LIMIT_KEY, False))
+
+    def _limit_changed(self) -> None:
+        if self.state_file:
+            from msr import winstate
+            winstate.merge(self.state_file, {LIMIT_KEY: bool(self.limit_fps.get())})
+        if self.playing:   # takes effect at once
+            self._start_playback(self.pos, self._stop_at)
+
+    def fps_cap(self) -> float:
+        return LIMITED_FPS if self.limit_fps.get() else MAX_FPS
+
+    # ------------------------------------------------------------- preview frames (paused)
+    def _cache_key(self, src, t):
+        return (src, round(t, 2))
+
     def _request_frame(self) -> None:
+        """Two stages: the keyframe at or before the spot first (no forward decode: fast after a
+        far jump on a slow disk), then the exact frame. A newer position cancels both."""
         self._frame_gen += 1
         gen, t, src = self._frame_gen, self.pos, self.src
+        hit = self._cache.get(self._cache_key(src, t))
+        if hit is not None:
+            self._cache[self._cache_key(src, t)] = self._cache.pop(self._cache_key(src, t))
+            self.q.put(("frame", gen, hit, True))
+            return
+        stale = lambda: gen != self._frame_gen or self._closed  # noqa: E731
 
-        def work():
-            time.sleep(0.12)              # debounce scrubbing
-            if gen != self._frame_gen:
+        def work(keyframe):
+            time.sleep(0.02)              # coalesce a burst of drag events
+            if stale():
                 return
-            self.q.put(("frame", gen, self._grab(self.ffmpeg, src, t)))
-        threading.Thread(target=work, daemon=True).start()
+            ppm = self._grab(self.ffmpeg, src, t, keyframe=keyframe, cancel=stale)
+            if not stale() and (ppm or not keyframe):
+                self.q.put(("frame", gen, ppm, not keyframe))
+        # both at once: the keyframe-only decode lands first, the exact one replaces it
+        for keyframe in (True, False):
+            threading.Thread(target=work, args=(keyframe,), daemon=True).start()
+
+    def _on_frame(self, gen, ppm, exact) -> None:
+        if gen != self._frame_gen or self.playing:
+            return
+        if not ppm:
+            if exact and not self._img:
+                self.preview.configure(text="No preview at this point yet.")
+            return
+        if exact:
+            key = self._cache_key(self.src, self.pos)
+            self._cache[key] = ppm
+            while len(self._cache) > CACHE_FRAMES:
+                self._cache.pop(next(iter(self._cache)))
+            self._exact_gen = gen
+        elif self._exact_gen == gen:
+            return                        # the exact one already landed
+        self._show(ppm)
 
     def _show(self, ppm: bytes) -> None:
         try:
@@ -550,10 +609,7 @@ class ClipEditor:
                 item = self.q.get_nowait()
                 kind = item[0]
                 if kind == "frame":
-                    if item[1] == self._frame_gen and item[2] and not self.playing:
-                        self._show(item[2])
-                    elif item[1] == self._frame_gen and not item[2] and not self.playing and not self._img:
-                        self.preview.configure(text="No preview at this point yet.")
+                    self._on_frame(*item[1:])
                 elif kind == "vinfo":
                     if item[1] == self.src and item[2]:
                         self._vinfo = item[2]

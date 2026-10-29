@@ -255,7 +255,7 @@ class EditorWindowTests(unittest.TestCase):
         self.ed = clip_editor.ClipEditor(
             self.root, self.src, clips_base=os.path.join(self.tmp.name, "Clips"), live=True,
             follow=lambda: self.src, show=False, audio_factory=self._audio,
-            frame_grabber=lambda *_a: PPM, length_reader=lambda _p: self.length)
+            frame_grabber=lambda *_a, **_k: PPM, length_reader=lambda _p: self.length)
         self.pump(lambda: self.ed.marks.length == 120.0)
 
     def _audio(self, *_a):
@@ -397,11 +397,20 @@ class PlaybackFeedTests(unittest.TestCase):
                 write_ts(src, [0, 90000])
                 with mock.patch.object(clip_editor, "VideoFeed") as feed:
                     ed = clip_editor.ClipEditor(root, src, clips_base=d, show=False, audio_factory=FakeAudio,
-                                                frame_grabber=lambda *_a: PPM, length_reader=lambda _p: 60.0)
+                                                frame_grabber=lambda *_a, **_k: PPM, length_reader=lambda _p: 60.0)
                     ed._vinfo = (1920, 1080, 59.94)
                     ed.toggle_play()
                     kw = feed.call_args.kwargs
-                    self.assertEqual((kw["size"], kw["fps"]), ((640, 360), 30))
+                    self.assertEqual((kw["size"], kw["fps"]), ((640, 360), 59.94))   # source rate
+                    ed.limit_fps.set(True)
+                    ed._limit_changed()                                               # restarts at once
+                    self.assertEqual(feed.call_args.kwargs["fps"], 30)
+                    ed.toggle_play()
+                    ed.limit_fps.set(False)
+                    ed._vinfo = (1920, 1080, 120.0)
+                    ed.toggle_play()
+                    self.assertEqual(feed.call_args.kwargs["fps"], 60)                # capped
+                    ed.toggle_play()
                     ed._vinfo = None
                     ed.toggle_play()
                     ed.toggle_play()
@@ -419,7 +428,7 @@ class PlaybackFeedTests(unittest.TestCase):
                 src = os.path.join(d, "k.ts")
                 write_ts(src, [0, 90000])
                 ed = clip_editor.ClipEditor(root, src, clips_base=d, show=False, audio_factory=FakeAudio,
-                                            frame_grabber=lambda *_a: None, length_reader=lambda _p: 60.0)
+                                            frame_grabber=lambda *_a, **_k: None, length_reader=lambda _p: 60.0)
                 ed._show(PPM)
                 first = ed._img
                 ed._show(b"P6\n2 2\n255\n" + b"\x10" * 12)
@@ -429,6 +438,112 @@ class PlaybackFeedTests(unittest.TestCase):
                 ed.close()
         finally:
             root.destroy()
+
+
+class FarJumpPreviewTests(unittest.TestCase):
+    """Paused scrubbing: keyframe first, then the exact frame; the newest position wins."""
+
+    def setUp(self):
+        from msr import clip_editor
+        self.mod = clip_editor
+        self.tmp = tempfile.TemporaryDirectory()
+        self.src = os.path.join(self.tmp.name, "k.ts")
+        write_ts(self.src, [0, 90000])
+        self.state = os.path.join(self.tmp.name, "window_state.json")
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.calls = []
+        self.ed = clip_editor.ClipEditor(self.root, self.src, clips_base=self.tmp.name, show=False,
+                                         audio_factory=FakeAudio, frame_grabber=self.grab,
+                                         length_reader=lambda _p: 600.0, state_file=self.state)
+        import time
+        end = time.monotonic() + 3
+        while self.ed.marks.length != 600.0 and time.monotonic() < end:
+            self.root.update()
+            time.sleep(0.01)
+
+    def grab(self, ffmpeg, src, t, keyframe=False, cancel=None):
+        self.calls.append((round(t, 2), keyframe))
+        return KEY if keyframe else EXACT
+
+    def tearDown(self):
+        self.ed.close()
+        self.root.destroy()
+        self.tmp.cleanup()
+
+    def drain(self):
+        import time
+        end = time.monotonic() + 3
+        while time.monotonic() < end:
+            self.root.update()
+            time.sleep(0.01)
+            if self.ed._exact_gen == self.ed._frame_gen:
+                return
+
+    def test_frame_command_fast_keyframe_variant(self):
+        key = core.frame_command("ffmpeg", "x.ts", 100, keyframe=True)
+        self.assertLess(key.index("nokey"), key.index("-i"))
+        self.assertIn("-noaccurate_seek", key)
+        self.assertNotIn("nokey", core.frame_command("ffmpeg", "x.ts", 100))
+
+    def test_keyframe_then_exact_and_the_cache(self):
+        shown = []
+        self.ed._show = lambda ppm: shown.append(ppm)
+        self.ed.seek(300)
+        self.drain()
+        # both decodes start together; the keyframe may land first, never after the exact frame
+        self.assertEqual(sorted(self.calls[-2:]), [(300.0, False), (300.0, True)])
+        self.assertEqual(shown[-1], EXACT)
+        self.assertIn(shown[-2:], ([KEY, EXACT], [EXACT]) if len(shown) >= 2 else ([EXACT],))
+        self.ed.seek(10)
+        self.drain()
+        n = len(self.calls)
+        self.ed.seek(300)                       # back to a cached spot: no ffmpeg at all
+        self.drain()
+        self.assertEqual(len(self.calls), n)
+        self.assertEqual(shown[-1], EXACT)
+
+    def test_stale_and_late_frames_are_ignored(self):
+        shown = []
+        self.ed._show = lambda ppm: shown.append(ppm)
+        self.ed._frame_gen = 5
+        self.ed._on_frame(4, EXACT, True)       # an older position: ignored
+        self.ed._on_frame(5, EXACT, True)
+        self.ed._on_frame(5, KEY, False)        # its keyframe arriving after the exact one
+        self.assertEqual(shown, [EXACT])
+
+    def test_grab_cancel_kills_the_ffmpeg(self):
+        class Proc:
+            killed = False
+            returncode = None
+
+            def communicate(self, timeout=None):
+                if self.killed:
+                    return b"", b""
+                raise subprocess.TimeoutExpired("ffmpeg", timeout)
+
+            def kill(self):
+                self.killed = True
+        proc = Proc()
+        self.assertIsNone(core.grab_frame("ffmpeg", "x.ts", 5, cancel=lambda: True, spawn=lambda *a, **k: proc))
+        self.assertTrue(proc.killed)
+
+    def test_limit_setting_is_remembered(self):
+        self.assertFalse(self.ed.limit_fps.get())          # default off
+        self.ed.limit_fps.set(True)
+        self.ed._limit_changed()
+        from msr import winstate
+        self.assertTrue(winstate.load(self.state)[self.mod.LIMIT_KEY])
+        again = self.mod.ClipEditor(self.root, self.src, clips_base=self.tmp.name, show=False,
+                                    audio_factory=FakeAudio, frame_grabber=self.grab,
+                                    length_reader=lambda _p: 600.0, state_file=self.state)
+        self.assertTrue(again.limit_fps.get())
+        self.assertEqual(again.fps_cap(), 30)
+        again.close()
+
+
+KEY = b"P6\n2 2\n255\n" + b"\x01" * 12
+EXACT = b"P6\n2 2\n255\n" + b"\x02" * 12
 
 
 class AgentParityTests(unittest.TestCase):

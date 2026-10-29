@@ -13,6 +13,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 
 from msr.nowindow import no_window_kwargs
@@ -164,19 +165,38 @@ def ffprobe_for(ffmpeg: str) -> str:
 
 
 # ------------------------------------------------------------------ preview frame
-def frame_command(ffmpeg: str, src: str, t: float, width: int = 640) -> list[str]:
-    return [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-ss", f"{max(0.0, t):.3f}", "-i", src,
-            "-frames:v", "1", "-an", "-vf", f"scale={width}:-2", "-f", "image2pipe", "-vcodec", "ppm", "pipe:1"]
+def frame_command(ffmpeg: str, src: str, t: float, width: int = 640, keyframe: bool = False) -> list[str]:
+    """One preview frame at t. keyframe=True: the keyframe at or before t, decoded alone (input
+    seek, no decoding forward), which is the fast first look after a far jump."""
+    fast = ["-skip_frame", "nokey", "-noaccurate_seek"] if keyframe else []
+    return [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", *fast, "-ss", f"{max(0.0, t):.3f}",
+            "-i", src, "-frames:v", "1", "-an", "-vf", f"scale={width}:-2:flags=fast_bilinear",
+            "-f", "image2pipe", "-vcodec", "ppm", "pipe:1"]
 
 
-def grab_frame(ffmpeg: str, src: str, t: float, width: int = 640) -> bytes | None:
-    """One PPM frame at t (seconds from the start), or None."""
+def grab_frame(ffmpeg: str, src: str, t: float, width: int = 640, keyframe: bool = False,
+               cancel=None, spawn=None) -> bytes | None:
+    """One PPM frame at t (seconds from the start), or None. cancel() returning True kills the
+    ffmpeg at once (a newer scrub position wins), so stale decodes never queue up on the disk."""
     try:
-        r = subprocess.run(frame_command(ffmpeg, src, t, width), capture_output=True, timeout=20,
-                           stdin=subprocess.DEVNULL, **no_window_kwargs())
-    except (OSError, subprocess.SubprocessError):
+        proc = (spawn or subprocess.Popen)(frame_command(ffmpeg, src, t, width, keyframe), stdin=subprocess.DEVNULL,
+                                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **no_window_kwargs())
+    except OSError:
         return None
-    return r.stdout if r.returncode == 0 and r.stdout.startswith(b"P6") else None
+    deadline = time.monotonic() + 20
+    while True:
+        try:
+            out, _ = proc.communicate(timeout=0.03)
+            break
+        except subprocess.TimeoutExpired:
+            if (cancel is not None and cancel()) or time.monotonic() > deadline:
+                proc.kill()
+                try:
+                    proc.communicate(timeout=2)
+                except (subprocess.SubprocessError, OSError):
+                    pass
+                return None
+    return out if proc.returncode == 0 and out and out.startswith(b"P6") else None
 
 
 def video_info(src: str, ffprobe: str = "ffprobe", run=subprocess.run):
