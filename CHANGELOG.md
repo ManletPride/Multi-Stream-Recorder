@@ -1,8 +1,10 @@
 # Changelog
 
-## Unreleased (proposed v2.2.0)
+## v3.0.0 (unreleased, date TBD)
 
-A big interface release: a Library tab that shows (and can clean up) what your recordings take, sixteen themes, a calmer Logs tab, and a fix so recording starts at once after a crash. No new dependencies, and your `config.ini`, `channels.json`, cookies and recordings are used exactly as before.
+The biggest release so far (55 commits since v2.1.0): a **Clip Editor** for cutting clips while a stream records, a **Library** tab that shows and safely cleans up what your recordings take, **agent and headless control** (`msr_ctl.py`) for scripts, bots and AI agents, MSR's **own Python environment** set up on first launch, an **Updates** dialog for yt-dlp/streamlink and the other packages, **sixteen themes**, an **app icon**, and a long list of safety fixes (drive loss, verified remuxes, redacted logs, hidden consoles, all-or-nothing updates, recording starts at once after a crash). No new Python packages; your `config.ini`, `channels.json`, cookies and recordings are used as before. Release notes: `docs/release_notes_3.0.0.md`.
+
+**Upgrading from 2.1.0:** download the new release (ZIP or `git pull`) rather than the in-app update. The 2.1.0 updater only replaces `Multi-Stream-Recorder.py`, `requirements.txt`, `channels_fishtank.json` and `msr/`, so it would not bring the new `run_msr.pyw` (the `.venv` setup), `msr_ctl.py`, `create_shortcut.py`, `assets/` or `docs/`. The app still runs after an in-app update, without those.
 
 ### Added
 
@@ -84,7 +86,7 @@ A big interface release: a Library tab that shows (and can clean up) what your r
 - Each channel's first live check now runs at once when recording starts or a channel is added (there was a random wait of up to 10 seconds first); later checks keep their spacing. Same in the window and headless.
 - `msr_ctl.py`: Ctrl+C exits with a short "Interrupted." and code 130 instead of a traceback, also during `wait`; `record-stop` says per channel whether a recording was stopped or the channel was idle; `wait --event finished` warns when the channel is not recording.
 - Headless start with an empty channel list no longer says "Add channels via the GUI": it names `msr_ctl.py add NAME`.
-- **An in-app update can no longer leave a half-updated install.** The update now checks that every downloaded Python file is intact, keeps the current program files in `msr_update_backup/`, checks each copied file, and puts the old files back (removing any the update added) if anything goes wrong; the reason is shown at the next start. If the update changes `requirements.txt`, the next start says to run `pip install -r requirements.txt`.
+- **An in-app update can no longer leave a half-updated install.** The update now checks that every downloaded Python file is intact, keeps the current program files in `msr_update_backup/`, checks each copied file, and puts the old files back (removing any the update added) if anything goes wrong; the reason is shown at the next start. If the update changes `requirements.txt`, the next start says to run `pip install -r requirements.txt` (with MSR's own `.venv`, the launcher installs them by itself).
 - **The Fishtank password is no longer copied into `msr_history/`.** History copies of `config.ini` hold a placeholder instead of any password, secret or token, and **Restore previous...** keeps your current password. Copies made before this version are unchanged (delete `msr_history/config.ini/` to remove them). The password can also be given in the `MSR_FISHTANK_PASSWORD` environment variable instead of `config.ini`.
 - The window state and the Kick channel id cache are written atomically, so a crash or a full disk mid-save keeps the previous file.
 - **Faster start-up, and recording starts sooner.** Measured on a Windows PC with a temporary data folder and three placeholder channels (median of 5 runs): the window appears in about 1.4 s instead of 3.1 s, and a headless start reaches its first recording worker in about 1.8 s instead of 5.9 s. Each recording worker no longer loads the GUI, tkinter, the tray and notification libraries, or re-runs the four yt-dlp/streamlink/ffmpeg/deno version checks (the main process runs them once, in parallel, and passes the result on); the leftover-recorder check before the window no longer asks every process for its parent one by one (about 1 s on its own).
@@ -124,8 +126,8 @@ A big interface release: a Library tab that shows (and can clean up) what your r
 
 ### Developer notes
 - Every colour comes from `msr/themes.py` (semantic tokens) and the palette data in `msr/theme_palettes.py`; a test fails on any hard-coded colour elsewhere. Adding a theme is one entry in `msr/theme_palettes.py`.
-- The test suite grew from 299 to 652 tests, including a hidden-window smoke test that launches the real UI in every theme. `AGENTS.md` documents the new modules.
-- New files that stay out of git: `themes/`, `msr_history/`, `library_cache.json`, `library_moves.json`, `library_actions.log`, `msr_startup_error.log`, `config.ini.broken-*`. Recordings made while the drive was away are in `fallback_dir` (outside the repo).
+- The test suite grew from 299 to 1095 tests (652 before the Clip Editor, agent control and environment work), including a hidden-window smoke test that launches the real UI in every theme. `AGENTS.md` documents the new modules.
+- New files that stay out of git: `themes/`, `msr_history/`, `library_cache.json`, `library_moves.json`, `library_actions.log`, `msr_startup_error.log`, `config.ini.broken-*`, `.venv/`, `msr_venv_error.txt`, `msr_control.json`, `msr_status.json`, `msr_update_backup/`. Recordings made while the drive was away are in `fallback_dir` (outside the repo).
 
 ## v2.1.0 (2026-10)
 

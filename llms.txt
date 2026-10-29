@@ -6,8 +6,10 @@ This file is a manual for AI assistants and scripts. It contains no secrets and 
 
 ## Run
 
-- GUI: `python Multi-Stream-Recorder.py` (or `run_msr.pyw` / `run_msr.bat`, no console window).
-- Headless: `python Multi-Stream-Recorder.py --headless` (Ctrl+C stops; reads the roster, records every enabled channel).
+- GUI: double-click `run_msr.pyw` (or `run_msr.bat`). The first launch creates MSR's own environment `.venv` in the MSR folder and installs requirements.txt there; later launches use it. Opt out: `MSR_NO_VENV=1` or `[Advanced] use_venv = false`.
+- Run by hand with the environment's Python: `.venv\Scripts\python Multi-Stream-Recorder.py` (Linux/macOS `.venv/bin/python`).
+- Headless: `.venv\Scripts\python Multi-Stream-Recorder.py --headless` (Ctrl+C stops; records every enabled channel; with none it waits for commands).
+- Control a running copy (or edit the files when none runs): `python msr_ctl.py ...`. Start with docs/AGENT_GUIDE.md; `python msr_ctl.py help --json` is the full command catalog with safety levels. Package versions/updates: `msr_ctl.py deps list|check|update` (updates only inside `.venv`).
 - Status snapshot: `python Multi-Stream-Recorder.py --json`. Prints ONE JSON document and exits. Read-only: it starts nothing, takes no lock, creates no file, opens no window.
 - Library sizes: `python Multi-Stream-Recorder.py --json --library` adds a `library` section (below). Opt-in because it walks the recordings folder; it lists folders and reads file sizes only (no ffprobe, nothing is written, no cache). `--library` without `--json` is a usage error.
 - Data folder: `--data-dir DIR` or env `MSR_HOME` (folder must exist). `config.ini`, `channels.json`, `cookies.txt`, `window_state.json` live there; default is the current directory. `--config FILE` picks another ini (relative to the data folder).

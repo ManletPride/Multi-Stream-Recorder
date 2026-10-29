@@ -13,8 +13,9 @@ This guide is for a script, bot or AI agent that drives Multi-Stream Recorder (M
 ## 2. Start it headless
 
 ```powershell
-python Multi-Stream-Recorder.py --headless --data-dir "D:\msr-data"
+.venv\Scripts\python Multi-Stream-Recorder.py --headless --data-dir "D:\msr-data"
 ```
+(`.venv` is MSR's own environment, created by the first `run_msr.pyw` launch; Linux `.venv/bin/python`. Without it, use any Python that has requirements.txt installed.)
 
 Recording of the enabled channels starts at once. It runs until `python msr_ctl.py quit` (or Ctrl+C in its console). Only one copy can run per recordings folder.
 
