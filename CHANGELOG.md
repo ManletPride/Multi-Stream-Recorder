@@ -47,6 +47,10 @@ A big interface release: a Library tab that shows (and can clean up) what your r
 - The preview strip is not refreshed while the Status tab is hidden or the window is minimised or in the tray, and refreshes at once when it is shown again.
 
 ### Fixed
+- Agent control: a `live` event now fires for every recording start, including a restart or a channel removed and added again in the same session; `wait --event live --channel X` returns at once (`"already": true`) when X is already recording.
+- Agent control: removing a channel that is recording (by command or in the window) emits `stopped`, so `wait --event finished` works for it. Disabling a channel does not stop a running recording, so it emits nothing until that recording ends.
+- Per-channel cleanup after a stop no longer logs "some files were busy, retrying" because another channel is recording; it retries only while this channel's own raw files are still locked.
+- Quitting or stopping the session waits about 3 seconds (not 30) before the cleanup pass when every recorder process tree is confirmed gone.
 - After `record-stop`, `wait --event finished` no longer warns "not recording" while the stopped recording is still being remuxed, and it also returns a finish that happened between the stop and the wait. The status shows `finishing` per channel, and new `stopped` / `remux_started` events are emitted. Stopping one channel now starts its remux after about 3 seconds instead of 30 when its processes are confirmed gone; files that are still locked are retried as before.
 - Each channel's first live check now runs at once when recording starts or a channel is added (there was a random wait of up to 10 seconds first); later checks keep their spacing. Same in the window and headless.
 - `msr_ctl.py`: Ctrl+C exits with a short "Interrupted." and code 130 instead of a traceback, also during `wait`; `record-stop` says per channel whether a recording was stopped or the channel was idle; `wait --event finished` warns when the channel is not recording.

@@ -539,6 +539,47 @@ class FinishingTests(unittest.TestCase):
         self.assertEqual(err.getvalue(), "")
 
 
+class RestartAndRemoveTests(unittest.TestCase):
+    """Live fires for every recording start; remove of a recording channel is a stop."""
+
+    setUp = FinishingTests.setUp
+    tearDown = FinishingTests.tearDown
+
+    def kinds(self, key):
+        return [e["event"] for e in self.t.events() if e["channel"] == key]
+
+    def test_live_fires_again_after_a_stop_and_restart(self):
+        self.t.seen("knut", {"status": "Recording"})
+        self.c.handle("record_stop", {"channels": ["knut"]})
+        self.t.seen("knut", {"status": "Stopped"})
+        self.t.seen("knut", {"status": "Recording"})
+        self.assertEqual(self.kinds("knut"), ["live", "stopped", "live"])
+
+    def test_remove_emits_stopped_and_a_re_add_goes_live_again(self):
+        st = self.app.recorder.status_dict
+        self.app.recorder.remove_channel = lambda key: st.pop(key, None)
+        self.t.seen("twitch:saruei", st["twitch:saruei"])
+        self.c.handle("channel_remove", {"channels": ["twitch:saruei"]})
+        ev = [e for e in self.t.events() if e["event"] == "stopped"][-1]
+        self.assertEqual((ev["channel"], ev["was_recording"]), ("twitch:saruei", True))
+        st["twitch:saruei"] = {"status": "Recording"}   # re-added worker records
+        self.t.seen("twitch:saruei", st["twitch:saruei"])
+        self.assertEqual(self.kinds("twitch:saruei"), ["live", "stopped", "live"])
+
+    def test_removed_in_the_window_is_a_stop_too(self):
+        self.t.seen("knut", {"status": "Recording"})
+        self.t.prune({"twitch:saruei"})
+        self.t.seen("knut", {"status": "Recording"})
+        self.assertEqual(self.kinds("knut"), ["live", "stopped", "live"])
+
+    def test_wait_live_on_a_recording_channel_returns_at_once(self):
+        ev = self.c.handle("wait", {"events": ["live"], "channel": "knut", "timeout": 0})["result"]
+        self.assertEqual((ev["event"], ev["channel"], ev["already"]), ("live", "knut", True))
+        self.app.recorder.status_dict["knut"] = {"status": "Stopped"}
+        reply = self.c.handle("wait", {"events": ["live"], "channel": "knut", "timeout": 0.1})
+        self.assertEqual(reply.get("code"), "timeout", reply)
+
+
 class CleanerReportTests(unittest.TestCase):
     def test_cleanup_pass_reports_remux_started_and_finished(self):
         from msr import recorder as recorder_mod

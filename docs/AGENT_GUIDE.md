@@ -24,6 +24,7 @@ Recording of the enabled channels starts at once. It runs until `python msr_ctl.
 ```
 python msr_ctl.py add kick:knut twitch:someone      # platform:name, a bare Kick name or a channel URL
 python msr_ctl.py wait --event live --channel knut --timeout 3600
+# returns at once ("already": true) if knut is already recording
 python msr_ctl.py --json status                      # recording, file, size, duration per channel
 ```
 Adding or enabling a channel starts watching it at once. You don't need `start` unless someone ran `stop`.

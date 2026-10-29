@@ -210,12 +210,24 @@ class Tracker:
         self.stop_seq[key] = ev["seq"]
         self.stop_finished.discard(key)
         self._live[key] = False
+        self._last.pop(key, None)   # its next Recording (restart / re-add) is a new live start
         if was_recording:
             self.finishing[key] = {"state": "waiting_for_cleanup", "since": self.clock(), "seq": ev["seq"]}
         else:
             self.finishing.pop(key, None)
         self._last[key] = ("Stopped", "by user")
         return ev["seq"]
+
+    def prune(self, present):
+        """Channels gone from the recorder's status (removed in the window): a recording one is
+        a stop; either way its next Recording is a new live start."""
+        with self._cond:
+            for key in [k for k in self._last if k not in present]:
+                if (self._last.get(key) or ("",))[0].lower().startswith("recording") \
+                        and key not in self.finishing:
+                    self._stopping(key, True)
+                self._last.pop(key, None)
+                self._live[key] = False
 
     def started(self, key):
         with self._cond:

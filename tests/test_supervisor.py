@@ -299,6 +299,64 @@ class RestartPolicyTests(SupervisorBase):
         rec.cleaner._process_leftover_files.assert_called_once()
         rec.cleaner._report.assert_called_with("channel_done", "kick1")
 
+    def _stop_kick1_cleanup(self, recorded):
+        procs = self.start_all()
+
+        def fake_kill(pid, logger=None):
+            for p in procs.values():
+                if p.pid == pid:
+                    p.die(15)
+        rec = self.rec
+        rec._sync_kick_push = lambda: None
+        rec.recorded_base = recorded
+        rec.cleaner = mock.Mock()
+        rec.cleaner._process_leftover_files.return_value = True   # some OTHER channel is busy
+        with mock.patch.object(recorder_mod, "kill_process_tree", fake_kill), \
+                mock.patch.object(recorder_mod.threading, "Thread") as thread:
+            rec.stop_channel("kick1")
+        target = thread.call_args.kwargs["target"]
+        with mock.patch.object(recorder_mod.time, "sleep") as sleep:
+            target()
+        return [c.args[0] for c in sleep.call_args_list], rec.cleaner._process_leftover_files.call_count
+
+    def test_stop_channel_cleanup_does_not_retry_for_other_channels_busy_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            sleeps, passes = self._stop_kick1_cleanup(os.path.join(d, "Recorded"))
+        self.assertEqual((sleeps, passes), ([StreamRecorder.STOP_CLEANUP_DELAY], 1))
+
+    def test_stop_channel_cleanup_retries_while_its_own_file_is_locked(self):
+        from msr.util import channel_key_to_dirs
+        with tempfile.TemporaryDirectory() as d:
+            platform, user = channel_key_to_dirs("kick1")
+            folder = os.path.join(d, "Recorded", platform, *user.split("/"))
+            os.makedirs(folder)
+            open(os.path.join(folder, "k.ts"), "wb").close()
+            sleeps, passes = self._stop_kick1_cleanup(os.path.join(d, "Recorded"))
+        self.assertEqual(passes, 3)
+        self.assertEqual(sleeps.count(10), 3)
+
+    def test_stop_uses_the_short_cleanup_wait_when_every_tree_is_gone(self):
+        procs = self.start_all()
+
+        def fake_kill(pid, logger=None):
+            for p in procs.values():
+                if p.pid == pid:
+                    p.die(15)
+        rec = self.rec
+        rec._sync_kick_push = lambda: None
+        rec.cleaner = mock.Mock()
+        rec._startup_cleanup_cancel = mock.Mock()
+        rec._startup_cleanup_thread = None
+        with mock.patch.object(recorder_mod, "kill_process_tree", fake_kill), \
+                mock.patch.object(recorder_mod.threading, "Thread"):
+            try:
+                rec.stop()
+            except Exception as e:  # stop() touches more than this harness fakes; the wait is set first
+                if not rec.cleaner.start.called:
+                    raise
+        self.assertEqual(rec.cleaner.initial_wait, StreamRecorder.STOP_CLEANUP_DELAY)
+        rec.cleaner.start.assert_called_once()
+
     def test_start_channel_forgets_the_crash_history(self):
         rec = self.rec
         procs = self.start_all()

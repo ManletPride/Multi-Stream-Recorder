@@ -705,8 +705,11 @@ class StatusWriter(threading.Thread):
                     cleaner.on_file = tracker.on_cleanup
             except Exception:
                 pass
-        for key, st in _status_copy(rec).items():
+        statuses = _status_copy(rec)
+        for key, st in statuses.items():
             tracker.seen(key, st)
+        if rec is not None and statuses:
+            tracker.prune(set(statuses))
         store = self.app.presence or getattr(rec, "presence", None)
         if store is not None:
             try:
@@ -892,9 +895,14 @@ class Controller:
 
         keys = pick(self.app.records())
         rec = self.app.recorder
+        before = _status_copy(rec)
+        tracker = self.app.tracker
         for key in keys:
             if rec is not None:
+                recording = str((before.get(key) or {}).get("status", "")).lower().startswith("recording")
                 rec.remove_channel(key)
+                if tracker is not None and key in before:
+                    tracker.stopping(key, recording)
         drop = set(keys)
         self.app.mutate(lambda recs: recs.__setitem__(slice(None), [r for r in recs if r["name"] not in drop]))
         return {"removed": [display_name(k) for k in keys], "recordings_kept": True}
@@ -1305,6 +1313,12 @@ class Controller:
         key = self._channel_key(args["channel"]) if args.get("channel") else None
         timeout = max(0.0, min(float(args.get("timeout", 300)), 3600.0))
         after = args.get("after")
+        if after in (None, "") and key is not None and "live" in kinds:
+            st = str((_status_copy(self.app.recorder).get(key) or {}).get("status", ""))
+            if st.lower().startswith("recording"):  # already live and recording: nothing to wait for
+                return {"seq": tracker.seq, "event": "live", "channel": key, "already": True,
+                        "source": "recording", "time": time.time(),
+                        "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
         if after in (None, "") and key is not None and "finished" in kinds:
             stop = tracker.default_after(key)  # stopped and not recording again: its finish counts
             if stop is not None:

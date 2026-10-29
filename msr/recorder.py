@@ -56,6 +56,9 @@ class BackgroundCleaner:
         self.status_dict = status_dict if status_dict is not None else {}
         self._thread = None
         self._stop_event = threading.Event()
+        # Seconds _run waits before its first pass. StreamRecorder.stop() lowers it when every
+        # worker process tree is confirmed gone (their file handles are closed).
+        self.initial_wait = 30
 
     def _report(self, event, *args, **kwargs):
         """Tell agent control what the cleanup does (msr.agent_status.Tracker.on_cleanup)."""
@@ -85,8 +88,9 @@ class BackgroundCleaner:
         # remux threads (spawned by stop_channel) to finish before we start scanning.
         # We use a longer initial wait (30 s) then try to acquire the cleanup lock;
         # if another cleanup is still running we wait for it to finish (Bug #3 fix).
-        logging.info("Cleanup: Waiting 30 seconds for in-flight remuxes and file handles to be released...")
-        for _ in range(30):
+        wait = max(0, int(self.__dict__.get("initial_wait", 30)))
+        logging.info(f"Cleanup: Waiting {wait} seconds for in-flight remuxes and file handles to be released...")
+        for _ in range(wait):
             if self._stop_event.is_set():
                 return
             time.sleep(1)
@@ -1342,9 +1346,13 @@ class StreamRecorder:
         def _channel_cleanup():
             time.sleep(delay)
             for pass_num in range(3):
-                if not self.cleaner._process_leftover_files():
+                self.cleaner._process_leftover_files()
+                # Retry only for THIS channel's own leftovers (other channels' busy folders are not
+                # its business). If the channel records again (restarted / re-added), its folder
+                # holds the new recording: that is finished by its own worker or the session's end.
+                if not self._own_leftovers(channel_name):
                     break
-                logging.info(f"Cleanup for {channel_name}: some files were busy, retrying in 10s "
+                logging.info(f"Cleanup for {channel_name}: its files were still busy, retrying in 10s "
                              f"(pass {pass_num + 1}/3)")
                 time.sleep(10)
             logging.info(f"Cleanup finished for {channel_name}")
@@ -1352,6 +1360,18 @@ class StreamRecorder:
 
         threading.Thread(target=_channel_cleanup, daemon=True,
                          name=f"cleanup-{channel_name}").start()
+
+    def _own_leftovers(self, channel_name):
+        """Raw .ts files of a stopped channel still waiting in Recorded/ (none if it records again)."""
+        st = (self.status_dict.get(channel_name) or {}).get("status")
+        if self.processes.get(channel_name) or st in ("Recording", "Remuxing...", "Processing..."):
+            return []
+        try:
+            platform, user_dir = channel_key_to_dirs(channel_name)
+            folder = os.path.join(self.recorded_base, platform, *user_dir.split("/"))
+            return [n for n in os.listdir(folder) if n.endswith(".ts")]
+        except (OSError, TypeError, AttributeError):
+            return []
 
     def remove_channel(self, channel_name):
         """Stop any live worker and drop the channel from the current session.
@@ -1496,6 +1516,7 @@ class StreamRecorder:
                     logging.warning(f"Process {ch} (PID {proc.pid}) did not terminate, force killing...")
                     proc.kill()
                     proc.join(timeout=5)
+        all_gone = not any(p.is_alive() for procs in self.processes.values() for p in procs)
 
         self.processes = {}
 
@@ -1520,7 +1541,9 @@ class StreamRecorder:
                     "size": "", "time": "", "progress": 0,
                 }
 
-        # Start background cleanup (safe now — no recording processes running)
+        # Start background cleanup (safe now — no recording processes running). Every tree was
+        # killed and joined, so a short wait is enough; the pass still skips locked/growing files.
+        self.cleaner.initial_wait = self.STOP_CLEANUP_DELAY if all_gone else self.STOP_CLEANUP_DELAY_SLOW
         self.cleaner.start()
         logging.info("All processes stopped (cleanup running in background)")
 
