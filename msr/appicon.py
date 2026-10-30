@@ -92,14 +92,14 @@ def shortcut_script(lnk: str, target: str, args: str, workdir: str, icon: str) -
 
 
 def desktop_dir() -> str:
+    """The real Desktop (also when OneDrive moved it, or its path is not ASCII)."""
     if sys.platform == "win32":
         try:
-            r = subprocess.run(["powershell", "-NoProfile", "-Command", "[Environment]::GetFolderPath('Desktop')"],
-                               capture_output=True, text=True, timeout=20, **no_window_kwargs())
-            path = (r.stdout or "").strip()
-            if path and os.path.isdir(path):
-                return path
-        except (OSError, subprocess.SubprocessError):
+            import ctypes
+            buf = ctypes.create_unicode_buffer(260)
+            if ctypes.windll.shell32.SHGetFolderPathW(None, 0x10, None, 0, buf) == 0 and os.path.isdir(buf.value):
+                return buf.value   # 0x10 = CSIDL_DESKTOPDIRECTORY
+        except Exception:
             pass
     return os.path.join(os.path.expanduser("~"), "Desktop")
 
@@ -118,7 +118,7 @@ def create_windows_shortcut(lnk: str | None = None, data_dir: str | None = None,
         args += f' --data-dir "{data_dir}"'
     script = shortcut_script(lnk, pythonw(), args, ROOT, ICO)
     r = run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True,
-            timeout=30, **no_window_kwargs())
+            errors="replace", timeout=30, **no_window_kwargs())
     if r.returncode != 0:
         raise OSError((r.stderr or "PowerShell failed").strip()[:300])
     return lnk

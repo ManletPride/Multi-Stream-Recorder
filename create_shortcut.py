@@ -30,7 +30,7 @@ def main(argv=None):
     if a.set_icon:
         r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
                             appicon.set_icon_script(os.path.abspath(a.set_icon))],
-                           capture_output=True, text=True, **no_window_kwargs())
+                           capture_output=True, text=True, errors="replace", timeout=30, **no_window_kwargs())
         print("Icon set." if r.returncode == 0 else (r.stderr or "failed").strip())
         return r.returncode
     print("Created", appicon.create_windows_shortcut(a.path, a.data_dir))

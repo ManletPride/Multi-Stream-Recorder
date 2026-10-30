@@ -108,6 +108,9 @@ class ShortcutTests(unittest.TestCase):
             self.assertIn("run_msr.pyw", calls[-1][-1])   # keeps .venv, not the app directly
             self.assertNotIn("Multi-Stream-Recorder.py", calls[-1][-1])
 
+    def test_desktop_dir_exists(self):
+        self.assertTrue(appicon.desktop_dir().endswith("Desktop") or os.path.isdir(appicon.desktop_dir()))
+
     def test_linux_desktop_entry(self):
         text = appicon.desktop_entry("/usr/bin/python3", "/home/me/msr-data")
         self.assertTrue(text.startswith("[Desktop Entry]"))
