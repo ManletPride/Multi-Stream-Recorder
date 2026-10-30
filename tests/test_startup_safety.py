@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from msr import deps, startup_error, util  # noqa: E402
+from tests import HAS_FFMPEG  # noqa: E402
 from msr.config import Config  # noqa: E402
 from msr.recorder import StreamRecorder, finish_headless_session  # noqa: E402
 
@@ -125,6 +126,7 @@ class StartupSubprocessTests(unittest.TestCase):
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=tmp, env=env)
         return done, data
 
+    @unittest.skipUnless(HAS_FFMPEG, "ffmpeg not installed: the ffmpeg error is reported first")
     def test_missing_drive_shows_the_friendly_message_headless(self):
         with tempfile.TemporaryDirectory() as tmp:
             done, data = self.run_main(tmp)
@@ -205,14 +207,31 @@ class StartupErrorModuleTests(unittest.TestCase):
 
     def test_dialog_goes_through_the_shared_helper_with_a_parent(self):
         fake_root = mock.MagicMock()
-        with mock.patch("tkinter.Tk", return_value=fake_root), \
+        with mock.patch.object(startup_error, "dialogs_allowed", return_value=True), \
+                mock.patch("tkinter.Tk", return_value=fake_root), \
                 mock.patch("msr.dialogs.show_error") as show_error:
             self.assertTrue(startup_error.show_dialog("Title", "Body"))
         show_error.assert_called_once_with(fake_root, "Title", "Body")
         fake_root.destroy.assert_called_once()
 
+    def test_no_dialog_under_tests_ci_or_without_a_display(self):
+        with mock.patch.dict(os.environ, {"MSR_NO_DIALOGS": "1"}), mock.patch("tkinter.Tk") as tk_:
+            self.assertFalse(startup_error.show_dialog("Title", "Body"))
+        tk_.assert_not_called()
+        env = {k: v for k, v in os.environ.items() if k not in ("MSR_NO_DIALOGS", "MSR_SMOKE_TEST")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertTrue(startup_error.dialogs_allowed() or sys.platform.startswith("linux"))
+            os.environ["MSR_SMOKE_TEST"] = "1"
+            self.assertFalse(startup_error.dialogs_allowed())
+            os.environ.pop("MSR_SMOKE_TEST")
+            if sys.platform.startswith("linux"):
+                os.environ.pop("DISPLAY", None)
+                os.environ.pop("WAYLAND_DISPLAY", None)
+                self.assertFalse(startup_error.dialogs_allowed())
+
     def test_dialog_failure_is_not_an_error(self):
-        with mock.patch("tkinter.Tk", side_effect=RuntimeError("no display")):
+        with mock.patch.object(startup_error, "dialogs_allowed", return_value=True), \
+                mock.patch("tkinter.Tk", side_effect=RuntimeError("no display")):
             self.assertFalse(startup_error.show_dialog("Title", "Body"))
 
     def test_launcher_failure_is_logged(self):

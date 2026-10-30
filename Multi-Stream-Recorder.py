@@ -289,6 +289,8 @@ examples:
         activated = activate_existing_instance()
         if not activated:
             try:
+                if not _startup_error.dialogs_allowed():
+                    raise RuntimeError("no dialogs")   # printed below instead
                 import tkinter as tk
                 from tkinter import messagebox
                 _root = tk.Tk()

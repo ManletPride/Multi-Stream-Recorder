@@ -82,8 +82,24 @@ def write_error_log(text, directory=None):
         return None
 
 
+NO_DIALOGS_ENV = "MSR_NO_DIALOGS"
+
+
+def dialogs_allowed() -> bool:
+    """False under tests/CI (MSR_NO_DIALOGS=1, MSR_SMOKE_TEST) and without a display: a modal box
+    nobody can see would block the start forever. The message still goes to stderr and the log."""
+    if os.environ.get(NO_DIALOGS_ENV, "").strip() in ("1", "true", "yes") or os.environ.get("MSR_SMOKE_TEST"):
+        return False
+    if sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return False
+    return True
+
+
 def show_dialog(title, message):
-    """Show ``message`` in the themed error dialog on a hidden root. False if Tk is unavailable."""
+    """Show ``message`` in the themed error dialog on a hidden root. False if Tk is unavailable
+    or dialogs are off (see dialogs_allowed)."""
+    if not dialogs_allowed():
+        return False
     try:
         import tkinter as tk
         from msr import dialogs

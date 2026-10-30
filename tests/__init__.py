@@ -8,10 +8,24 @@ while the tests run, and every test ends with a collection on the main thread in
 """
 import gc
 import os
+import shutil
 import threading
 import unittest
 
 os.environ.setdefault("MSR_NO_UPDATE_CHECK", "1")  # headless runs in tests never ask GitHub
+os.environ.setdefault("MSR_NO_DIALOGS", "1")       # a startup error box would block a test run
+HAS_FFMPEG = shutil.which("ffmpeg") is not None    # the app refuses to start without it
+
+
+def new_tk_root(testcase):
+    """A hidden Tk root, or skip the test when there is no display (Linux CI without Xvfb)."""
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        testcase.skipTest(f"no display: {exc}")
+    root.withdraw()
+    return root
 
 gc.disable()
 _run = unittest.TestCase.run
