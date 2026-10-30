@@ -162,6 +162,13 @@ class CutTests(unittest.TestCase):
         self.assertIn("Invalid data", str(ctx.exception))
         self.assertEqual([f for f in os.listdir(self.tmp.name) if f.endswith(".mp4")], [])
 
+    def test_save_failure_after_the_cut_leaves_no_part_file(self):
+        with mock.patch.object(core.os, "replace", side_effect=OSError("drive gone")), \
+                self.assertRaises(core.ClipError) as ctx:
+            core.make_clip("ffmpeg", self.src, 5.3, 9.0, self.tmp.name, run=self.fake_run())
+        self.assertIn("drive gone", str(ctx.exception))
+        self.assertEqual([f for f in os.listdir(self.tmp.name) if f.endswith(".mp4")], [])
+
     def test_bad_ranges_and_a_missing_source(self):
         with self.assertRaises(core.ClipError):
             core.make_clip("ffmpeg", self.src, 5, 5.1, self.tmp.name, run=self.fake_run())
@@ -299,6 +306,11 @@ class EditorWindowTests(unittest.TestCase):
         self.assertEqual(args[4], os.path.join(self.tmp.name, "Clips", "kick", "knut"))
         self.assertIn("keyframe 0:08.0", self.ed.status.cget("text"))
 
+    def test_a_failing_update_does_not_stop_the_loop(self):
+        self.ed.q.put(("saved", None, None))   # _on_saved(None, None) raises
+        self.ed.q.put(("length", self.src, True, 200.0))
+        self.pump(lambda: self.ed.marks.length == 200.0)   # the next poll still ran
+
     def test_live_edge_grows_and_jump_to_live(self):
         self.length = 300.0
         self.ed._last_length_check = 0
@@ -386,6 +398,43 @@ class PlaybackFeedTests(unittest.TestCase):
         self.assertEqual(feed.dropped, 2)                          # the two late ones
         self.assertEqual(feed.take_until(10.45)[-1], 4)
         feed.close()
+
+    def test_sound_ffmpeg_is_reaped_even_if_stopped_before_it_was_registered(self):
+        import io
+        from msr import clip_audio
+        killed = []
+
+        class Proc:
+            stdout = io.BytesIO(b"\0" * 64)
+
+            def kill(self):
+                killed.append(True)
+        player = clip_audio.AudioPlayer("x.ts", sink_factory=clip_audio.NullSink, spawn=lambda *a: Proc())
+        player.sink = clip_audio.NullSink()
+        player._feed(player._generation - 1, 0.0, 1.0)   # already stale when it starts
+        self.assertEqual(killed, [True])
+
+    def test_feed_reaps_its_ffmpeg_at_the_end(self):
+        import io
+        import time
+        from msr import clip_editor
+        done = []
+
+        class Proc:
+            stdout = io.BytesIO(b"")
+
+            def kill(self):
+                done.append("kill")
+
+            def wait(self, timeout=None):
+                done.append("wait")
+        proc = Proc()
+        clip_editor.VideoFeed("ffmpeg", "x.ts", 0.0, size=(4, 2), fps=10, spawn=lambda cmd: proc)
+        end = time.monotonic() + 5
+        while not proc.stdout.closed and time.monotonic() < end:
+            time.sleep(0.01)
+        self.assertEqual(done, ["kill", "wait"])
+        self.assertTrue(proc.stdout.closed)
 
     def test_playback_uses_the_raw_stream_at_source_fps_capped(self):
         from msr import clip_editor

@@ -83,19 +83,24 @@ class VideoFeed:
 
     def _run(self):
         n = 0
-        while not self._stop.is_set():
-            frame = self._read_raw() if self.raw else core.read_ppm(self.proc.stdout)
-            if frame is None:
-                break
-            item = (self.start + n / self.fps, frame)
-            n += 1
-            self.decoded = n
+        try:
             while not self._stop.is_set():
-                try:
-                    self.frames.put(item, timeout=0.2)
+                frame = self._read_raw() if self.raw else core.read_ppm(self.proc.stdout)
+                if frame is None:
                     break
-                except queue.Full:
-                    continue
+                item = (self.start + n / self.fps, frame)
+                n += 1
+                self.decoded = n
+                while not self._stop.is_set():
+                    try:
+                        self.frames.put(item, timeout=0.2)
+                        break
+                    except queue.Full:
+                        continue
+        except (OSError, ValueError):
+            pass   # pipe closed under us
+        finally:
+            core.reap(self.proc)
 
     def take_until(self, t: float):
         """The newest frame due at t, or None. Older due frames are dropped (late)."""
@@ -112,6 +117,7 @@ class VideoFeed:
             last = self.frames.get_nowait()[1]
 
     def close(self):
+        """Kill the decoder; the reader thread then reaps it."""
         self._stop.set()
         if self.proc is not None:
             try:
@@ -601,28 +607,37 @@ class ClipEditor:
             self.say(f"Clips folder: {folder}")
 
     # ------------------------------------------------------------- loop
+    def _drain(self) -> None:
+        while True:
+            try:
+                item = self.q.get_nowait()
+            except queue.Empty:
+                return
+            kind = item[0]
+            if kind == "frame":
+                self._on_frame(*item[1:])
+            elif kind == "vinfo":
+                if item[1] == self.src and item[2]:
+                    self._vinfo = item[2]
+            elif kind == "length":
+                self._on_length(*item[1:])
+            elif kind == "saved":
+                self._on_saved(*item[1:])
+
     def _poll(self) -> None:
         if self._closed:
             return
         try:
-            while True:
-                item = self.q.get_nowait()
-                kind = item[0]
-                if kind == "frame":
-                    self._on_frame(*item[1:])
-                elif kind == "vinfo":
-                    if item[1] == self.src and item[2]:
-                        self._vinfo = item[2]
-                elif kind == "length":
-                    self._on_length(*item[1:])
-                elif kind == "saved":
-                    self._on_saved(*item[1:])
-        except queue.Empty:
-            pass
-        if self.playing:
-            self._tick_playback()
-        self._refresh_length()
-        self._job = self.win.after(PLAY_POLL_MS if self.playing else POLL_MS, self._poll)
+            self._drain()
+            if self.playing:
+                self._tick_playback()
+            self._refresh_length()
+        except Exception:   # one bad item must not stop the loop (and freeze the window)
+            if self.logger is not None:
+                self.logger.exception("Clip Editor: update failed")
+        finally:
+            if not self._closed:
+                self._job = self.win.after(PLAY_POLL_MS if self.playing else POLL_MS, self._poll)
 
     def close(self) -> None:
         self._closed = True

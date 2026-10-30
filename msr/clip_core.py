@@ -27,6 +27,18 @@ class ClipError(Exception):
     """A cut that cannot be made; the text is shown to the user as is."""
 
 
+TEXT = {"text": True, "encoding": "utf-8", "errors": "replace"}   # ffmpeg/ffprobe print UTF-8
+
+
+def reap(proc) -> None:
+    """Stop a preview/sound ffmpeg and release its pipe and process handle."""
+    for step in (lambda: proc.kill(), lambda: proc.wait(timeout=2), lambda: proc.stdout.close()):
+        try:
+            step()
+        except Exception:
+            pass
+
+
 # ------------------------------------------------------------------ times
 def parse_time(text, length: float | None = None) -> float:
     """'90', '1:30', '01:02:03.5' -> seconds. A leading '-' counts back from the end
@@ -116,7 +128,7 @@ def ts_length(path: str) -> float | None:
 def probe_length(path: str, ffprobe: str = "ffprobe") -> float | None:
     try:
         r = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "json", path],
-                           capture_output=True, text=True, timeout=30, **no_window_kwargs())
+                           capture_output=True, timeout=30, **TEXT, **no_window_kwargs())
         return float(json.loads(r.stdout or "{}").get("format", {}).get("duration"))
     except (OSError, ValueError, TypeError, subprocess.SubprocessError):
         return None
@@ -138,12 +150,12 @@ def keyframe_at_or_before(src: str, t: float, ffprobe: str = "ffprobe", run=subp
     """Time (from the start) of the video keyframe a stream copy from t begins at, or None."""
     try:
         r = run([ffprobe, "-v", "error", "-show_entries", "format=start_time", "-of", "csv=p=0", src],
-                capture_output=True, text=True, timeout=30, **no_window_kwargs())
+                capture_output=True, timeout=30, **TEXT, **no_window_kwargs())
         base = float((r.stdout or "0").strip().splitlines()[0] or 0)
         at = base + t
         r = run([ffprobe, "-v", "error", "-select_streams", "v:0", "-read_intervals", f"{max(0.0, at - 15):.3f}%{at + 0.05:.3f}",
                  "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", src],
-                capture_output=True, text=True, timeout=60, **no_window_kwargs())
+                capture_output=True, timeout=60, **TEXT, **no_window_kwargs())
     except (OSError, ValueError, IndexError, subprocess.SubprocessError):
         return None
     best = None
@@ -204,7 +216,7 @@ def video_info(src: str, ffprobe: str = "ffprobe", run=subprocess.run):
     try:
         r = run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
                  "stream=width,height,avg_frame_rate,r_frame_rate", "-of", "json", src],
-                capture_output=True, text=True, timeout=30, **no_window_kwargs())
+                capture_output=True, timeout=30, **TEXT, **no_window_kwargs())
         st = (json.loads(r.stdout or "{}").get("streams") or [{}])[0]
         w, h = int(st["width"]), int(st["height"])
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
@@ -397,8 +409,9 @@ def make_clip(ffmpeg: str, src: str, start: float, end: float, out_dir: str, *, 
     final = unique_path(os.path.join(out_dir, clip_name(src, start, end)))
     part = final[:-4] + ".part.mp4"
     try:
-        r = run(cut_command(ffmpeg, src, cut_from + (0.001 if not exact else 0.0), end, part, exact), capture_output=True, text=True,
-                timeout=3600, stdin=subprocess.DEVNULL, **no_window_kwargs())
+        # +1 ms: a copy from exactly the keyframe's time can start one GOP early
+        r = run(cut_command(ffmpeg, src, cut_from + (0.001 if not exact else 0.0), end, part, exact),
+                capture_output=True, timeout=3600, stdin=subprocess.DEVNULL, **TEXT, **no_window_kwargs())
     except (OSError, subprocess.SubprocessError) as e:
         _remove(part)
         raise ClipError(f"ffmpeg could not run: {e}") from None
@@ -406,7 +419,11 @@ def make_clip(ffmpeg: str, src: str, start: float, end: float, out_dir: str, *, 
         _remove(part)
         err = (r.stderr or "").strip().splitlines()[-1:] or ["no output"]
         raise ClipError(f"The cut failed: {err[0][:300]}")
-    os.replace(part, final)
+    try:
+        os.replace(part, final)
+    except OSError as e:   # e.g. the drive went away during the cut
+        _remove(part)
+        raise ClipError(f"Could not save the clip: {e}") from None
     got = probe_length(final, probe)
     if got is None:
         got = end - cut_from

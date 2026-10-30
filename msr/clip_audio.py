@@ -357,6 +357,9 @@ class AudioPlayer:
         except Exception:
             pass
         finally:
+            # This thread owns proc: _stop_feed may have run before self._proc was set.
+            from msr.clip_core import reap
+            reap(proc)
             if gen == self._generation:
                 self._ended.set()
 
