@@ -6,7 +6,27 @@ Supported: **Kick**, **Twitch**, **YouTube**, **Rumble**, **TikTok**, **Fishtank
 
 This README describes **v3.0.0**. Full history: [CHANGELOG.md](CHANGELOG.md).
 
-![Status tab](screenshots/dark-mode.png)
+![Status tab: five channels recording at once](screenshots/main.png)
+
+<details><summary>More screenshots</summary>
+
+**Clip Editor (DVR)**: In/Out marks on a stream that is still recording.
+
+![Clip Editor](screenshots/clip-editor.png)
+
+**Library**: space and hours per site, channel and month.
+
+![Library tab](screenshots/library.png)
+
+**Logs**: live log with filter and level drop-down.
+
+![Logs tab](screenshots/logs.png)
+
+**Themes**: Light, Dracula, Catppuccin Mocha OLED and Gruvbox Material (16 built in).
+
+![Themes](screenshots/themes.png)
+
+</details>
 
 ## What's new in 3.0
 
@@ -60,8 +80,6 @@ This README describes **v3.0.0**. Full history: [CHANGELOG.md](CHANGELOG.md).
 
 **Logs tab**
 - Follows new lines only while you are at the bottom (a **New lines** button appears when you scroll back), filter box, level drop-down, highlighting, coloured warnings and errors, Ctrl+F, **Open log file**.
-
-![Logs tab](screenshots/logs.png)
 
 **Look and housekeeping**
 - **Themes**: the **Theme...** button opens a list with a live preview: PowerShell Blue (default), Neutral Dark, Light, High Contrast, Midnight Purple, Paper, plus ten based on [Omarchy](https://omarchy.org/themes/) palettes (Arc Blueberry, Catppuccin Mocha OLED, Rose Pine, Gruvbox Material, Dracula, Flexoki Dark, Vesper, Tokyo Night OLED, Tokyo Day, Solarized Light; credits in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)). Add your own as `themes/*.json` in the data folder.
