@@ -195,6 +195,28 @@ class OptOutAndPrepareTests(Base):
         self.assertEqual(py, venv.venv_python(self.root, gui=True))
         self.assertEqual(notice, "")
 
+    def test_install_waits_while_another_copy_runs_from_the_venv(self):
+        venv.ensure(self.root, run=FakeTools())
+        with open(os.path.join(self.root, "requirements.txt"), "a") as fh:
+            fh.write("psutil\n")
+        self.assertEqual(venv.check(self.root)[0], "install")
+        other = [(4242, venv.venv_python(self.root, gui=True))]
+        with mock.patch.object(venv, "_process_images", return_value=other), \
+                mock.patch.object(venv, "ensure") as ensure:
+            py, notice = venv.prepare(self.root, show_window=False)
+        ensure.assert_not_called()                     # no pip under a running copy
+        self.assertEqual((py, notice), (venv.venv_python(self.root, gui=True), ""))
+        self.assertEqual(venv.check(self.root)[0], "install")   # done on a later launch
+
+    def test_in_use_ignores_this_process_and_other_folders(self):
+        mine = venv.venv_python(self.root)
+        images = lambda: [(os.getpid(), mine), (7, os.path.join(self.root, "x.exe")), (8, mine)]  # noqa: E731
+        self.assertEqual(venv.in_use(self.root, images), [8])
+        self.assertEqual(venv.in_use(self.root, lambda: 1 / 0), [])
+
+    def test_process_list_is_real(self):
+        self.assertTrue(any(pid == os.getpid() for pid, _ in venv._process_images()))
+
     def test_launch_notice_is_taken_once(self):
         os.environ[venv.NOTICE_ENV] = "x failed"
         self.assertEqual(venv.take_launch_notice(), "x failed")

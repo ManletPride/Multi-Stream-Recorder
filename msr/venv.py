@@ -157,6 +157,61 @@ def check(root: str) -> tuple[str, str]:
     return "ready", ""
 
 
+def _process_images() -> list[tuple[int, str]]:
+    """(pid, executable path) of the processes this user can see; [] if unknown."""
+    out = []
+    if is_windows():
+        import ctypes
+        from ctypes import wintypes
+
+        class Entry(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                        ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD),
+                        ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
+                        ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+                        ("szExeFile", wintypes.WCHAR * 260)]
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        k32.OpenProcess.restype = wintypes.HANDLE
+        snap = k32.CreateToolhelp32Snapshot(0x2, 0)   # TH32CS_SNAPPROCESS
+        if not snap or snap == wintypes.HANDLE(-1).value:
+            return []
+        try:
+            e = Entry()
+            e.dwSize = ctypes.sizeof(Entry)
+            ok = k32.Process32FirstW(snap, ctypes.byref(e))
+            while ok:
+                h = k32.OpenProcess(0x1000, False, e.th32ProcessID)   # PROCESS_QUERY_LIMITED_INFORMATION
+                if h:
+                    buf, size = ctypes.create_unicode_buffer(1024), wintypes.DWORD(1024)
+                    if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                        out.append((int(e.th32ProcessID), buf.value))
+                    k32.CloseHandle(h)
+                ok = k32.Process32NextW(snap, ctypes.byref(e))
+        finally:
+            k32.CloseHandle(snap)
+        return out
+    for pid in os.listdir("/proc") if os.path.isdir("/proc") else []:
+        if pid.isdigit():
+            try:
+                out.append((int(pid), os.readlink(f"/proc/{pid}/exe")))
+            except OSError:
+                pass
+    return out
+
+
+def in_use(root: str, images=None) -> list[int]:
+    """PIDs of other processes running from this .venv (another MSR, msr_ctl): its packages
+    must not be changed under them."""
+    prefix = os.path.normcase(os.path.abspath(venv_dir(root))) + os.sep
+    try:
+        found = images() if images is not None else _process_images()
+    except Exception:
+        return []
+    return [pid for pid, exe in found
+            if pid != os.getpid() and os.path.normcase(os.path.abspath(exe)).startswith(prefix)]
+
+
 def _looks_like_venv(d: str) -> bool:
     return os.path.isfile(os.path.join(d, "pyvenv.cfg")) or os.path.isfile(os.path.join(d, MARKER))
 
@@ -295,6 +350,12 @@ def prepare(root: str, data_dir: str | None = None, show_window: bool = True) ->
     state, _ = check(root)
     if state == "ready":
         return venv_python(root, gui=True), ""
+    busy = in_use(root) if state in ("install", "rebuild") else []
+    if busy and state == "install":   # keep the old packages until no other copy uses them
+        return venv_python(root, gui=True), ""
+    if busy:
+        return None, notice_text(f".venv needs rebuilding but another Multi-Stream Recorder (PID {busy[0]}) "
+                                 "is running from it; close it and start MSR again.")
     result = {}
     win = _progress_window() if show_window else None
     if win is None:
