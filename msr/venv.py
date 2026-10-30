@@ -35,6 +35,21 @@ PIP_TIMEOUT = 1800
 LAUNCH_NOTICE = ""   # set by the entry point from NOTICE_ENV; the GUI shows it once
 
 
+def launch_data_dir(argv: list[str], environ=None) -> tuple[str, list[str]]:
+    """The data folder run_msr.pyw uses and the --data-dir args it adds: a --data-dir on the
+    command line (shortcuts cannot set env vars) wins, else MSR_DATA (passed on), else MSR_HOME."""
+    environ = os.environ if environ is None else environ
+    for i, a in enumerate(argv):
+        if a == "--data-dir" and i + 1 < len(argv):
+            return argv[i + 1].strip().strip('"'), []
+        if a.startswith("--data-dir="):
+            return a.split("=", 1)[1].strip().strip('"'), []
+    data = (environ.get("MSR_DATA") or "").strip().strip('"')
+    if data:
+        return data, ["--data-dir", data]
+    return (environ.get("MSR_HOME") or "").strip().strip('"'), []
+
+
 def is_windows() -> bool:
     return os.name == "nt"
 

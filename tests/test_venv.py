@@ -193,6 +193,18 @@ class OptOutAndPrepareTests(Base):
         self.assertIn(venv.ERROR_FILE, lines)
 
 
+class LaunchDataDirTests(unittest.TestCase):
+    def test_command_line_data_dir_wins_and_is_not_added_twice(self):
+        env = {"MSR_DATA": r"E:\env", "MSR_HOME": r"E:\home"}
+        self.assertEqual(venv.launch_data_dir(["--data-dir", r"D:\d", "--headless"], env), (r"D:\d", []))
+        self.assertEqual(venv.launch_data_dir([r'--data-dir="D:\d"'], env), (r"D:\d", []))
+
+    def test_msr_data_is_passed_on_and_msr_home_is_not(self):
+        self.assertEqual(venv.launch_data_dir([], {"MSR_DATA": r' "E:\env" '}), (r"E:\env", ["--data-dir", r"E:\env"]))
+        self.assertEqual(venv.launch_data_dir(["--headless"], {"MSR_HOME": r"E:\home"}), (r"E:\home", []))
+        self.assertEqual(venv.launch_data_dir([], {}), ("", []))
+
+
 class CtlHandoffTests(unittest.TestCase):
     def test_handoff_to_venv_python(self):
         seen = []

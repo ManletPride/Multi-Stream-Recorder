@@ -114,10 +114,9 @@ def create_windows_shortcut(lnk: str | None = None, data_dir: str | None = None,
         n += 1
         lnk = f"{stem} ({n}){ext}"
     args = f'"{os.path.join(ROOT, "run_msr.pyw")}"'
+    if data_dir:   # through run_msr.pyw too, so the shortcut still uses .venv
+        args += f' --data-dir "{data_dir}"'
     script = shortcut_script(lnk, pythonw(), args, ROOT, ICO)
-    if data_dir:   # run_msr.pyw reads MSR_DATA; a shortcut cannot set env, so go direct
-        args = f'"{os.path.join(ROOT, "Multi-Stream-Recorder.py")}" --data-dir "{data_dir}"'
-        script = shortcut_script(lnk, pythonw(), args, ROOT, ICO)
     r = run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True,
             timeout=30, **no_window_kwargs())
     if r.returncode != 0:

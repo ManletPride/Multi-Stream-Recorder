@@ -105,6 +105,8 @@ class ShortcutTests(unittest.TestCase):
             self.assertIn("run_msr.pyw", calls[-1][-1])
             appicon.create_windows_shortcut(os.path.join(d, "x.lnk"), data_dir=r"D:\data", run=run)
             self.assertIn(r'--data-dir "D:\data"', calls[-1][-1])
+            self.assertIn("run_msr.pyw", calls[-1][-1])   # keeps .venv, not the app directly
+            self.assertNotIn("Multi-Stream-Recorder.py", calls[-1][-1])
 
     def test_linux_desktop_entry(self):
         text = appicon.desktop_entry("/usr/bin/python3", "/home/me/msr-data")
