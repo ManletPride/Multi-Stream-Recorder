@@ -2596,6 +2596,8 @@ def record_worker(args):
                 # Normal offline — flat interval with jitter (no backoff)
                 sleep_time = jittered_sleep(poll_base_seconds, poll_jitter_percent)
                 detail = f"next check ~{int(sleep_time)}s"
+                if platform == "fishtank" and getattr(fishtank_auth, "last_detail", None):
+                    detail = f"{fishtank_auth.last_detail} - {detail}"
                 if platform == "kick":
                     # Push coverage flag is set by KickPushListener in the
                     # main process via the shared runtime dict.  When the

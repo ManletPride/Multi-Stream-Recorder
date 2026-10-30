@@ -108,7 +108,7 @@ class MaxRecordHoursTests(unittest.TestCase):
 
 class FakeAuth:
     def __init__(self):
-        self._all_stream_names = {"cam-5": "Cam"}
+        self._all_stream_names = {"other-5": "Other"}  # cam-5 is never listed, so it is probed
         self._stream_hosts = {}
         self._stream_host = "example.invalid"
         self.refreshes = []

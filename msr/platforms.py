@@ -911,6 +911,23 @@ class FishtankAuth:
         self._all_stream_names = {}  # all stream id→name from API, populated by get_live_streams
         self._refresh_thread = None
         self._refresh_stop = threading.Event()
+        self._catalog_ok = False     # True when the last /v1/live-streams call parsed (even if empty)
+        self._auth_fail_logged_at = None  # monotonic time of the last "session expired" error
+        # Offline detail for the worker's status row (set by check_stream_fishtank), or None.
+        self.last_detail = None
+
+    AUTH_FAIL_LOG_INTERVAL = 3600  # log the "session expired" error at most once an hour per worker
+
+    def _log_auth_failure(self, message):
+        """Log the login failure as an error at most once per AUTH_FAIL_LOG_INTERVAL;
+        repeats in between go to debug so an off-season roster does not flood the log."""
+        now = time.monotonic()
+        last = self._auth_fail_logged_at
+        if last is None or now - last >= self.AUTH_FAIL_LOG_INTERVAL:
+            self._auth_fail_logged_at = now
+            self._logger.error(message)
+        else:
+            self._logger.debug(message)
 
     # ── Public interface ──────────────────────────────────────────────────
 
@@ -1010,11 +1027,14 @@ class FishtankAuth:
 
         Returns a dict mapping stream_id → stream_name, or {} on failure.
         """
+        self._catalog_ok = False
         raw = self._fetch_json(self._STREAMS_URL)
         if raw is None:
             return {}
         try:
             data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise ValueError("unexpected live-streams reply")
             status = data.get("liveStreamStatus", {})
             lb = data.get("loadBalancer", {})
             streams = {}
@@ -1031,6 +1051,7 @@ class FishtankAuth:
                     streams[sid] = all_stream_names.get(sid, sid)
 
             self._all_stream_names = all_stream_names
+            self._catalog_ok = True
 
             # Discover the real serving host for each online stream via thumbnail.
             # Use the loadBalancer host as the starting point for the thumbnail
@@ -1281,7 +1302,7 @@ class FishtankAuth:
                 return
 
             # Both strategies failed — give the user a clear action to take
-            self._logger.error(
+            self._log_auth_failure(
                 f"[fishtank] Authentication failed (response omitted — may "
                 f"contain tokens).\n"
                 f"  ► Your fishtank.live session has most likely expired.\n"
@@ -1408,6 +1429,12 @@ def is_known_fishtank_camera(name):
     return normalised in aliases or raw in aliases or raw in aliases.values()
 
 
+def _fishtank_probe_only(stream_id):
+    """Director Mode style ids that never appear as online in liveStreamStatus."""
+    sid = (stream_id or "").lower()
+    return sid.startswith("dirc") or sid.startswith("director")
+
+
 def check_stream_fishtank(stream_id, auth, logger, timeout=20):
     """Check if a fishtank.live camera stream is currently live.
 
@@ -1427,11 +1454,17 @@ def check_stream_fishtank(stream_id, auth, logger, timeout=20):
     """
 
     resolved_id = auth.resolve_stream_id(stream_id)
+    auth.last_detail = None
 
     # Fetch the streams list — also populates auth._all_stream_names and
     # caches the load balancer host from any online stream
     live_streams = auth.get_live_streams()
     if not live_streams and not auth._all_stream_names:
+        if getattr(auth, "_catalog_ok", False):
+            # The API answered but lists no cameras: the show is between seasons.
+            auth.last_detail = "no Fishtank cameras listed (between seasons)"
+            logger.debug("[fishtank] API lists no cameras")
+            return False, None, None
         return False, None, "failed to reach fishtank API"
 
     # Look up the friendly name for logging
@@ -1454,12 +1487,22 @@ def check_stream_fishtank(stream_id, auth, logger, timeout=20):
     # when live (confirmed from browser HAR: dirc-5 absent from status dict
     # while clearly playing in browser).  We attempt a direct GET to the
     # stream URL; anything other than 404 means the stream is accessible.
+    # A camera the catalog lists but does not mark online is offline: no probe (and no login
+    # attempt) needed. Only ids the catalog never lists, and Director Mode ids (dirc-*,
+    # director-*) that never show as online even while live, are probed directly.
+    if resolved_id in auth._all_stream_names and not _fishtank_probe_only(resolved_id):
+        logger.debug(f"[fishtank] Stream '{resolved_id}' listed, not online")
+        return False, None, None
+
     logger.info(
         f"[fishtank] Stream '{resolved_id}' not in status list — probing directly")
 
     jwt = auth.get_jwt()
     if not jwt:
-        return False, stream_name, "could not obtain JWT for probe"
+        # Without a login this camera cannot be checked: show it as Offline with a hint,
+        # not as a red Error (the auth failure itself is logged at most once an hour).
+        auth.last_detail = "Fishtank login needed to check this camera"
+        return False, stream_name, None
 
     probe_host = auth._stream_hosts.get(resolved_id, auth._stream_host)
     # Probe the HLS playlist — same endpoint we record from
