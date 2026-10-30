@@ -68,7 +68,7 @@ This README describes **v3.0.0**. Full history: [CHANGELOG.md](CHANGELOG.md).
 - A timeline over the whole recording so far, with **Jump to live** while it is still recording. Click or drag to scrub; a far jump shows the nearest keyframe at once, then the exact frame.
 - **Play with sound** and a **Volume** slider, so you can cut on dialogue. Playback runs at the recording's frame rate up to 60 fps; tick **Limit preview to 30 fps** on slower PCs (remembered).
 - **Mark In / Mark Out** (I / O keys), nudge buttons, **Replay In / Out** and the clip length.
-- **Save Clip** makes a lossless stream copy starting at the keyframe at or before your In point (it tells you the real start). Tick **Exact (re-encode)** for frame-exact edges. Clips never overwrite each other.
+- **Save clip** (Ctrl+S or Enter) makes a lossless stream copy starting at the keyframe at or before your In point (it tells you the real start). Tick **Exact (re-encode)** for frame-exact edges. Clips never overwrite each other.
 - The editor only reads the file, so the recording keeps going. Nothing extra to install: it uses ffmpeg and Windows' own audio output.
 
 **Library tab**

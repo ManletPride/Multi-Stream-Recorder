@@ -12,7 +12,7 @@ Cut a clip out of a recording, even while it is still recording. Open it with th
 - **Play with sound** and a volume slider, so you can cut right on a line of dialogue.
 - Smooth preview at the stream's own frame rate up to 60 fps, or **Limit preview to 30 fps** on slower PCs.
 - **Mark In / Mark Out** (I / O keys), nudge and replay buttons.
-- **Save Clip** is a lossless copy from the nearest keyframe; tick **Exact** for frame-exact edges.
+- **Save clip** (or Ctrl+S / Enter) is a lossless copy from the nearest keyframe; tick **Exact** for frame-exact edges.
 
 ### Library
 A new tab that shows how much space your recordings take per site, channel and month, with charts, and lets you clean up safely: every action is previewed first, the default is a reversible move to PendingDeletion with Undo, and recording channels and recent files are never touched.
@@ -42,11 +42,12 @@ Everything the window does can be done from the command line with `msr_ctl.py`, 
 - Removed: the unused `[Advanced] concurrent_fragments` setting (old configs that have it still load).
 
 ## Upgrading from 2.1.0
+- Close MSR first.
 - **Download this release instead of using the in-app update.** The 2.1.0 in-app updater only replaces the main program files, so it would skip the new launcher (`.venv` setup), `msr_ctl.py`, the icon files and the docs. Updates from 3.0.0 on deliver all of these.
-  - **Git:** close MSR, then `git pull` in your MSR folder.
-  - **ZIP:** close MSR, download the 3.0.0 ZIP from the GitHub release and extract it over your MSR folder (replace files). Your settings files are not in the ZIP, so nothing of yours is overwritten.
-- Start MSR with `run_msr.pyw` (double-click) or `run_msr.bat`. Optional: `python create_shortcut.py` makes a desktop shortcut with the new icon.
-- Close MSR first. Your `config.ini`, `channels.json`, cookies and recordings are kept and used as before; the old Dark Mode setting is migrated to a theme.
+  - **Git:** `git pull` in your MSR folder.
+  - **ZIP:** download the 3.0.0 ZIP from the GitHub release and extract it over your MSR folder (replace files). Your settings files are not in the ZIP, so nothing of yours is overwritten.
+- Start MSR with `run_msr.pyw` (double-click) or `run_msr.bat`. Optional: `python create_shortcut.py` makes a desktop shortcut with the new icon; it launches through `run_msr.pyw`, so it uses MSR's own environment (`.venv`).
+- Your `config.ini`, `channels.json`, cookies and recordings are kept and used as before; the old Dark Mode setting is migrated to a theme.
 - The first launch takes about a minute (setting up `.venv`); later launches are fast.
 - Requirements are unchanged: Python 3.10+ (3.12 tested), ffmpeg on PATH, Deno recommended for YouTube.
 
