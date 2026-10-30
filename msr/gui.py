@@ -3338,8 +3338,13 @@ def main_gui(config):
             return fn()
         box = {}
         done = threading.Event()
+        lock = threading.Lock()
 
         def run():
+            with lock:   # a timed-out request must not run later (a retry would do it twice)
+                if box.get("cancelled"):
+                    return
+                box["started"] = True
             try:
                 box["value"] = fn()
             except BaseException as e:  # handed to the caller's thread
@@ -3349,7 +3354,11 @@ def main_gui(config):
 
         root.after(0, run)
         if not done.wait(timeout):
-            raise _control.ControlError("The window did not respond in time; try again.", "busy")
+            with lock:
+                started = box.get("started")
+                box["cancelled"] = not started
+            if not started or not done.wait(timeout):
+                raise _control.ControlError("The window did not respond in time; try again.", "busy")
         if "error" in box:
             raise box["error"]
         return box.get("value")
