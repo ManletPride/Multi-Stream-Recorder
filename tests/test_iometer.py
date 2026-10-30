@@ -28,6 +28,16 @@ from msr.iometer import (
 )
 
 
+
+def _clock(*ticks):
+    """Fake monotonic: yields ticks, then repeats the last one (Python 3.12 calls it more often)."""
+    it = iter(ticks)
+    last = [ticks[0]]
+    def now():
+        last[0] = next(it, last[0])
+        return last[0]
+    return now
+
 class FormatTests(unittest.TestCase):
     def test_mb_s_buckets(self):
         self.assertEqual(format_mb_s(0), "0 MB/s")
@@ -230,7 +240,7 @@ class SamplerTests(unittest.TestCase):
     @mock.patch("msr.iometer.read_disk_write")
     @mock.patch("msr.iometer.time.monotonic")
     def test_msr_growth_on_third_tick(self, mono, disk, net):
-        mono.side_effect = [1.0, 2.0, 3.0]
+        mono.side_effect = _clock(1.0, 2.0, 3.0)
         disk.side_effect = [
             ("E:", 0, 0.0),
             ("E:", 0, 0.0),
@@ -249,7 +259,7 @@ class SamplerTests(unittest.TestCase):
     @mock.patch("msr.iometer.time.monotonic")
     def test_sparse_worker_size_bytes_not_a_one_second_spike(self, mono, disk, net):
         # Worker status only moves every 5s; GUI samples every 1s.
-        mono.side_effect = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+        mono.side_effect = _clock(0.0, 1.0, 2.0, 3.0, 4.0, 5.0)
         disk.side_effect = [("E:", 0, 0.0)] * 6
         net.side_effect = [0] * 6
         sampler = IoSampler(r"E:\Streams")
