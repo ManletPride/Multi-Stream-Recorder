@@ -2403,9 +2403,11 @@ def main_gui(config):
     root.after(10_000, _delayed_version_check)
 
     # Daily dependency check: a background thread long after startup; never delays recording.
+    # Re-checked hourly so a copy left running for days still checks once a day.
     _deps_q = stdlib_queue.Queue()
 
     def _daily_deps_check():
+        root.after(3_600_000, _daily_deps_check)
         if not config.getboolean('Updates', 'daily_check', fallback=True):
             return
         if not _depsupdate.due(load_window_state(state_file)):
