@@ -36,6 +36,7 @@ class AboutTests(unittest.TestCase):
             self.assertIn(must, t)
         self.assertNotIn("yt-dlp 1.0", t.split("Python packages:")[1])   # tools are not repeated as packages
         self.assertIn("not MSR's .venv", self.text(in_venv=False))
+        self.assertNotIn("between seasons", t)   # a fixed text must not claim the show's current state
 
     def test_no_chaturbate_anywhere_in_gui(self):
         with open(os.path.join(ROOT, "msr", "gui.py"), encoding="utf-8") as fh:
