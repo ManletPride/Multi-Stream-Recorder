@@ -233,6 +233,7 @@ class CtlHandoffTests(unittest.TestCase):
         self.assertEqual(seen[0][0][0], venv.venv_python(ROOT))
         self.assertEqual(seen[0][0][-2:], ["deps", "list"])
         self.assertEqual(seen[0][1]["env"]["MSR_CTL_VENV_HANDOFF"], "1")
+        self.assertNotIn("capture_output", seen[0][1])   # streams straight through
 
     def test_no_handoff_when_inside_or_no_venv(self):
         with mock.patch.object(venv, "in_venv", return_value=True):

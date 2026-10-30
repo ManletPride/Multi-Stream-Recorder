@@ -591,12 +591,10 @@ def _deps_in_venv(argv, run=subprocess.run):
         return None
     env = dict(os.environ, MSR_CTL_VENV_HANDOFF="1")
     argv = list(sys.argv[1:] if argv is None else argv)
-    r = run([venv.venv_python(root), os.path.abspath(__file__)] + argv, capture_output=True, text=True,
-            env=env, stdin=subprocess.DEVNULL, **no_window_kwargs())
-    if r.stdout:
-        print(r.stdout, end="")
-    if r.stderr:
-        print(r.stderr, end="", file=sys.stderr)
+    # Same stdout/stderr as this process: pip progress shows as it happens, no re-decoding.
+    sys.stdout.flush()
+    r = run([venv.venv_python(root), os.path.abspath(__file__)] + argv, env=env, stdin=subprocess.DEVNULL,
+            **no_window_kwargs())
     return r.returncode
 
 
