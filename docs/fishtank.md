@@ -1,3 +1,5 @@
+> **Status:** Fishtank.live support is built in, but the show is between seasons and has no live cameras right now. Its camera list changes every season, so it may need an update when a new one starts.
+
 password = yourpassword
 ```
 

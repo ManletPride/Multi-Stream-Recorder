@@ -2,7 +2,7 @@
 
 > Draft release notes. Release date: TBD.
 
-Multi-Stream Recorder watches your favourite live channels on Kick, Twitch, YouTube, Rumble, TikTok, Fishtank.live and any yt-dlp site, and records each one automatically as an MP4. 3.0 is the biggest update so far.
+Multi-Stream Recorder watches your favourite live channels on Kick, Twitch, YouTube, Rumble, TikTok and any yt-dlp site, and records each one automatically as an MP4. 3.0 is the biggest update so far.
 
 ## Highlights
 

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import os
 
-SITES = ("Records live streams from Kick, Twitch, YouTube, Rumble, TikTok, Fishtank.live "
-         "and any site yt-dlp supports (or a direct .m3u8 link).")
+SITES = ("Records live streams from Kick, Twitch, YouTube, Rumble, TikTok "
+         "and any site yt-dlp supports (or a direct .m3u8 link). Fishtank.live is built in, "
+         "but the show is between seasons right now.")
 DISCLAIMER = ("Use responsibly: you are responsible for following each site's terms of service and "
               "your local laws, including when accessing age-restricted or adult sites. The author is "
               "not responsible for how this software is used. cookies.txt is your login; never share it.")

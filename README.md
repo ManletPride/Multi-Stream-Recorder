@@ -2,7 +2,7 @@
 
 A Windows-first desktop app (Python + Tkinter) that watches a list of live channels and records each one automatically when it goes live, producing clean MP4 files. It records many channels at once, each in its own worker process, and you can cut clips while a stream is still recording.
 
-Supported: **Kick**, **Twitch**, **YouTube**, **Rumble**, **TikTok**, **Fishtank.live**, and custom URLs (any site yt-dlp supports, or a direct `.m3u8`).
+Supported: **Kick**, **Twitch**, **YouTube**, **Rumble**, **TikTok**, and custom URLs (any site yt-dlp supports, or a direct `.m3u8`).
 
 This README describes **v3.0.0**. Full history: [CHANGELOG.md](CHANGELOG.md).
 
@@ -157,6 +157,8 @@ Use **+ Add channel**. Accepted forms:
 | TikTok | `tiktok:qvc` (with or without `@`) |
 | Fishtank | `fishtank:director` or a raw stream id |
 | Custom | any URL yt-dlp supports, or an `.m3u8` |
+
+**Other sources:** Fishtank.live support is built in, but the show is between seasons and has no live cameras right now. Its camera list changes every season, so it may need an update when a new one starts. Details: [docs/fishtank.md](docs/fishtank.md).
 
 Tick a channel to enable it (Watching), untick to put it in Off. Press **Start Recording** to begin the session; channels added while recording start at once.
 

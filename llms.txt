@@ -1,6 +1,6 @@
 # Multi-Stream Recorder
 
-> Desktop app (Python 3.10+, Tkinter, Windows first) that watches a roster of live channels and records each one automatically as MP4. One worker process per channel. Sites: Kick, Twitch, YouTube, Rumble, TikTok, Fishtank.live, and any URL yt-dlp supports. License MIT.
+> Desktop app (Python 3.10+, Tkinter, Windows first) that watches a roster of live channels and records each one automatically as MP4. One worker process per channel. Sites: Kick, Twitch, YouTube, Rumble, TikTok, and any URL yt-dlp supports. Fishtank.live support is built in, but the show is between seasons and has no live cameras right now. Its camera list changes every season, so it may need an update when a new one starts. License MIT.
 
 This file is a manual for AI assistants and scripts. It contains no secrets and no personal paths. For humans see README.md; for contributors see AGENTS.md; for the security model see SECURITY.md.
 
