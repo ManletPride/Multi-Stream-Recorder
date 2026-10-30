@@ -1337,10 +1337,8 @@ class StreamRecorder:
         # We wait long enough for any in-flight remux in the killed worker process
         # to either finish or be abandoned before scanning for leftover .ts files
         # (Bug #3 fix — the old 5 s wait was insufficient for multi-GB remuxes).
-        # The worker's whole process tree (capture and any remux it ran) is killed above, so once
-        # every process is confirmed gone its handles are closed and a short wait is enough. The
-        # pass itself still skips any .ts that is locked, renamed-blocked or still growing, and
-        # such files are retried, so a slow handle release cannot be remuxed early.
+        # Whole tree killed above: once all are confirmed gone a short wait is enough. The pass
+        # still skips locked or growing .ts files and retries them.
         delay = self.STOP_CLEANUP_DELAY if all_gone else self.STOP_CLEANUP_DELAY_SLOW
 
         def _channel_cleanup():

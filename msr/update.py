@@ -35,7 +35,6 @@ ALLOWED_FILES = frozenset({
     "create_shortcut.py",
 })
 ALLOWED_DIRS = ("msr", "assets", "docs")
-ALLOWED_DIR = "msr"   # the package; kept for older callers
 PRIVATE_NAMES = frozenset({
     "config.ini", "channels.json", "cookies.txt", "window_state.json", "kick_channel_ids.json",
     "msr_control.json", "msr_status.json", "library_cache.json", "library_moves.json",

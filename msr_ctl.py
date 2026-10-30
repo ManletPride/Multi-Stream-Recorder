@@ -52,11 +52,9 @@ EXIT_CODES = {EXIT_OK: "ok", EXIT_FAILED: "refused or failed", EXIT_USAGE: "usag
               EXIT_CONFIRM: "needs confirmation (--yes / --confirm WORD)", EXIT_TIMEOUT: "timed out",
               EXIT_API: "control API version mismatch", EXIT_INTERRUPTED: "interrupted (Ctrl+C)"}
 
-# One row per CLI command (the parser's leaves): safety level and examples. help --json joins this
-# with the parser itself (arguments, options) and derives each example's protocol command through
-# to_request, so the catalog cannot drift; tests/test_agent_status.py checks both directions.
-# Safety: read = changes nothing; write = safe, reversible edit; session = starts/stops recording or
-# the app; destructive = removes or replaces something and needs --yes / --confirm.
+# Per CLI command: safety and examples (help --json merges it with the parser; a test keeps them
+# in step). read = no change; write = reversible edit; session = starts/stops recording or the app;
+# destructive = removes or replaces something, needs --yes / --confirm.
 CATALOG = {
     "status": ("read", ["--json status"]),
     "channels": ("read", ["channels"]),

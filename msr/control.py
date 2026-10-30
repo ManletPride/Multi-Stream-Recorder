@@ -35,10 +35,8 @@ CONTROL_FILE = "msr_control.json"
 STATUS_FILE = "msr_status.json"
 ENV_SWITCH = "MSR_CONTROL"
 PROTOCOL = 1
-# API version of the control channel (msr_control.json, ping, help, msr_status.json). Bump it only
-# for a breaking change: a command, argument, reply field or exit code removed, renamed or given a
-# different meaning. Adding commands, arguments or fields does not bump it. msr_ctl.py refuses to
-# talk to a copy with another api_version (exit code 7) instead of guessing.
+# Bump only for breaking changes (something removed, renamed or changed in meaning), not for
+# additions. msr_ctl.py refuses another api_version (exit 7).
 API_VERSION = 1
 MAX_REQUEST = 1 << 20
 STATUS_INTERVAL = 3.0

@@ -23,7 +23,7 @@ from msr import dialogs, themes
 from msr.nowindow import no_window_kwargs
 
 POLL_MS = 40
-PLAY_POLL_MS = 4          # while playing: show each frame within a few ms of its time (60 fps = 16.7 ms)
+PLAY_POLL_MS = 4          # while playing: a frame lands within a few ms of its time
 QUEUE_SECONDS = 0.2       # decoded frames kept ahead (6 at 30 fps, 12 at 60)
 MAX_FPS = 60              # source rate up to this
 LIMITED_FPS = 30          # "Limit preview to 30 fps"
@@ -280,7 +280,7 @@ class ClipEditor:
         t = themes.current()
         c.configure(bg=t["bg"])
         c.delete("all")
-        w, h = max(10, c.winfo_width()), 46
+        w = max(10, c.winfo_width())
         L = self.marks.length or 0.0
         x = (lambda s: 6 + (w - 12) * (s / L if L > 0 else 0))  # noqa: E731
         c.create_rectangle(6, 14, w - 6, 32, fill=t["chart_track"], outline="")
@@ -419,7 +419,6 @@ class ClipEditor:
             self._request_frame()
         self._draw()
 
-    # ------------------------------------------------------------- preview frames
     # ------------------------------------------------------------- settings
     def _load_limit(self) -> bool:
         if not self.state_file:

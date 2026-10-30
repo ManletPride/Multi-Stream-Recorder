@@ -8,15 +8,14 @@ Without a sound device (or off Windows) a silent sink keeps the clock running.
 
 from __future__ import annotations
 
+import array
 import ctypes
 import subprocess
+import sys
 import threading
 import time
 from ctypes import wintypes
 from pathlib import Path
-
-import array
-import sys
 
 from msr.nowindow import no_window_kwargs
 
@@ -28,6 +27,7 @@ QUEUE_BUFFERS = 6            # about a quarter second kept ahead
 
 
 def pcm_command(ffmpeg: str, video: Path, start: float, speed: float) -> list[str]:
+    """Raw PCM from start. speed is not applied here (the editor always plays at 1.0)."""
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-ss", f"{max(0.0, start):.3f}",
            "-i", str(video), "-vn", "-sn", "-dn"]
     return cmd + ["-f", "s16le", "-acodec", "pcm_s16le", "-ac", str(CHANNELS), "-ar", str(RATE), "pipe:1"]
