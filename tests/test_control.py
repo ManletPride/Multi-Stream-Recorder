@@ -608,6 +608,26 @@ class GuiControlTests(unittest.TestCase):
             self.assertNotIn(SECRET_PASSWORD, err)
 
 
+class MediaJobTests(unittest.TestCase):
+    def test_one_job_per_target_across_threads(self):
+        ctl = control.Controller(mock.Mock())
+        barrier, results = threading.Barrier(8), []
+
+        def claim():
+            barrier.wait()
+            try:
+                ctl._claim(("x.ts", "cut"), "busy")
+                results.append("ok")
+            except control.ControlError as e:
+                results.append(e.code)
+        threads = [threading.Thread(target=claim) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(sorted(results), ["busy"] * 7 + ["ok"])
+
+
 class AddSyntaxTests(unittest.TestCase):
     def test_every_platform_prefix_and_url(self):
         cases = {

@@ -782,6 +782,7 @@ class Controller:
         self.app = app
         self._library_lock = threading.Lock()
         self._media_jobs = set()
+        self._jobs_lock = threading.Lock()   # each request runs on its own server thread
         self._retry = None
         self.on_change = None  # called after anything that changes state (StatusWriter.poke)
 
@@ -811,6 +812,12 @@ class Controller:
             except Exception:
                 pass
         return {"ok": True, "result": result}
+
+    def _claim(self, job, busy_text):
+        with self._jobs_lock:
+            if job in self._media_jobs:
+                raise ControlError(busy_text, "busy")
+            self._media_jobs.add(job)
 
     def _recorder(self, need=True):
         rec = self.app.recorder
@@ -1095,9 +1102,7 @@ class Controller:
         base = (config.get("Clipping", "clips_dir", fallback="") or "").strip() or \
             os.path.join(config.get("Paths", "streams_dir"), "Clips")
         job = (os.path.normcase(src), "cut")
-        if job in self._media_jobs:
-            raise ControlError("A clip of this file is already being made.", "busy")
-        self._media_jobs.add(job)
+        self._claim(job, "A clip of this file is already being made.")
         try:
             res = core.make_clip(ffmpeg, src, start, end, core.clips_folder_for(src, base),
                                  exact=_truthy(args.get("exact")), length=length, ffprobe=ffprobe)
@@ -1126,9 +1131,7 @@ class Controller:
         if not channel_status_allows_clip(st.get("status", "")):
             raise ControlError(f"{display_name(key)} is not recording right now.", "not_recording")
         job = (key, kind)
-        if job in self._media_jobs:
-            raise ControlError("One is already being made for this channel.", "busy")
-        self._media_jobs.add(job)
+        self._claim(job, "One is already being made for this channel.")
         try:
             raw = find_active_recording_file(rec, key)
             if not raw:
