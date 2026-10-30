@@ -410,6 +410,8 @@ class RestartPolicyTests(SupervisorBase):
         for _ in range(25):
             for p in list(self.rec.processes["kick1"]):
                 p.die(1)
+            # spawn stamps the real monotonic clock; pin it to the fake one so every exit is "quick"
+            self.rec._supervision()["started"]["kick1"] = now
             with self.assertLogs(level="DEBUG") as cm:
                 logging.debug("marker")
                 self.tick(now)
