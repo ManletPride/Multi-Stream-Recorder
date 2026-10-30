@@ -162,8 +162,9 @@ def _looks_like_venv(d: str) -> bool:
 
 
 def _run(cmd, timeout, run=subprocess.run):
-    return run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL,
-               **no_window_kwargs())
+    # errors="replace": pip / venv output in another code page must not crash the setup
+    return run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+               stdin=subprocess.DEVNULL, **no_window_kwargs())
 
 
 def _explain(text: str, step: str) -> str:
@@ -216,6 +217,8 @@ def ensure(root: str, progress=None, run=subprocess.run, python: str | None = No
         return False, "Setting up .venv took too long and was stopped."
     except OSError as e:
         return False, _explain(str(e), "Setting up .venv")
+    except Exception as e:  # the launcher must always get an answer and start MSR
+        return False, f"Setting up .venv failed: {type(e).__name__}: {e}"
 
 
 def write_error(root: str, message: str) -> None:
@@ -301,7 +304,12 @@ def prepare(root: str, data_dir: str | None = None, show_window: bool = True) ->
         import threading
         tkroot, label = win
         q = queue.Queue()
-        threading.Thread(target=lambda: result.update(r=ensure(root, progress=q.put)), daemon=True).start()
+        def work():
+            try:
+                result["r"] = ensure(root, progress=q.put)
+            except BaseException as e:  # else the window waits forever (it cannot be closed)
+                result["r"] = (False, f"{type(e).__name__}: {e}")
+        threading.Thread(target=work, daemon=True).start()
 
         def pump():
             try:

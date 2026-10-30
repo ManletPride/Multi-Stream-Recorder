@@ -151,6 +151,19 @@ class FailureTests(Base):
             raise FileNotFoundError("python missing")
         self.assertFalse(venv.ensure(self.root, run=gone)[0])
 
+    def test_unexpected_error_is_an_answer_not_a_crash(self):
+        def bad(cmd, **kw):
+            raise UnicodeDecodeError("cp1252", b"\x81", 0, 1, "undefined")
+        ok, msg = venv.ensure(self.root, run=bad)
+        self.assertFalse(ok)
+        self.assertIn("UnicodeDecodeError", msg)
+
+    def test_output_is_decoded_leniently(self):
+        tools = FakeTools()
+        venv.ensure(self.root, run=tools)
+        for _cmd, kw in tools.calls:
+            self.assertEqual((kw["encoding"], kw["errors"]), ("utf-8", "replace"))
+
 
 class OptOutAndPrepareTests(Base):
     def test_env_and_config_opt_out(self):
