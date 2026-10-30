@@ -10,6 +10,8 @@ import time
 import unittest
 from pathlib import Path
 
+from tests import HAS_FFMPEG
+
 ROOT = Path(__file__).resolve().parent.parent
 GUI = ROOT / "msr" / "gui.py"
 WIDGET_MODULES = {"tk", "ttk", "tkinter"}
@@ -82,6 +84,8 @@ class LaunchSmokeTests(unittest.TestCase):
             probe.destroy()
         except Exception as exc:  # no display (headless CI)
             self.skipTest(f"no display: {exc}")
+        if not HAS_FFMPEG:
+            self.skipTest("ffmpeg not installed (the app will not start without it)")
         done = self.launch(dark)
         self.assertEqual(done.returncode, 0, done.stderr[-3000:])
         self.assertNotIn("Traceback", done.stderr)  # also catches errors in the first refresh callbacks
@@ -284,7 +288,8 @@ class LibraryManageSmokeTests(unittest.TestCase):
         self.assertEqual(out["dark"], dark)
         self.assertTrue(out["allowed"])                                       # the safe move needs no typing
         self.assertFalse(out["permanent_blocked"])                            # permanent needs the typed word
-        self.assertLessEqual(out["dialog_req"][0], 1000)
+        # Linux fonts (DejaVu) render ~2% wider than Segoe UI; the bound is about Windows screens
+        self.assertLessEqual(out["dialog_req"][0], 1000 if os.name == "nt" else 1100)
         self.assertEqual(sorted(out["deleted"]), ["alice_20260101_120000.mp4", "alice_20260215_120000.mp4"])
         self.assertEqual(len(out["files_left"]), 2)                           # the fake moved nothing
         self.assertIn("2 file(s)", out["status"])
@@ -399,6 +404,7 @@ main_gui(Config(os.path.abspath("config.ini")))
 """
 
 
+@unittest.skipUnless(os.name == "nt", "drag-by-background is Windows-only (wintheme._begin_caption_drag)")
 class DragAuditSmokeTests(unittest.TestCase):
     """Walks the real, hidden app (Status, Logs, Library with all its tabs) and checks the
     drag-by-background rule widget by widget. No real drag is ever started."""

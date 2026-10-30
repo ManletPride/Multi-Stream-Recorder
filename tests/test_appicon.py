@@ -6,6 +6,8 @@ import subprocess
 import sys
 import tempfile
 import tkinter as tk
+
+from tests import new_tk_root
 import unittest
 import xml.etree.ElementTree as ET
 
@@ -49,7 +51,7 @@ class AssetTests(unittest.TestCase):
 
 class WindowIconTests(unittest.TestCase):
     def test_root_and_later_toplevels_get_the_icon(self):
-        root = tk.Tk()
+        root = new_tk_root(self)
         root.withdraw()
         try:
             calls = []

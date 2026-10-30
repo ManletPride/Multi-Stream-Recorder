@@ -15,6 +15,7 @@ sys.path.insert(0, ROOT)
 import msr.control as control  # noqa: E402
 from msr import clip_audio, clip_core as core  # noqa: E402
 from msr.config import Config  # noqa: E402
+from tests import new_tk_root  # noqa: E402
 from tests.test_control import in_dir, make_data, msr_ctl  # noqa: E402
 
 HAS_FFMPEG = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
@@ -251,7 +252,7 @@ class EditorWindowTests(unittest.TestCase):
         self.src = os.path.join(self.tmp.name, "Recorded", "kick", "knut", "k.ts")
         os.makedirs(os.path.dirname(self.src))
         write_ts(self.src, [0, 90000])
-        self.root = tk.Tk()
+        self.root = new_tk_root(self)
         self.root.withdraw()
         self.length = 120.0
         self.audio = []
@@ -461,7 +462,7 @@ class PlaybackFeedTests(unittest.TestCase):
 
     def test_playback_uses_the_raw_stream_at_source_fps_capped(self):
         from msr import clip_editor
-        root = tk.Tk()
+        root = new_tk_root(self)
         root.withdraw()
         try:
             with tempfile.TemporaryDirectory() as d:
@@ -493,7 +494,7 @@ class PlaybackFeedTests(unittest.TestCase):
 
     def test_same_size_frames_reuse_one_image(self):
         from msr import clip_editor
-        root = tk.Tk()
+        root = new_tk_root(self)
         root.withdraw()
         try:
             with tempfile.TemporaryDirectory() as d:
@@ -522,7 +523,7 @@ class FarJumpPreviewTests(unittest.TestCase):
         self.src = os.path.join(self.tmp.name, "k.ts")
         write_ts(self.src, [0, 90000])
         self.state = os.path.join(self.tmp.name, "window_state.json")
-        self.root = tk.Tk()
+        self.root = new_tk_root(self)
         self.root.withdraw()
         self.calls = []
         self.ed = clip_editor.ClipEditor(self.root, self.src, clips_base=self.tmp.name, show=False,

@@ -20,6 +20,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import msr.control as control  # noqa: E402
+from tests import HAS_FFMPEG, new_tk_root  # noqa: E402
 from msr import history  # noqa: E402
 from msr.config import Config  # noqa: E402
 
@@ -561,6 +562,9 @@ class GuiControlTests(unittest.TestCase):
             import tkinter  # noqa: F401
         except ImportError:
             self.skipTest("tkinter not available")
+        new_tk_root(self).destroy()   # skips without a display
+        if not HAS_FFMPEG:
+            self.skipTest("ffmpeg not installed (the app will not start without it)")
         import subprocess
         from msr.nowindow import no_window_kwargs
         with tempfile.TemporaryDirectory() as tmp:
