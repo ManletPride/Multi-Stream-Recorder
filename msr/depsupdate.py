@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -45,6 +46,7 @@ NAMES = ("msr", "ffmpeg") + tuple(p[0].lower() for p in PACKAGES)
 STATE_KEY = "deps_check"            # window_state.json: last check time and what had updates
 DAY = 24 * 3600
 PIP_TIMEOUT = 600
+_UPDATING = threading.Lock()   # one pip run at a time (dialog, control API, msr_ctl)
 
 
 class DepsError(Exception):
@@ -94,7 +96,7 @@ def _offline(e: Exception) -> bool:
 
 
 # ------------------------------------------------------------------ ffmpeg
-def ffmpeg_row(ffmpeg_path: str = "ffmpeg", data_dir: str | None = None) -> dict:
+def ffmpeg_row(ffmpeg_path: str = "ffmpeg") -> dict:
     from msr import deps
     path = (ffmpeg_path or "ffmpeg").strip() or "ffmpeg"
     resolved = shutil.which(path) if not os.path.isabs(path) else (path if os.path.isfile(path) else None)
@@ -201,15 +203,28 @@ def update_packages(names, *, python: str | None = None, run=subprocess.run, ver
     the package unimportable. Returns one result per name."""
     if not in_venv() and not allow_system:
         return [{"name": str(n).lower(), "ok": False, "error": SYSTEM_REFUSED, "code": "not_venv"} for n in names]
-    python = python or sys.executable
+    if not _UPDATING.acquire(blocking=False):
+        return [{"name": str(n).lower(), "ok": False, "code": "busy",
+                 "error": "Another package update is still running; try again when it has finished."} for n in names]
+    try:
+        return _update_packages(names, python or sys.executable, run, version_of, log)
+    finally:
+        _UPDATING.release()
+
+
+def _pip(run, cmd):
+    return run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=PIP_TIMEOUT,
+               stdin=subprocess.DEVNULL, **no_window_kwargs())
+
+
+def _update_packages(names, python, run, version_of, log) -> list[dict]:
     known = {p[0].lower(): p[0] for p in PACKAGES}
     results = []
     for name in names:
         key = str(name).lower()
         if key in ("msr", "ffmpeg"):
-            results.append({"name": key, "ok": False, "error": "msr: use the app's own updater (window banner); "
-                            "ffmpeg: not installed by MSR." if key == "msr" else
-                            "ffmpeg is not installed by MSR; update it where it came from."})
+            results.append({"name": key, "ok": False, "error": "Use the app's own updater (the banner in the window)."
+                            if key == "msr" else "ffmpeg is not installed by MSR; update it where it came from."})
             continue
         if key not in known:
             results.append({"name": key, "ok": False, "error": f"Unknown package: {name}"})
@@ -220,13 +235,12 @@ def update_packages(names, *, python: str | None = None, run=subprocess.run, ver
         if log:
             log(f"Updating {dist} (installed {old or 'none'})\u2026")
         try:
-            r = run(pip_command(python, dist), capture_output=True, text=True, timeout=PIP_TIMEOUT,
-                    stdin=subprocess.DEVNULL, **no_window_kwargs())
+            r = _pip(run, pip_command(python, dist))
             failed = r.returncode != 0
             err = classify_pip_error((r.stderr or "") + "\n" + (r.stdout or "")) if failed else ""
         except subprocess.TimeoutExpired:
             failed, err = True, f"pip took longer than {PIP_TIMEOUT // 60} minutes and was stopped."
-        except OSError as e:
+        except (OSError, ValueError) as e:
             failed, err = True, f"Could not run pip: {e}"
         new = version_of(dist)
         if not failed and new is None:
@@ -235,8 +249,7 @@ def update_packages(names, *, python: str | None = None, run=subprocess.run, ver
             res["error"] = err
             if old and version_of(dist) != old:
                 try:   # put the previous version back
-                    rb = run(pip_command(python, f"{dist}=={old}"), capture_output=True, text=True,
-                             timeout=PIP_TIMEOUT, stdin=subprocess.DEVNULL, **no_window_kwargs())
+                    rb = _pip(run, pip_command(python, f"{dist}=={old}"))
                     res["rolled_back"] = rb.returncode == 0 and version_of(dist) == old
                 except (OSError, subprocess.SubprocessError):
                     pass

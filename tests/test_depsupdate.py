@@ -219,7 +219,21 @@ class UpdateTests(unittest.TestCase):
         pip = FakePip(INSTALLED)
         res = depsupdate.update_packages(["msr", "ffmpeg", "nope"], run=pip.run, version_of=pip.version_of)
         self.assertTrue(all(not r["ok"] for r in res))
+        self.assertIn("own updater", res[0]["error"])
         self.assertEqual(pip.calls, [])
+
+    def test_one_update_at_a_time(self):
+        pip = FakePip(INSTALLED)
+        with depsupdate._UPDATING:   # e.g. the dialog is mid-update while msr_ctl asks too
+            r = depsupdate.update_packages(["yt-dlp"], run=pip.run, version_of=pip.version_of)[0]
+        self.assertEqual(r["code"], "busy")
+        self.assertEqual(pip.calls, [])
+        self.assertTrue(depsupdate.update_packages(["yt-dlp"], run=pip.run, version_of=pip.version_of)[0]["ok"])
+
+    def test_pip_output_decoded_leniently(self):
+        pip = FakePip(INSTALLED)
+        depsupdate.update_packages(["yt-dlp"], run=pip.run, version_of=pip.version_of)
+        self.assertEqual((pip.calls[0][1]["encoding"], pip.calls[0][1]["errors"]), ("utf-8", "replace"))
 
 
 class DailyTests(unittest.TestCase):
