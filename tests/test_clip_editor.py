@@ -306,6 +306,29 @@ class EditorWindowTests(unittest.TestCase):
         self.assertEqual(args[4], os.path.join(self.tmp.name, "Clips", "kick", "knut"))
         self.assertIn("keyframe 0:08.0", self.ed.status.cget("text"))
 
+    def test_save_button_and_every_label_fit_at_default_and_minimum_size(self):
+        self.assertEqual(self.ed.save_btn.cget("text"), "Save clip")
+        for geometry in ("797x688", "%dx%d" % self.mod.MIN_SIZE):
+            self.ed.win.geometry(geometry + "+-3000+0")   # offscreen, never seen
+            self.ed.win.deiconify()
+            self.ed.win.update()
+            self.assertTrue(self.ed.save_btn.winfo_ismapped(), geometry)
+            cut = []
+
+            def walk(w):
+                for c in w.winfo_children():
+                    if c.winfo_class() in ("TButton", "TCheckbutton") and c.winfo_width() < c.winfo_reqwidth():
+                        cut.append((c.cget("text"), c.winfo_width(), c.winfo_reqwidth()))
+                    walk(c)
+            walk(self.ed.win)
+            self.assertEqual(cut, [], geometry)
+        self.ed.win.withdraw()
+
+    def test_ctrl_s_and_enter_save(self):
+        self.assertTrue(self.ed.win.bind("<Control-s>"))
+        self.assertTrue(self.ed.win.bind("<Return>"))
+        self.assertIn("Ctrl+S", self.mod.HINT)
+
     def test_a_failing_update_does_not_stop_the_loop(self):
         self.ed.q.put(("saved", None, None))   # _on_saved(None, None) raises
         self.ed.q.put(("length", self.src, True, 200.0))

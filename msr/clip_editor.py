@@ -34,6 +34,9 @@ FPS = 30
 PREVIEW_W = 640
 NUDGE = 0.5
 REPLAY = 2.0
+MIN_SIZE = (760, 560)
+HINT = ("I / O mark, Space plays, \u2190/\u2192 step (Shift: 5 s), L jumps to live, "
+        "Ctrl+S or Enter saves the clip.")
 
 
 def _audio_player(src, ffmpeg):
@@ -163,14 +166,16 @@ class ClipEditor:
         self.win, body = dialogs.new_dialog(parent, f"Clip Editor \u2014 {title_name or os.path.basename(src)}",
                                             padding=10)
         self.win.resizable(True, True)
-        self.win.minsize(700, 520)
+        self.win.minsize(*MIN_SIZE)
         self.win.protocol("WM_DELETE_WINDOW", self.close)
         self._build(body)
         self._bind_keys()
+        self.win.update_idletasks()   # larger fonts / DPI: never smaller than the controls need
+        self.win.minsize(max(MIN_SIZE[0], self.win.winfo_reqwidth()), max(MIN_SIZE[1], self.win.winfo_reqheight()))
         if state_file:
             try:
                 from msr import winstate
-                winstate.attach(self.win, state_file, "clip_editor", (700, 520))
+                winstate.attach(self.win, state_file, "clip_editor", MIN_SIZE)
             except Exception:
                 pass
         if show:
@@ -236,19 +241,24 @@ class ClipEditor:
         b2("-", lambda: self.nudge("out", -NUDGE), 2).pack(side="left", padx=(2, 0))
         b2("+", lambda: self.nudge("out", NUDGE), 2).pack(side="left")
         b2("Replay Out", lambda: self.replay("out")).pack(side="left", padx=(4, 12))
-        self.exact = tk.BooleanVar(value=False)
-        ttk.Checkbutton(row2, text="Exact (re-encode)", variable=self.exact).pack(side="left")
         self.limit_fps = tk.BooleanVar(value=self._load_limit())
         ttk.Checkbutton(row2, text="Limit preview to 30 fps", variable=self.limit_fps,
-                        command=self._limit_changed).pack(side="left", padx=(8, 0))
-        b2("Close", self.close).pack(side="right")
-        b2("Clips folder", self.open_clips).pack(side="right", padx=(0, 6))
-        self.save_btn = b2("Save Clip", self.save)
-        self.save_btn.pack(side="right", padx=(0, 6))
+                        command=self._limit_changed).pack(side="left")
 
-        self.status = ttk.Label(body, text="I / O mark, Space plays, \u2190/\u2192 step (Shift: 5 s), L jumps to live.",
-                                wraplength=660)
-        self.status.grid(row=6, column=0, sticky="ew", pady=(8, 0))
+        # Own row, Save first: pack gives space in packing order, so it can never be squeezed out
+        # (it was last on the crowded row above and got zero width at the default size).
+        actions = ttk.Frame(body)
+        actions.grid(row=6, column=0, sticky="ew", pady=(10, 0))
+        self.save_btn = ttk.Button(actions, text="Save clip", style="Accent.TButton", command=self.save)
+        self.save_btn.pack(side="left")
+        self.exact = tk.BooleanVar(value=False)
+        ttk.Checkbutton(actions, text="Exact (re-encode)", variable=self.exact).pack(side="left", padx=(10, 0))
+        ttk.Button(actions, text="Close", command=self.close).pack(side="right")
+        self.clips_btn = ttk.Button(actions, text="Clips folder", command=self.open_clips)
+        self.clips_btn.pack(side="right", padx=(0, 6))
+
+        self.status = ttk.Label(body, text=HINT, wraplength=660)
+        self.status.grid(row=7, column=0, sticky="ew", pady=(8, 0))
         body.bind("<Configure>", lambda e: self.status.configure(wraplength=max(200, e.width - 20)), add="+")
 
     def _bind_keys(self) -> None:
@@ -264,6 +274,9 @@ class ClipEditor:
         w.bind("<Home>", lambda e: self.seek(0))
         w.bind("<End>", lambda e: self.jump_live())
         w.bind("<Escape>", lambda e: self.close())
+        w.bind("<Control-s>", lambda e: self.save())
+        w.bind("<Control-S>", lambda e: self.save())
+        w.bind("<Return>", lambda e: self.save())
         # Space is play/pause only: buttons and checks must not take it
         tag = "ClipEditorKeys"
         self.win.bind_class(tag, "<space>", lambda e: (self.toggle_play(), "break")[1])
