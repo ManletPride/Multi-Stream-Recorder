@@ -1,8 +1,8 @@
 # Changelog
 
-## v3.0.0 (unreleased, date TBD)
+## v3.0.0 (2026-10-30)
 
-The biggest release so far (55 commits since v2.1.0): a **Clip Editor** for cutting clips while a stream records, a **Library** tab that shows and safely cleans up what your recordings take, **agent and headless control** (`msr_ctl.py`) for scripts, bots and AI agents, MSR's **own Python environment** set up on first launch, an **Updates** dialog for yt-dlp/streamlink and the other packages, **sixteen themes**, an **app icon**, and a long list of safety fixes (drive loss, verified remuxes, redacted logs, hidden consoles, all-or-nothing updates, recording starts at once after a crash). No new Python packages; your `config.ini`, `channels.json`, cookies and recordings are used as before. Release notes: [docs/release_notes/RELEASE_NOTES_v3.0.0.md](docs/release_notes/RELEASE_NOTES_v3.0.0.md).
+The biggest release so far (over 60 commits since v2.1.0): a **Clip Editor** for cutting clips while a stream records, a **Library** tab that shows and safely cleans up what your recordings take, **agent and headless control** (`msr_ctl.py`) for scripts, bots and AI agents, MSR's **own Python environment** set up on first launch, an **Updates** dialog for yt-dlp/streamlink and the other packages, **sixteen themes**, an **app icon**, and a long list of safety fixes (drive loss, verified remuxes, redacted logs, hidden consoles, all-or-nothing updates, recording starts at once after a crash). No new Python packages; your `config.ini`, `channels.json`, cookies and recordings are used as before. Release notes: [docs/release_notes/RELEASE_NOTES_v3.0.0.md](docs/release_notes/RELEASE_NOTES_v3.0.0.md).
 
 **Upgrading from 2.1.0:** download the new release (ZIP or `git pull`) rather than the in-app update. The 2.1.0 updater only replaces `Multi-Stream-Recorder.py`, `requirements.txt`, `channels_fishtank.json` and `msr/`, so it would not bring the new `run_msr.pyw` (the `.venv` setup), `msr_ctl.py`, `create_shortcut.py`, `assets/` or `docs/`. The app still runs after an in-app update, without those. From 3.0 on, in-app updates bring all of them (launchers, `msr_ctl.py`, `create_shortcut.py`, `assets/`, `docs/`), never user files or `.venv`.
 
@@ -81,6 +81,7 @@ The biggest release so far (55 commits since v2.1.0): a **Clip Editor** for cutt
 - The preview strip is not refreshed while the Status tab is hidden or the window is minimised or in the tray, and refreshes at once when it is shown again.
 
 ### Fixed
+- `create_shortcut.py --data-dir`: the shortcut now starts through `run_msr.pyw` (which accepts `--data-dir`) and so uses `.venv`; before, it started the app directly on the base Python.
 - Signed stream URLs are redacted in the console, log file, status file and events: YouTube googlevideo URLs (which carry your IP address and signatures) are logged as `manifest.googlevideo.com … id=VIDEO itag=311 [redacted]`, and `sig`, `token`, `ip`, `expire` and similar query values (Twitch/Kick m3u8 and others) as `***`, including the "Starting recording" command line. The command that actually runs is unchanged.
 - Agent control: `record-stop` or `channel remove` on a channel that is not recording no longer emits a `stopped` event (the reply still says `was_idle`).
 - Agent control: new `offline` event when a stream ends on its own (with `was_recording`, `duration_seconds` and `in_grace_period`) and `ended` when the reconnect grace period runs out; `wait --event offline` works. Additive, `api_version` stays 1.

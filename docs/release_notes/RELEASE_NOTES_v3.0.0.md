@@ -1,6 +1,6 @@
 # Multi-Stream Recorder 3.0.0
 
-> Draft release notes. Release date: TBD.
+> Released 2026-10-30.
 
 Multi-Stream Recorder watches your favourite live channels on Kick, Twitch, YouTube, Rumble, TikTok and any yt-dlp site, and records each one automatically as an MP4. 3.0 is the biggest update so far.
 
@@ -42,7 +42,10 @@ Everything the window does can be done from the command line with `msr_ctl.py`, 
 - Removed: the unused `[Advanced] concurrent_fragments` setting (old configs that have it still load).
 
 ## Upgrading from 2.1.0
-- **Download this release** (ZIP from the GitHub release, or `git pull`) instead of using the in-app update. The 2.1.0 in-app updater only replaces the main program files, so it would skip the new launcher (`.venv` setup), `msr_ctl.py`, the icon files and the docs.
+- **Download this release instead of using the in-app update.** The 2.1.0 in-app updater only replaces the main program files, so it would skip the new launcher (`.venv` setup), `msr_ctl.py`, the icon files and the docs. Updates from 3.0.0 on deliver all of these.
+  - **Git:** close MSR, then `git pull` in your MSR folder.
+  - **ZIP:** close MSR, download the 3.0.0 ZIP from the GitHub release and extract it over your MSR folder (replace files). Your settings files are not in the ZIP, so nothing of yours is overwritten.
+- Start MSR with `run_msr.pyw` (double-click) or `run_msr.bat`. Optional: `python create_shortcut.py` makes a desktop shortcut with the new icon.
 - Close MSR first. Your `config.ini`, `channels.json`, cookies and recordings are kept and used as before; the old Dark Mode setting is migrated to a theme.
 - The first launch takes about a minute (setting up `.venv`); later launches are fast.
 - Requirements are unchanged: Python 3.10+ (3.12 tested), ffmpeg on PATH, Deno recommended for YouTube.
