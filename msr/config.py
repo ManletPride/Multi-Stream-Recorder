@@ -155,8 +155,8 @@ class Config:
             # Instant go-live via Twitch EventSub (opt-in). Authorize once with
             # python -m msr.twitch_eventsub authorize ; polling always continues.
             'push_enabled': 'false',
-            # Client ID of a registered Twitch app (public client, Device Code Flow)
-            'client_id': '',
+            # MSR's registered public Twitch app (Device Code Flow, no secret)
+            'client_id': 'cpdfs62hlro5hyzyzlfogd8gshbnu4',
         },
         'Advanced': {
             # Passes --verbose to yt-dlp/streamlink AND disables the stderr

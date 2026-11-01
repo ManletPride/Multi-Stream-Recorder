@@ -59,7 +59,7 @@ class TwitchPushListener:
         return bool(self.config.getboolean("Twitch", "push_enabled", False))
 
     def client_id(self):
-        return (self.config.get("Twitch", "client_id", "") or "").strip()
+        return (self.config.get("Twitch", "client_id", "") or "").strip() or te.DEFAULT_CLIENT_ID
 
     def start(self):
         if not self.enabled():

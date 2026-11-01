@@ -31,6 +31,7 @@ HELIX = "https://api.twitch.tv/helix"
 OAUTH = "https://id.twitch.tv/oauth2"
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 TOKEN_FILE = "twitch_token.json"
+DEFAULT_CLIENT_ID = "cpdfs62hlro5hyzyzlfogd8gshbnu4"  # public, not a secret
 MAX_TOTAL_COST = 10
 KEEPALIVE_SECONDS = 30
 REFRESH_MARGIN = 600
@@ -298,6 +299,7 @@ if __name__ == "__main__":
             p = new_parser()
             p.read(os.path.join(a.data_dir, "config.ini"), encoding="utf-8")
             cid = (p.get("Twitch", "client_id", fallback="") or "").strip()
+        cid = cid or DEFAULT_CLIENT_ID
         if not cid:
             raise SystemExit("No client id: set [Twitch] client_id or pass --client-id")
         authorize_console(cid, a.data_dir)
