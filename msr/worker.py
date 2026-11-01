@@ -2607,6 +2607,12 @@ def record_worker(args):
                             detail = f"push: listening · {detail}"
                     except Exception:
                         pass  # Manager unavailable during shutdown
+                if platform == "twitch":
+                    try:
+                        if runtime.get(f"twitch_push:{channel_key}", False):
+                            detail = f"push: listening \u00b7 {detail}"
+                    except Exception:
+                        pass
                 new_status = {"status": "Offline", "detail": detail, "size": "", "time": "", "progress": 0}
                 if new_status != last_status:
                     status_queue.put((channel_key, new_status))

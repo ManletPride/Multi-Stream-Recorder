@@ -79,6 +79,7 @@ def _coerce_specs():
         ("Clipping", "screenshot_quality", "int", 2, 0, 100),
         ("Recording", "split_on_resolution_change", "bool", True, None, None),
         ("Cleanup", "purge_on_startup", "bool", True, None, None),
+        ("Twitch", "push_enabled", "bool", False, None, None),
         ("Advanced", "verbose", "bool", False, None, None),
         ("Advanced", "streamlink_debug", "bool", False, None, None),
         ("GUI", "dark_mode", "bool", True, None, None),
@@ -149,6 +150,13 @@ class Config:
             # rotate_log_if_needed().
             'max_log_size_mb': '20',
             'log_backup_count': '3',
+        },
+        'Twitch': {
+            # Instant go-live via Twitch EventSub (opt-in). Authorize once with
+            # python -m msr.twitch_eventsub authorize ; polling always continues.
+            'push_enabled': 'false',
+            # Client ID of a registered Twitch app (public client, Device Code Flow)
+            'client_id': '',
         },
         'Advanced': {
             # Passes --verbose to yt-dlp/streamlink AND disables the stderr

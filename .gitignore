@@ -83,3 +83,7 @@ msr_control.json
 msr_status.json
 msr_control.json.*.tmp
 msr_status.json.*.tmp
+
+# Twitch push authorization (access + refresh token; msr/twitch_eventsub.py)
+twitch_token.json
+twitch_token.json.tmp

@@ -1151,6 +1151,11 @@ class StreamRecorder:
         # instant a Kick channel goes live (supplements polling, never
         # replaces it).  No-op if websocket-client isn't installed.
         self.kick_push = KickPushListener(self, config, presence=presence)
+        # Twitch push (EventSub WebSocket): opt-in, needs a one-time authorization.
+        from msr.twitch_push import TwitchPushListener
+        self.twitch_push = TwitchPushListener(
+            self, config, presence=presence,
+            data_dir=os.path.dirname(os.path.abspath(getattr(config, 'config_file', 'config.ini'))))
 
     def _sync_kick_push(self):
         """Align the push listener's subscriptions with the currently active
@@ -1166,6 +1171,13 @@ class StreamRecorder:
             watch += [ch for ch in tracked
                       if ":" not in ch and ch in self.stopped_channels]
             self.kick_push.set_channels(kick_slugs, watch=watch)
+            tw = [ch for ch in tracked
+                  if ch.startswith('twitch:') and ch not in self.stopped_channels]
+            tw_watch = [ch for ch in self.watch_channels if ch.startswith('twitch:')]
+            tw_watch += [ch for ch in tracked
+                         if ch.startswith('twitch:') and ch in self.stopped_channels]
+            if getattr(self, 'twitch_push', None) is not None:
+                self.twitch_push.set_channels(tw, watch=tw_watch)
         except Exception as e:
             logging.warning(f"Kick push: subscription sync failed: {e}")
 
@@ -1492,6 +1504,10 @@ class StreamRecorder:
         # are about to be killed
         try:
             self.kick_push.stop()
+        except Exception:
+            pass
+        try:
+            getattr(self, 'twitch_push', None) and self.twitch_push.stop()
         except Exception:
             pass
 
@@ -1831,6 +1847,9 @@ class StreamRecorder:
         # or without websocket-client installed)
         self._sync_kick_push()
         self.kick_push.start()
+        tw = getattr(self, 'twitch_push', None)
+        if tw is not None:
+            tw.start()
 
         # Recorders are up: now remux the leftovers (low priority, one file at
         # a time, in the background).
