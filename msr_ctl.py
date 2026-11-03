@@ -72,7 +72,9 @@ CATALOG = {
     "disable": ("write", ["disable knut", "disable --all"]),
     "record-start": ("session", ["record-start knut"]),
     "record-stop": ("session", ["record-stop knut"]),
-    "recordings": ("read", ["recordings --since 24h", "recordings pending", "recordings retry"]),
+    "recordings": ("read", ["recordings --since 24h", "recordings pending", "recordings retry",
+                            "recordings browse --channel knut --search tokyo --sort length",
+                            "recordings clips --path D:/streams/Clips/kick/knut/clip.mp4"]),
     "wait": ("read", ["wait --event finished --channel knut --timeout 600",
                       "wait --event offline --channel knut --timeout 3600"]),
     "events": ("read", ["events --after 0"]),
@@ -121,6 +123,7 @@ GUI_FEATURES = {
     "Library tab, PendingDeletion / Clean up": ["library summary", "library files", "library plan", "library run",
                                                 "library pending", "library batches", "library restore",
                                                 "library suggest", "library log"],
+    "Library > Recordings (list, search, sort, clips under each recording)": ["recordings"],
     "Logs tab": ["logs"],
     "Updates window": ["update check", "update install", "deps"],
     "Restore previous channel list / settings": ["history list", "history restore"],
@@ -201,11 +204,16 @@ def build_parser():
         p.add_argument("channels", nargs="*", help="#N, key or shown name")
         p.add_argument("--all", action="store_true", help="every channel in the roster")
 
-    p = sub.add_parser("recordings", help="finished recordings; 'pending' = waiting files; 'retry' = run cleanup")
-    p.add_argument("action", nargs="?", default="list", choices=["list", "pending", "retry"])
+    p = sub.add_parser("recordings", help="finished recordings; 'pending' = waiting files; 'retry' = run cleanup; "
+                                          "'browse' = Library > Recordings (title, length, clips); 'clips' = clip <-> source")
+    p.add_argument("action", nargs="?", default="list", choices=["list", "pending", "retry", "browse", "clips"])
     p.add_argument("--since", help="24h, 7d, 2026-10-29 or '2026-10-29 14:00'")
     p.add_argument("--channel")
-    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--limit", type=int)
+    p.add_argument("--search", help="browse: words in the title or file name")
+    p.add_argument("--sort", choices=["date", "length", "title", "clips", "file", "size"], help="browse")
+    p.add_argument("--asc", action="store_true", help="browse: oldest / smallest first")
+    p.add_argument("--path", help="clips: a recording or a clip file")
     p = sub.add_parser("wait", help="block until a channel goes live, a recording finishes or an error")
     p.add_argument("--event", action="append", choices=list(EVENT_KINDS),
                    help="repeatable; default: any. A 'finished' wait for a channel that was stopped "
@@ -330,7 +338,15 @@ def to_request(a):
     if c == "recordings":
         if a.action == "list":
             return "recordings", {k: v for k, v in {"since": a.since, "channel": a.channel,
-                                                    "limit": a.limit}.items() if v is not None}
+                                                    "limit": a.limit or 50}.items() if v is not None}
+        if a.action == "browse":
+            return "recordings_browse", {k: v for k, v in {
+                "channel": a.channel, "text": a.search, "sort": a.sort, "order": "asc" if a.asc else None,
+                "limit": a.limit}.items() if v is not None}
+        if a.action == "clips":
+            if not a.path:
+                raise SystemExit("recordings clips: give --path")
+            return "recordings_clips", {"path": a.path}
         return "recordings_" + a.action, {}
     if c == "wait":
         args = {"events": a.event or list(EVENT_KINDS), "timeout": a.wait_timeout}
@@ -588,6 +604,12 @@ def human(cmd, reply):
         for name, t in (res.get("tools") or {}).items():
             lines.append(f"{name}: {(t.get('version') or 'yes') if t.get('available') else 'missing'}")
         return "\n".join(lines)
+    if cmd == "recordings_browse" and "recordings" in res:
+        lines = []
+        for r in res["recordings"]:
+            lines.append(f"{(r['date'] or '?')[:16]:<16} {r['length'] or '-':>8} {r['size'] / 1e6:>9.1f} MB  "
+                         f"{r['title'] or '-'}  [{r['file']}]" + (f"  {r['clip_count']} clip(s)" if r["clip_count"] else ""))
+        return "\n".join(lines) or "No recordings match."
     if cmd == "recordings":
         return "\n".join(f"{r['finished_at']}  {r['channel']:<28} {r['size'] / 1e6:>9.1f} MB  {r['path']}"
                          for r in res["recordings"]) or "No finished recordings in that range."

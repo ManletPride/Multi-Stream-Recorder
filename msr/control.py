@@ -1624,6 +1624,91 @@ class Controller:
         return {"recordings": out, "count": len(recs), "truncated": max(0, len(recs) - limit),
                 "this_run": tracker.recent_finished(50) if tracker is not None else []}
 
+    # -------------------------------------------------- Library > Recordings (archive + clip links)
+    SORT_COLUMNS = ("date", "length", "title", "clips", "file", "size")
+
+    def _archive_channels(self):
+        from msr import recordings_index as ri
+        stats = self._scan()
+        return [c for c in stats.ranked_channels() if any(k in c.paths for k in ri.LIST_CATEGORIES)]
+
+    def _archive_channel(self, ref):
+        """The Library channel for a roster ref (#N, key, name) or a folder name (platform:name)."""
+        from msr.util import channel_key_to_dirs
+        chans = self._archive_channels()
+        ref = str(ref or "").strip()
+        wanted = []
+        try:
+            platform, user = channel_key_to_dirs(self._channel_key(ref))
+            wanted.append((platform.lower(), user.split("/")[-1].lower()))
+        except ControlError:
+            pass
+        if ":" in ref:
+            p, n = ref.split(":", 1)
+            wanted.append((p.strip().lower(), n.strip().lstrip("@").lower()))
+        for p, n in wanted:
+            for c in chans:
+                if (c.platform.lower(), c.name.lower()) == (p, n):
+                    return c
+        named = [c for c in chans if c.name.lower() == ref.lower().lstrip("@")]
+        if len(named) == 1:
+            return named[0]
+        if len(named) > 1:
+            raise ControlError(f"'{ref}' is in {len(named)} platforms; write platform:name.", "ambiguous")
+        raise ControlError(f"No recordings folder for '{ref}' (see recordings_browse with no channel).", "not_found")
+
+    def cmd_recordings_browse(self, args):
+        """Library > Recordings: one channel's recordings (date, length, title, size, path) with
+        the clips cut from each. text= searches title + file name; sort= date|length|title|clips|
+        file|size; order=asc|desc. No channel: the channels that have recordings."""
+        from msr import recordings_index as ri
+        if not args.get("channel"):
+            return {"channels": [{"channel": f"{c.platform}:{c.name}", "files": c.rec_files + c.raw_files,
+                                  "bytes": c.recordings_bytes} for c in self._archive_channels()]}
+        sort = str(args.get("sort") or "date").lower()
+        if sort not in self.SORT_COLUMNS:
+            raise ControlError(f"sort must be one of {', '.join(self.SORT_COLUMNS)}.", "bad_request")
+        order = str(args.get("order") or "desc").lower()
+        if order not in ("asc", "desc"):
+            raise ControlError("order must be asc or desc.", "bad_request")
+        ch = self._archive_channel(args["channel"])
+        recs, loose = ri.channel_listing(ch.paths)
+        rows = ri.filter_sort(recs, str(args.get("text") or ""), sort, order == "desc")
+        limit = max(1, min(int(args.get("limit", 200)), 20000))
+        with_clips = not (args.get("clips") is not None and not _truthy(args.get("clips")))
+        return {"channel": f"{ch.platform}:{ch.name}", "count": len(rows), "truncated": max(0, len(rows) - limit),
+                "recordings": [ri.recording_dict(r, clips=with_clips) for r in rows[:limit]],
+                "unlinked_clips": len(loose)}
+
+    def cmd_recordings_clips(self, args):
+        """Clip <-> source: path= a recording gives its clips; path= a clip gives its source
+        recording (from the clip's .meta.json, else the Clip Editor's name pattern)."""
+        from msr import clip_core as core
+        from msr import recordings_index as ri
+        path = os.path.abspath(os.path.expanduser(str(args.get("path") or "")))
+        if not args.get("path") or not os.path.isfile(path):
+            raise ControlError(f"No such file: {args.get('path')}", "not_found")
+        want = os.path.normcase(path)
+        for ch in self._archive_channels():
+            folders = [v for k, v in ch.paths.items() if k in ri.LIST_CATEGORIES + ("clips",)]
+            if not any(want.startswith(os.path.normcase(os.path.abspath(f)) + os.sep) for f in folders):
+                continue
+            recs, _loose = ri.channel_listing(ch.paths)
+            for r in recs:
+                if os.path.normcase(r.path) == want:
+                    if r.orphan:
+                        break
+                    return {"kind": "recording", "recording": ri.recording_dict(r)}
+                for c in r.clips + r.related:
+                    if os.path.normcase(c.path) == want:
+                        return {"kind": "clip", "clip": ri.clip_dict(c), "source": ri.recording_dict(r, clips=False)}
+            break
+        link = core.read_clip_link(path)
+        if link is not None:
+            return {"kind": "clip", "source": None, "source_name": link["source_name"] or link["stem"],
+                    "note": "The source recording is not in the library any more."}
+        raise ControlError("That file is not a recording or clip in the library.", "not_found")
+
     def cmd_recordings_pending(self, args):
         """Raw .ts waiting for the cleanup remux, and what sits in PendingDeletion."""
         from msr.agent_status import busy_channels, cleanup_queue, iso
