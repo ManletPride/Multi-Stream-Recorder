@@ -111,6 +111,17 @@ class Tracker:
                     return None
                 self._cond.wait(min(left, 1.0))
 
+    def events_after(self, after, timeout):
+        """Events with seq > after, waiting up to ``timeout`` s for the first one ([] on timeout)."""
+        end = time.monotonic() + max(0.0, float(timeout))
+        with self._cond:
+            while True:
+                out = [e for e in self._events if e["seq"] > after]
+                left = end - time.monotonic()
+                if out or left <= 0:
+                    return out
+                self._cond.wait(min(left, 1.0))
+
     # -------------------------------------------------- feeds
     def seen(self, key, st):
         with self._cond:

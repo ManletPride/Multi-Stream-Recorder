@@ -78,6 +78,7 @@ CATALOG = {
     "wait": ("read", ["wait --event finished --channel knut --timeout 600",
                       "wait --event offline --channel knut --timeout 3600"]),
     "events": ("read", ["events --after 0"]),
+    "subscribe": ("read", ["subscribe", "subscribe --event finished --event health_problem --heartbeat 30"]),
     "move": ("write", ["move knut --to top"]),
     "sort": ("write", ["sort platform"]),
     "edit": ("write", ["edit twitch:old --name new"]),
@@ -131,7 +132,7 @@ GUI_FEATURES = {
 }
 SAFETY_NOTES = {"deps": "deps list / check only read; deps update pip-installs (old version restored on failure)",
                 "recordings": "recordings retry runs the cleanup remux (write; originals kept until verified)"}
-LIVE_ONLY = {"sound_test", "start", "stop", "quit", "record_start", "record_stop", "check", "clip", "screenshot",
+LIVE_ONLY = {"subscribe", "sound_test", "start", "stop", "quit", "record_start", "record_stop", "check", "clip", "screenshot",
              "update_install", "wait", "events"}
 CODE_EXIT = {"auth": EXIT_AUTH, "confirm_required": EXIT_CONFIRM, "not_running": EXIT_NOT_RUNNING,
              "timeout": EXIT_TIMEOUT}
@@ -223,6 +224,12 @@ def build_parser():
                    help="seconds (max 3600); exit code 6 when nothing happened")
     p.add_argument("--after", type=int, help="event seq to continue from (no event is missed between waits)")
     sub.add_parser("events", help="recent events (" + "/".join(EVENT_KINDS) + ")").add_argument("--after", type=int, default=0)
+    p = sub.add_parser("subscribe", help="stay connected and print events as they happen (JSON lines with --json)")
+    p.add_argument("--event", action="append", choices=list(EVENT_KINDS), help="repeatable; default: all")
+    p.add_argument("--channel")
+    p.add_argument("--after", type=int, help="also send events after this seq first")
+    p.add_argument("--heartbeat", type=float, default=15.0, help="seconds between heartbeats (1-300)")
+    p.add_argument("--for", dest="max_seconds", type=float, help="stop after this many seconds")
     p = sub.add_parser("move", help="reorder")
     p.add_argument("channels", nargs="+")
     p.add_argument("--to", required=True, choices=["top", "bottom", "up", "down"])
@@ -357,6 +364,10 @@ def to_request(a):
         return "wait", args
     if c == "events":
         return "events", {"after": a.after}
+    if c == "subscribe":
+        return "subscribe", {k: v for k, v in {"events": a.event, "channel": a.channel, "after": a.after,
+                                               "heartbeat": a.heartbeat, "max_seconds": a.max_seconds}.items()
+                             if v is not None}
     if c in ("record-start", "record-stop"):
         return c.replace("-", "_"), {"channels": a.channels}
     if c == "move":
@@ -645,6 +656,8 @@ def main(argv=None):
         handed = _deps_in_venv(argv)
         if handed is not None:
             return handed
+    if cmd == "subscribe":
+        return run_subscribe(data_dir, args, a.json)
     exit_code = None
     try:
         timeout = a.timeout
@@ -670,6 +683,35 @@ def main(argv=None):
         pass
     print(out, file=stream)
     return exit_code
+
+
+def run_subscribe(data_dir, args, as_json, out=None):
+    """Print the stream until the server says bye, the link drops or Ctrl+C (exit 130)."""
+    out = out or sys.stdout
+    try:
+        for obj in control.subscribe(data_dir, args):
+            if obj.get("ok") is False:
+                print(human("subscribe", obj), file=sys.stderr)
+                return CODE_EXIT.get(obj.get("code"), EXIT_FAILED)
+            if as_json:
+                print(json.dumps(obj), file=out, flush=True)
+            elif obj.get("type") == "event":
+                ev = obj["event"]
+                extra = {k: v for k, v in ev.items() if k not in ("seq", "event", "channel", "time", "at")}
+                print(f"#{ev['seq']} {ev['at']} {ev['event']} {ev['channel'] or '-'} "
+                      + " ".join(f"{k}={v}" for k, v in extra.items()), file=out, flush=True)
+            elif obj.get("type") == "bye":
+                print(f"(stream ended: {obj.get('reason')})", file=sys.stderr)
+    except control.NotRunning:
+        print("error (not_running): Multi-Stream Recorder is not running.", file=sys.stderr)
+        return EXIT_NOT_RUNNING
+    except control.ApiMismatch as e:
+        print(f"error (api_mismatch): {e}", file=sys.stderr)
+        return EXIT_API
+    except (socket.timeout, TimeoutError):
+        print("error (timeout): the stream went quiet (no heartbeat).", file=sys.stderr)
+        return EXIT_TIMEOUT
+    return EXIT_OK
 
 
 def _deps_in_venv(argv, run=subprocess.run):

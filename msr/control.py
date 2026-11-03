@@ -39,6 +39,7 @@ PROTOCOL = 1
 # additions. msr_ctl.py refuses another api_version (exit 7).
 API_VERSION = 1
 MAX_REQUEST = 1 << 20
+MAX_SUBSCRIBERS = 8          # open "subscribe" streams at once
 STATUS_INTERVAL = 3.0
 
 # Settings an agent may change beyond Config.DEFAULT_CONFIG (sections the app reads with fallbacks).
@@ -1796,6 +1797,11 @@ class Controller:
             raise ControlError(f"No {'/'.join(kinds)} event within {timeout:g}s.", "timeout")
         return ev
 
+    def cmd_subscribe(self, args):
+        """Streaming: handled by ControlServer on its own connection (JSON lines until closed)."""
+        raise ControlError("subscribe streams events on its own connection: use control.subscribe() "
+                           "or msr_ctl.py subscribe.", "bad_request")
+
     # -------------------------------------------------- quit
     def cmd_quit(self, args):
         self._need_live()
@@ -2033,6 +2039,8 @@ class ControlServer:
         self._sock = None
         self._thread = None
         self._closing = threading.Event()
+        self._subs = 0
+        self._subs_lock = threading.Lock()
 
     @property
     def port(self):
@@ -2095,7 +2103,12 @@ class ControlServer:
                     buf += chunk
                     if len(buf) > MAX_REQUEST:
                         raise ValueError("request too large")
-                reply = self.dispatch(buf.split(b"\n", 1)[0])
+                line = buf.split(b"\n", 1)[0]
+                req = self._parse(line)
+                if req is not None and req.get("cmd") == "subscribe" and self._authorized(req):
+                    self._subscribe(conn, req.get("args") or {})
+                    return
+                reply = self.dispatch(line)
             except (OSError, ValueError) as e:
                 reply = {"ok": False, "code": "bad_request", "error": str(e)}
             try:
@@ -2103,18 +2116,101 @@ class ControlServer:
             except OSError:
                 pass
 
-    def dispatch(self, line: bytes) -> dict:
+    @staticmethod
+    def _parse(line):
         try:
             req = json.loads(line.decode("utf-8"))
-            if not isinstance(req, dict):
-                raise ValueError
         except (ValueError, UnicodeDecodeError):
-            return {"ok": False, "code": "bad_request", "error": "Send one JSON object per line."}
+            return None
+        return req if isinstance(req, dict) else None
+
+    def _authorized(self, req):
         token = req.get("token")
-        if not isinstance(token, str) or not hmac.compare_digest(token.encode(), self.token.encode()):
+        return isinstance(token, str) and hmac.compare_digest(token.encode(), self.token.encode())
+
+    def dispatch(self, line: bytes) -> dict:
+        req = self._parse(line)
+        if req is None:
+            return {"ok": False, "code": "bad_request", "error": "Send one JSON object per line."}
+        if not self._authorized(req):
             logging.warning("Control: request with a wrong or missing token refused")
             return {"ok": False, "code": "auth", "error": "Wrong or missing token."}
         return self.controller.handle(req.get("cmd"), req.get("args") or {})
+
+    # -------------------------------------------------- subscribe (one open stream per client)
+    def _subscribe(self, conn, args):
+        """JSON lines on this connection: the ack, then {"type": "event"}, {"type": "heartbeat"}
+        every ``heartbeat`` s, and {"type": "bye"} when the server stops or ``max_seconds`` ends.
+        A closed client ends it at once."""
+        from msr.agent_status import EVENT_KINDS
+
+        def send(obj):
+            conn.sendall(json.dumps(obj).encode("utf-8") + b"\n")
+
+        tracker = getattr(self.controller.app, "tracker", None)
+        try:
+            kinds = args.get("events") or list(EVENT_KINDS)
+            if isinstance(kinds, str):
+                kinds = [k.strip() for k in kinds.split(",") if k.strip()]
+            bad = [k for k in kinds if k not in EVENT_KINDS]
+            if bad:
+                raise ControlError(f"event must be one of {', '.join(EVENT_KINDS)}.", "bad_request")
+            heartbeat = max(1.0, min(float(args.get("heartbeat", 15)), 300.0))
+            max_seconds = float(args.get("max_seconds") or 0)
+            channel = self.controller._channel_key(args["channel"]) if args.get("channel") else None
+            if tracker is None:
+                raise ControlError("Multi-Stream Recorder is not running.", "not_running")
+        except ControlError as e:
+            send({"ok": False, "code": e.code, "error": str(e)})
+            return
+        except (TypeError, ValueError) as e:
+            send({"ok": False, "code": "bad_request", "error": str(e)})
+            return
+        with self._subs_lock:
+            if self._subs >= MAX_SUBSCRIBERS:
+                send({"ok": False, "code": "busy", "error": f"Too many subscribers (max {MAX_SUBSCRIBERS})."})
+                return
+            self._subs += 1
+        try:
+            after = int(args["after"]) if args.get("after") not in (None, "") else tracker.seq
+            send({"ok": True, "result": {"subscribed": True, "seq": after, "heartbeat": heartbeat,
+                                         "events": list(kinds)}})
+            wanted = set(kinds)
+            started = time.monotonic()
+            last_beat = time.monotonic()
+            while True:
+                if self._closing.is_set():
+                    send({"type": "bye", "reason": "server stopping"})
+                    return
+                if max_seconds and time.monotonic() - started >= max_seconds:
+                    send({"type": "bye", "reason": "max_seconds"})
+                    return
+                if self._peer_closed(conn):
+                    return
+                for ev in tracker.events_after(after, min(1.0, heartbeat)):
+                    after = max(after, ev["seq"])
+                    if ev["event"] in wanted and (channel is None or ev["channel"] == channel):
+                        send({"type": "event", "event": ev})
+                if time.monotonic() - last_beat >= heartbeat:
+                    send({"type": "heartbeat", "seq": tracker.seq, "time": round(time.time(), 1)})
+                    last_beat = time.monotonic()
+        except OSError:
+            return  # the client went away
+        finally:
+            with self._subs_lock:
+                self._subs -= 1
+
+    @staticmethod
+    def _peer_closed(conn) -> bool:
+        conn.setblocking(False)
+        try:
+            return conn.recv(1) == b""   # anything sent by the client is ignored
+        except (BlockingIOError, InterruptedError):
+            return False
+        except OSError:
+            return True
+        finally:
+            conn.settimeout(30)
 
 
 # ------------------------------------------------------------------ the client
@@ -2175,6 +2271,47 @@ def call(data_dir, cmd, args=None, timeout=600.0, token=None):
         return json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
     except ValueError:
         raise NotRunning("no answer") from None
+
+
+def subscribe(data_dir, args=None, token=None, idle_timeout=None):
+    """Yield the stream's JSON objects (the ack first) until the server says bye or closes.
+    ``idle_timeout``: give up when nothing (not even a heartbeat) came for that long."""
+    info = read_control_file(data_dir)
+    if info is None:
+        raise NotRunning("no msr_control.json")
+    if info.get("api_version") != API_VERSION:
+        raise ApiMismatch(f"The running Multi-Stream Recorder speaks control API v{info.get('api_version')}, "
+                          f"this client v{API_VERSION}.")
+    args = dict(args or {})
+    beat = float(args.get("heartbeat", 15))
+    idle = float(idle_timeout or beat * 3 + 10)
+    try:
+        sock = socket.create_connection(("127.0.0.1", int(info["port"])), timeout=5)
+    except OSError as e:
+        raise NotRunning(str(e)) from None
+    with sock:
+        sock.sendall(json.dumps({"token": token if token is not None else info["token"], "cmd": "subscribe",
+                                 "args": args}).encode("utf-8") + b"\n")
+        buf = b""
+        last = time.monotonic()
+        while True:
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                obj = json.loads(line.decode("utf-8"))
+                yield obj
+                if obj.get("type") == "bye" or obj.get("ok") is False:
+                    return
+            if time.monotonic() - last > idle:
+                raise socket.timeout("the stream went quiet")
+            sock.settimeout(1.0)  # short slices: Ctrl+C is seen at once on Windows
+            try:
+                chunk = sock.recv(65536)
+            except socket.timeout:
+                continue
+            if not chunk:
+                return
+            last = time.monotonic()
+            buf += chunk
 
 
 # ------------------------------------------------------------------ wiring for the app
