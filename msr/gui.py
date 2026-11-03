@@ -29,6 +29,7 @@ from msr import library as _library
 from msr import library_actions as _library_actions
 from msr import library_manage as _library_manage
 from msr import library_window as _library_window
+from msr import options_panel as _options_panel
 from msr import preview_state as _preview_state
 from msr import storage as _storage
 from msr import winstate as _winstate
@@ -2035,6 +2036,45 @@ def main_gui(config):
 
     notebook.bind("<<NotebookTabChanged>>", _library_tab_opened, add="+")
 
+    # Options tab: settings without editing config.ini; same validation + save path as msr_ctl.
+    def _options_apply_setting(section, key, value):
+        if not _control.known_setting(config, section, key):
+            raise ValueError(f"Unknown setting {section}.{key}.")
+        try:
+            value = _control.validate_setting(section, key, value)
+        except _control.ControlError as e:
+            raise ValueError(str(e)) from None
+        if not config.config.has_section(section):
+            config.config.add_section(section)
+        config.config.set(section, key, value)
+        if not config.save():
+            raise ValueError("config.ini could not be written (see the log).")
+        if (section, key) in _control.LIVE_SETTINGS and recorder and recorder.is_running:
+            recorder.set_poll_interval(float(value))
+        _reflect_setting(section, key)
+        logging.info(f"Setting {section}.{key} changed in Options")
+        return value
+
+    def _options_twitch_changed():
+        tw = getattr(recorder, 'twitch_push', None) if recorder and recorder.is_running else None
+        if tw is not None:
+            threading.Thread(target=tw.restart, daemon=True, name="twitch-push-restart").start()
+
+    options_panel = _options_panel.OptionsPanel(
+        notebook, config, library_data_dir, _options_apply_setting,
+        on_twitch_changed=_options_twitch_changed, tooltip=_Tooltip)
+    notebook.add(options_panel.frame, text="  Options  ")
+
+    def _options_tab_opened(_event=None):
+        try:
+            if notebook.select() == str(options_panel.frame):
+                options_panel.apply_theme()
+                options_panel.activate()
+        except tk.TclError:
+            pass
+
+    notebook.bind("<<NotebookTabChanged>>", _options_tab_opened, add="+")
+
     # ── Bottom bar — buttons and toggles ──
     bottom_bar = tk.Frame(root)
     bottom_bar.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
@@ -3365,6 +3405,10 @@ def main_gui(config):
 
     def _reflect_setting(section, key):
         """Show a setting changed by control in the selectors that display it."""
+        try:
+            options_panel.reflect(section, key)
+        except Exception:
+            pass
         if (section, key) == ("Timeouts", "poll_interval_minutes"):
             minutes = config.getfloat('Timeouts', 'poll_interval_minutes', fallback=3.0)
             shown = next((n for n, v in POLL_PRESETS.items() if abs(v - minutes) < 0.1),

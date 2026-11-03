@@ -91,6 +91,21 @@ class TwitchPushListener:
             except Exception:
                 pass
 
+    def restart(self):
+        """Pick up a new token / the push setting without restarting the session."""
+        self.stop()
+        t = self._thread
+        if t is not None and t.is_alive():
+            t.join(5)
+        self._thread = None
+        self._auth_failed = False
+        self._session_id = None
+        self._reconnect_url = None
+        with self._lock:
+            self._subs.clear()
+        self._clear_flags()
+        self.start()
+
     def set_channels(self, keys, watch=None):
         new = {k for k in keys if _login(k)}
         with self._lock:

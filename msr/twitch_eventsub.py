@@ -162,6 +162,10 @@ def validate(tok, request=http_request):
     return resp
 
 
+def revoke(tok, request=http_request):
+    request("POST", f"{OAUTH}/revoke", form={"client_id": tok["client_id"], "token": tok["access_token"]})
+
+
 def needs_refresh(tok, now=None):
     now = time.time() if now is None else now
     return float(tok.get("expires_at") or 0) - now < REFRESH_MARGIN
