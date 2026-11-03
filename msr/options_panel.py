@@ -79,6 +79,16 @@ GROUPS = (
         row("Cleanup", "max_log_size_mb", "Rotate log at (MB)", hint="0 = never rotate", applies=RESTART),
         row("Cleanup", "log_backup_count", "Old logs kept", hint="0 = keep none", applies=RESTART),
     )),
+    ("Sounds", False, (
+        row("Sounds", "go_live", "Chime when a channel goes live", "sound", applies=NOW, choices=("live",),
+            tip="Plays when a channel starts recording - not for split parts or reconnects."),
+        row("Sounds", "problems", "Alert when something needs attention", "sound", applies=NOW, choices=("problem",),
+            tip="Recording error, low disk space, recordings drive gone, cookies expired.\n"
+                "The same problem sounds again only after 5 minutes."),
+        row("Sounds", "clip_saved", "Tick when a clip or screenshot is saved", "sound", applies=NOW,
+            choices=("clip",)),
+        row("Sounds", "quiet_while_locked", "Quiet while Windows is locked", "bool", applies=NOW),
+    )),
     ("Fishtank login", False, (
         row("Fishtank", "email", "Email", "text", "", width=28),
         row("Fishtank", "password", "Password", "password", "", width=20,
@@ -164,7 +174,7 @@ class OptionsPanel:
     def __init__(self, container, config, data_dir, apply_setting, on_twitch_changed=None,
                  tooltip=None, api=te, connect_job=tc.ConnectJob, opener=webbrowser.open,
                  ask_dir=None, ask_file=None, fishtank_test=_fishtank_test, ffmpeg_check=_ffmpeg_check,
-                 environ=os.environ):
+                 environ=os.environ, sound_test=None):
         self.config = config
         self.data_dir = data_dir
         self.apply_setting = apply_setting
@@ -177,6 +187,7 @@ class OptionsPanel:
         self.fishtank_test = fishtank_test
         self.ffmpeg_check = ffmpeg_check
         self.environ = environ
+        self.sound_test = sound_test
         self.tip = tooltip or _Tip
         self.job = None
         self._uri = ""
@@ -266,11 +277,15 @@ class OptionsPanel:
     def _build_row(self, box, i, spec, t):
         s, k, kind = spec["section"], spec["key"], spec["kind"]
         cur = self.config.get(s, k, default_for(s, k))
-        if kind == "bool":
+        if kind in ("bool", "sound"):
             v = tk.BooleanVar(value=str(cur).strip().lower() in ("1", "true", "yes", "on"))
             w = ttk.Checkbutton(box, text=spec["label"], variable=v,
                                 command=lambda: self._commit(s, k, "true" if v.get() else "false"))
-            w.grid(row=i, column=0, columnspan=3, sticky="w", pady=1)
+            w.grid(row=i, column=0, columnspan=1 if kind == "sound" else 3, sticky="w", pady=1)
+            if kind == "sound":
+                ttk.Button(box, text="Test", width=6,
+                           command=lambda ev=spec["choices"][0]: self.sound_test and self.sound_test(ev)
+                           ).grid(row=i, column=1, sticky="w", padx=6, pady=1)
         else:
             ttk.Label(box, text=spec["label"]).grid(row=i, column=0, sticky="w", pady=1)
             cell = ttk.Frame(box)

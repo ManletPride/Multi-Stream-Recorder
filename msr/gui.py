@@ -30,6 +30,7 @@ from msr import library_actions as _library_actions
 from msr import library_manage as _library_manage
 from msr import library_window as _library_window
 from msr import options_panel as _options_panel
+from msr import sounds as _sounds_mod
 from msr import preview_state as _preview_state
 from msr import storage as _storage
 from msr import winstate as _winstate
@@ -554,6 +555,9 @@ def main_gui(config):
             save_window_state(state_file, st)
         except Exception:
             pass
+
+    # Optional sound effects (Options > Sounds); async, off by default.
+    sounds = _sounds_mod.Sounds(config)
 
     # Pre-fill the cookie cache before the first draw (data parse only).
     _cookie_info_cache = [validate_cookies(find_cookies_file(config))]
@@ -1089,6 +1093,7 @@ def main_gui(config):
             _cookie_dot("●", "warn")
             domains = ", ".join(info['expired_domains'][:2])
             cookie_label.configure(text=f"Cookies: auth expired ({domains})")
+            sounds.play("problem", f"cookies:{domains}")
         else:
             expiry_note = ""
             if info['auth_expiry']:
@@ -1595,10 +1600,12 @@ def main_gui(config):
             logging.info(f"{label} saved for {display}: {out_file}")
             send_notification(f"{label} saved", f"{display} — {os.path.basename(out_file)}",
                               category="complete", channel=ch_name)
+            sounds.play("clip")
         else:
             logging.error(f"{label} failed for {display}: {msg}")
             send_notification(f"{label} failed", f"{display}: {msg}",
                               category="error", channel=ch_name)
+            sounds.play("problem", f"clip:{ch_name}")
 
     # (channel_key, kind) pairs with a clip/screenshot already running.
     # Clip Now used to spawn a new ffmpeg per click, stacking probes on the
@@ -2070,7 +2077,7 @@ def main_gui(config):
 
     options_panel = _options_panel.OptionsPanel(
         notebook, config, library_data_dir, _options_apply_setting,
-        on_twitch_changed=_options_twitch_changed, tooltip=_Tooltip)
+        on_twitch_changed=_options_twitch_changed, tooltip=_Tooltip, sound_test=sounds.test)
     notebook.add(options_panel.frame, text="  Options  ")
 
     def _options_tab_opened(_event=None):
@@ -2973,6 +2980,8 @@ def main_gui(config):
             storage_notice_label.pack(fill=tk.X, padx=10, pady=(0, 4), after=status_header)
         elif not text and storage_notice_label.winfo_manager():
             storage_notice_label.pack_forget()
+        if text and text != _storage_notice_shown[0]:
+            sounds.play("problem", "storage")
         if text and text != _storage_notice_shown[0] and notifications_enabled:
             send_notification("Recordings folder", text, category="error", channel="storage",
                               detail=text)
@@ -3029,16 +3038,21 @@ def main_gui(config):
                         tag = "remuxing"
                     # A new recording may complete later — allow one complete toast again.
                     _notified_complete.discard(ch_name)
-                    if notifications_enabled and ch_name not in _notified_live and "starting" not in st.get("detail", ""):
+                    # _notified_live holds a channel for the whole live session (splits and
+                    # reconnects stay "recording"), so this fires once per true go-live.
+                    if ch_name not in _notified_live and "starting" not in st.get("detail", ""):
                         _notified_live.add(ch_name)
-                        send_notification("Stream Recording", f"Now recording: {ch_name}",
-                                          category="recording", channel=ch_name)
+                        sounds.play("live")
+                        if notifications_enabled:
+                            send_notification("Stream Recording", f"Now recording: {ch_name}",
+                                              category="recording", channel=ch_name)
                 elif "remuxing" in curr or "pending" in curr:
                     tag = "remuxing"
                 elif "checking" in curr or "initializing" in curr:
                     tag = "checking"
                 elif "error" in curr or "failed" in curr:
                     tag = "error"
+                    sounds.play("problem", f"{ch_name}:{display}")
                     if notifications_enabled:
                         send_notification("Recording Error", f"{ch_name}: {display}",
                                           category="error", channel=ch_name, detail=display)

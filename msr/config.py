@@ -80,6 +80,10 @@ def _coerce_specs():
         ("Recording", "split_on_resolution_change", "bool", True, None, None),
         ("Cleanup", "purge_on_startup", "bool", True, None, None),
         ("Twitch", "push_enabled", "bool", False, None, None),
+        ("Sounds", "go_live", "bool", False, None, None),
+        ("Sounds", "problems", "bool", False, None, None),
+        ("Sounds", "clip_saved", "bool", False, None, None),
+        ("Sounds", "quiet_while_locked", "bool", True, None, None),
         ("Advanced", "verbose", "bool", False, None, None),
         ("Advanced", "streamlink_debug", "bool", False, None, None),
         ("GUI", "dark_mode", "bool", True, None, None),
@@ -150,6 +154,13 @@ class Config:
             # rotate_log_if_needed().
             'max_log_size_mb': '20',
             'log_backup_count': '3',
+        },
+        'Sounds': {
+            # Optional Windows system sounds, all off by default (msr/sounds.py).
+            'go_live': 'false',      # a channel starts recording (not splits / resumed parts)
+            'problems': 'false',     # recording error, low disk, drive gone, cookies expired
+            'clip_saved': 'false',   # Clip Now / screenshot finished
+            'quiet_while_locked': 'true',
         },
         'Twitch': {
             # Instant go-live via Twitch EventSub (opt-in). Authorize once with
