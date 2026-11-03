@@ -1,12 +1,17 @@
-"""The Options tab: Twitch push connect + a few typed settings from config.py's schema.
+"""The Options tab: Twitch connect plus grouped settings, scrollable.
 
-Writes go through ``apply_setting(section, key, value)`` (gui.py: validate,
-set, Config.save, live-apply, refresh other selectors). No secrets shown.
+Rows come from ``GROUPS``; type/range checks are ``control.validate_setting``
+(config._coerce_specs). Writes go through ``apply_setting(section, key, value)``
+(gui.py: validate, Config.save, live apply, sync other selectors). Secrets are
+never shown or logged.
 """
 
+import logging
+import os
+import threading
 import tkinter as tk
 import webbrowser
-from tkinter import ttk
+from tkinter import filedialog, ttk
 
 from msr import themes as _themes
 from msr import twitch_connect as tc
@@ -15,34 +20,121 @@ from msr import twitch_eventsub as te
 TWITCH_TIP = ("Sign in to Twitch once so MSR gets instant go-live alerts (about 10 channels).\n"
               "No permissions requested; timed checks keep running as backup.")
 
-# (section, key, label, tooltip). Type and range come from config._coerce_specs.
-GENERAL_ROWS = (
-    ("Timeouts", "poll_interval_minutes", "Check every (min)", "How often offline channels are checked."),
-    ("Recording", "max_record_hours", "Max recording (h)", "Stop a recording after this long (0 = no limit)."),
-    ("Recording", "max_file_size_gb", "Split files at (GB)", "Start a new file past this size (0 = off)."),
-    ("Recording", "min_disk_space_gb", "Min free space (GB)", "Pause recording below this much free space."),
-    ("Cleanup", "auto_purge_days", "Purge PendingDeletion (days)", "At app start, remove older files (0 = never)."),
-    ("GUI", "notifications", "Desktop notifications", ""),
-    ("GUI", "minimize_to_tray", "Minimize to tray", ""),
+NOW, NEXT, RESTART = "now", "next recording", "restart"
+
+
+def row(section, key, label, kind="num", hint="", tip="", applies=NEXT, choices=(), width=8):
+    return dict(section=section, key=key, label=label, kind=kind, hint=hint, tip=tip,
+                applies=applies, choices=tuple(choices), width=width)
+
+
+# 0-meanings verified in worker.py / recorder.py / util.py / storage.py.
+GROUPS = (
+    ("Recording", False, (
+        row("Recording", "quality", "Quality", "choice", "best = highest available",
+            "streamlink / yt-dlp quality name. Unknown names fall back to best.",
+            choices=("best", "1080p60", "1080p", "720p60", "720p", "480p", "worst"), width=10),
+        row("Recording", "filename_pattern", "File name", "pattern", "",
+            "Tokens: {username} {platform} {date} {time} {timestamp} {title}\n"
+            "Keep {timestamp} (or {date}+{time}) so files never collide.", width=28),
+        row("Recording", "split_on_resolution_change", "New file when the resolution changes", "bool",
+            tip="Starts a fresh file if the stream changes resolution (e.g. TikTok battles);\n"
+                "mixing two resolutions in one file breaks playback."),
+        row("Recording", "max_record_hours", "Max part length (h)", hint="0 = no limit",
+            tip="Long streams are cut into parts of at most this length (seamless hand-off)."),
+        row("Recording", "max_file_size_gb", "Split files at (GB)", hint="0 = never split by size",
+            tip="The next part starts before this one closes, so nothing is lost."),
+        row("Recording", "min_disk_space_gb", "Min free space (GB)", hint="0 = no free-space check",
+            tip="New recordings wait while the recordings drive has less free space than this."),
+    )),
+    ("Checking", False, (
+        row("Timeouts", "poll_interval_minutes", "Check every (min)", hint="0.5\u2013120",
+            tip="How often offline channels are checked. Kick and Twitch instant alerts\n"
+                "wake a channel sooner; these checks always keep running.", applies=NOW),
+    )),
+    ("Folders", False, (
+        row("Paths", "streams_dir", "Recordings", "dir", "used from the next start",
+            "Changing it while recording is refused. MSR's one-copy-per-folder lock\n"
+            "moves with it at the next start.", applies=RESTART, width=34),
+        row("Clipping", "clips_dir", "Clips + screenshots", "dir", "blank = Recordings\\Clips",
+            applies=NOW, width=34),
+        row("Paths", "fallback_dir", "Backup (drive gone)", "dir", "blank = temp folder, off = pause",
+            "Where recording continues while the recordings drive is unplugged;\n"
+            "files move back when it returns.", width=34),
+        row("Paths", "cookies_file", "Cookies file", "file", "blank = find automatically",
+            "Netscape cookies.txt for logged-in streams (subscriber-only, age-gated).", width=34),
+    )),
+    ("Clips", False, (
+        row("Clipping", "clip_length_seconds", "Clip length (s)", hint="5\u20131800", applies=NOW,
+            tip="Same setting as Clip Length in the bottom bar."),
+        row("Clipping", "screenshot_format", "Screenshot format", "choice", "jpg is ~5x smaller than png",
+            choices=("jpg", "png", "webp"), applies=NOW, width=6),
+        row("Clipping", "screenshot_quality", "Screenshot quality", hint="", applies=NOW,
+            tip="jpg: 2\u201331, lower is better.  webp: 50\u2013100, higher is better.  png: ignored."),
+    )),
+    ("Cleanup", False, (
+        row("Cleanup", "purge_on_startup", "Empty old PendingDeletion files at start", "bool", applies=RESTART),
+        row("Cleanup", "auto_purge_days", "Keep PendingDeletion (days)", hint="0 = never delete",
+            applies=RESTART),
+        row("Cleanup", "max_log_size_mb", "Rotate log at (MB)", hint="0 = never rotate", applies=RESTART),
+        row("Cleanup", "log_backup_count", "Old logs kept", hint="0 = keep none", applies=RESTART),
+    )),
+    ("Fishtank login", False, (
+        row("Fishtank", "email", "Email", "text", "", width=28),
+        row("Fishtank", "password", "Password", "password", "", width=20,
+            tip="Stored in config.ini like before (never logged; history copies leave it out).\n"
+                "MSR_FISHTANK_PASSWORD, if set, wins and keeps it out of the file."),
+    )),
+    ("Other", False, (
+        row("Library", "extra_dirs", "Extra Library folders", "dirlist", "scan only, ; separated",
+            "Shown in the Library tab as Other folder N. Never cleaned up.", applies=NOW, width=34),
+        row("Control", "enabled", "Agent control (msr_ctl)", "bool", applies=RESTART,
+            tip="Local control server + status file used by msr_ctl and agents."),
+        row("Advanced", "ffmpeg_path", "ffmpeg", "ffmpeg", "", "Program name on PATH or a full path.",
+            applies=RESTART, width=28),
+    )),
+    ("Advanced timing", True, (
+        row("Timeouts", "reconnect_grace_minutes", "Fast re-checks after a drop (min)",
+            hint="15 s checks; 0 = off"),
+        row("Timeouts", "reconnect_extended_minutes", "Then 30 s checks for (min)", hint="0 = off"),
+        row("Timeouts", "error_backoff_max_minutes", "Longest wait after errors (min)",
+            hint="0 = retry without waiting (not advised)"),
+        row("Timeouts", "poll_jitter_percent", "Check-time jitter (%)", hint="0\u2013100, 0 = exact",
+            tip="Random spread so channels are not all checked in the same second."),
+    )),
 )
 
 
-def spec_for(section, key):
-    from msr.config import _coerce_specs
-    for s, k, kind, default, low, high in _coerce_specs():
-        if (s, k) == (section, key):
-            return kind, default, low, high
-    return "str", "", None, None
+def all_rows():
+    for _title, _collapsed, rows in GROUPS:
+        yield from rows
 
 
-def range_text(kind, low, high):
-    if kind == "bool":
-        return ""
-    if low is not None and high is not None:
-        return f"{low:g}\u2013{high:g}"
-    if low is not None:
-        return f"\u2265 {low:g}"
-    return ""
+def default_for(section, key):
+    from msr.config import Config
+    from msr.control import EXTRA_SETTINGS
+    d = dict(Config.DEFAULT_CONFIG.get(section, {}))
+    d.update(EXTRA_SETTINGS.get(section, {}))
+    return d.get(key, "")
+
+
+def preview_name(pattern):
+    from msr.util import build_filename
+    pattern = (pattern or "").strip()
+    if not pattern:
+        return "(empty - {username}_{timestamp} is used)"
+    return build_filename(pattern, "channel", "twitch", "Stream title") + ".mp4"
+
+
+def _fishtank_test(email, password):
+    from msr.platforms import FishtankAuth
+    auth = FishtankAuth(None, logging.getLogger("msr.options"), email=email, password=password)
+    return bool(auth._login_with_credentials())
+
+
+def _ffmpeg_check(path):
+    from msr.deps import check_ffmpeg
+    return check_ffmpeg(path)
 
 
 class _Tip:
@@ -70,7 +162,9 @@ class _Tip:
 
 class OptionsPanel:
     def __init__(self, container, config, data_dir, apply_setting, on_twitch_changed=None,
-                 tooltip=None, api=te, connect_job=tc.ConnectJob, opener=webbrowser.open):
+                 tooltip=None, api=te, connect_job=tc.ConnectJob, opener=webbrowser.open,
+                 ask_dir=None, ask_file=None, fishtank_test=_fishtank_test, ffmpeg_check=_ffmpeg_check,
+                 environ=os.environ):
         self.config = config
         self.data_dir = data_dir
         self.apply_setting = apply_setting
@@ -78,95 +172,284 @@ class OptionsPanel:
         self.api = api
         self.connect_job = connect_job
         self.opener = opener
+        self.ask_dir = ask_dir or (lambda initial: filedialog.askdirectory(parent=self.frame, initialdir=initial or None))
+        self.ask_file = ask_file or (lambda initial: filedialog.askopenfilename(parent=self.frame, initialdir=initial or None))
+        self.fishtank_test = fishtank_test
+        self.ffmpeg_check = ffmpeg_check
+        self.environ = environ
+        self.tip = tooltip or _Tip
         self.job = None
         self._uri = ""
         self._code = ""
-        tip = tooltip or _Tip
-        self.frame = ttk.Frame(container, padding=10)
+        self.vars = {}
+        self.hints = {}
+        self.groups = {}
+        t = _themes.current()
 
-        # -- Twitch --
-        tw = ttk.LabelFrame(self.frame, text=" Twitch instant alerts ", padding=(8, 4))
+        # scrollable body
+        self.frame = ttk.Frame(container)
+        self.canvas = tk.Canvas(self.frame, highlightthickness=0, borderwidth=0, bg=t["bg"])
+        self.scroll = ttk.Scrollbar(self.frame, orient=tk.VERTICAL, command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.scroll.set)
+        self.scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.body = ttk.Frame(self.canvas, padding=10)
+        self._win = self.canvas.create_window(0, 0, window=self.body, anchor="nw")
+        self.body.bind("<Configure>", lambda _e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._win, width=e.width))
+        self.frame.bind("<Enter>", lambda _e: self.canvas.bind_all("<MouseWheel>", self._wheel), add="+")
+        self.frame.bind("<Leave>", lambda _e: self.canvas.unbind_all("<MouseWheel>"), add="+")
+
+        self._build_twitch(t)
+        for title, collapsed, rows in GROUPS:
+            self._build_group(title, collapsed, rows, t)
+        self.message = ttk.Label(self.body, text="", foreground=t["muted"])
+        self.message.pack(fill=tk.X, pady=(6, 0))
+        self.refresh_status()
+
+    def _wheel(self, e):
+        if self.canvas.yview() != (0.0, 1.0):
+            self.canvas.yview_scroll(int(-e.delta / 120), "units")
+
+    # -- building --
+
+    def _build_twitch(self, t):
+        tw = ttk.LabelFrame(self.body, text=" Twitch instant alerts ", padding=(8, 4))
         tw.pack(fill=tk.X)
-        row = ttk.Frame(tw)
-        row.pack(fill=tk.X)
-        self.push_var = tk.BooleanVar(value=bool(config.getboolean("Twitch", "push_enabled", False)))
-        self.push_cb = ttk.Checkbutton(row, text="Use instant alerts", variable=self.push_var,
-                                       command=self._toggle_push)
+        r = ttk.Frame(tw)
+        r.pack(fill=tk.X)
+        self.push_var = tk.BooleanVar(value=bool(self.config.getboolean("Twitch", "push_enabled", False)))
+        self.push_cb = ttk.Checkbutton(r, text="Use instant alerts", variable=self.push_var, command=self._toggle_push)
         self.push_cb.pack(side=tk.LEFT)
-        self.connect_btn = ttk.Button(row, text="Connect Twitch", command=self.connect)
+        self.connect_btn = ttk.Button(r, text="Connect Twitch", command=self.connect)
         self.connect_btn.pack(side=tk.LEFT, padx=(10, 4))
-        self.disconnect_btn = ttk.Button(row, text="Disconnect", command=self.disconnect)
+        self.disconnect_btn = ttk.Button(r, text="Disconnect", command=self.disconnect)
         self.disconnect_btn.pack(side=tk.LEFT)
-        self.status = ttk.Label(row, text="")
+        self.status = ttk.Label(r, text="")
         self.status.pack(side=tk.LEFT, padx=(10, 0))
         for w in (self.push_cb, self.connect_btn):
-            tip(w, TWITCH_TIP)
+            self.tip(w, TWITCH_TIP)
         self.code_row = ttk.Frame(tw)
         self.code_lbl = ttk.Label(self.code_row, text="")
         self.code_lbl.pack(side=tk.LEFT)
-        t = _themes.current()
         self.link = ttk.Label(self.code_row, text="", cursor="hand2", font=("Segoe UI", 9, "underline"),
                               foreground=t["link"])
         self.link.pack(side=tk.LEFT, padx=(4, 8))
         self.link.bind("<Button-1>", lambda _e: self.open_link())
-        self.copy_btn = ttk.Button(self.code_row, text="Copy code", command=self.copy_code)
-        self.copy_btn.pack(side=tk.LEFT)
-        self.cancel_btn = ttk.Button(self.code_row, text="Cancel", command=self.cancel)
-        self.cancel_btn.pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(self.code_row, text="Copy code", command=self.copy_code).pack(side=tk.LEFT)
+        ttk.Button(self.code_row, text="Cancel", command=self.cancel).pack(side=tk.LEFT, padx=(4, 0))
 
-        # -- General (schema-driven) --
-        gen = ttk.LabelFrame(self.frame, text=" General ", padding=(8, 4))
-        gen.pack(fill=tk.X, pady=(8, 0))
-        self.vars = {}
-        for i, (section, key, label, hint) in enumerate(GENERAL_ROWS):
-            kind, default, low, high = spec_for(section, key)
-            if kind == "bool":
-                v = tk.BooleanVar(value=bool(config.getboolean(section, key, default)))
-                w = ttk.Checkbutton(gen, text=label, variable=v,
-                                    command=lambda s=section, k=key, v=v: self._commit(s, k, "true" if v.get() else "false"))
-                w.grid(row=i, column=0, columnspan=3, sticky="w", pady=1)
+    def _build_group(self, title, collapsed, rows, t):
+        holder = ttk.Frame(self.body)
+        holder.pack(fill=tk.X, pady=(8, 0))
+        box = ttk.LabelFrame(holder, text=f" {title} ", padding=(8, 4))
+        box.columnconfigure(2, weight=1)
+        if collapsed:
+            btn = ttk.Button(holder, text=f"\u25b8 {title}")
+
+            def toggle(b=btn, f=box, name=title):
+                if f.winfo_manager():
+                    f.pack_forget()
+                    b.configure(text=f"\u25b8 {name}")
+                else:
+                    f.pack(fill=tk.X)
+                    b.configure(text=f"\u25be {name}")
+            btn.configure(command=toggle)
+            btn.pack(anchor="w")
+            self.groups[title] = (box, toggle)
+        else:
+            box.pack(fill=tk.X)
+            self.groups[title] = (box, None)
+        for i, spec in enumerate(rows):
+            self._build_row(box, i, spec, t)
+
+    def _build_row(self, box, i, spec, t):
+        s, k, kind = spec["section"], spec["key"], spec["kind"]
+        cur = self.config.get(s, k, default_for(s, k))
+        if kind == "bool":
+            v = tk.BooleanVar(value=str(cur).strip().lower() in ("1", "true", "yes", "on"))
+            w = ttk.Checkbutton(box, text=spec["label"], variable=v,
+                                command=lambda: self._commit(s, k, "true" if v.get() else "false"))
+            w.grid(row=i, column=0, columnspan=3, sticky="w", pady=1)
+        else:
+            ttk.Label(box, text=spec["label"]).grid(row=i, column=0, sticky="w", pady=1)
+            cell = ttk.Frame(box)
+            cell.grid(row=i, column=1, sticky="w", padx=6, pady=1)
+            v = tk.StringVar(value="" if kind == "password" else cur)
+            if kind == "choice":
+                w = ttk.Combobox(cell, textvariable=v, values=spec["choices"], width=spec["width"])
+                w.bind("<<ComboboxSelected>>", lambda _e: self._commit(s, k, v.get()), add="+")
             else:
-                ttk.Label(gen, text=label).grid(row=i, column=0, sticky="w", pady=1)
-                v = tk.StringVar(value=config.get(section, key, str(default)))
-                w = ttk.Entry(gen, textvariable=v, width=8)
-                w.grid(row=i, column=1, sticky="w", padx=6, pady=1)
-                for ev in ("<Return>", "<FocusOut>"):
-                    w.bind(ev, lambda _e, s=section, k=key, v=v: self._commit(s, k, v.get()), add="+")
-                ttk.Label(gen, text=range_text(kind, low, high), foreground=t["muted"]).grid(
-                    row=i, column=2, sticky="w")
-            if hint:
-                tip(w, hint)
-            self.vars[(section, key)] = v
-        self.message = ttk.Label(self.frame, text="", foreground=t["muted"])
-        self.message.pack(fill=tk.X, pady=(6, 0))
-        self.refresh_status()
+                w = ttk.Entry(cell, textvariable=v, width=spec["width"], show="\u2022" if kind == "password" else "")
+            w.pack(side=tk.LEFT)
+            for ev in ("<Return>", "<FocusOut>"):
+                w.bind(ev, lambda _e: self._commit_field(spec, v), add="+")
+            if kind in ("dir", "file", "dirlist", "ffmpeg"):
+                ttk.Button(cell, text="\u2026", width=3, command=lambda: self._browse(spec, v)).pack(side=tk.LEFT, padx=(2, 0))
+            if kind == "ffmpeg":
+                ttk.Button(cell, text="Check", command=lambda: self.check_ffmpeg(v.get())).pack(side=tk.LEFT, padx=(4, 0))
+            if kind == "password":
+                ttk.Button(cell, text="Clear", command=lambda: self._commit(s, k, "")).pack(side=tk.LEFT, padx=(4, 0))
+                ttk.Button(cell, text="Test login", command=self.test_fishtank).pack(side=tk.LEFT, padx=(4, 0))
+            hint = ttk.Label(box, text=spec["hint"], foreground=t["muted"])
+            hint.grid(row=i, column=2, sticky="w")
+            self.hints[(s, k)] = hint
+            if kind == "pattern":
+                v.trace_add("write", lambda *_: self._preview_pattern(v.get()))
+                self._preview_pattern(cur)
+            if kind == "password":
+                self._password_hint()
+            if (s, k) == ("Clipping", "screenshot_quality"):
+                self._quality_hint()
+        if spec["tip"]:
+            self.tip(w, spec["tip"])
+        self.vars[(s, k)] = v
 
-    # -- generic settings --
+    # -- row helpers --
+
+    def _preview_pattern(self, pattern):
+        h = self.hints.get(("Recording", "filename_pattern"))
+        if h is not None:
+            try:
+                h.configure(text="\u2192 " + preview_name(pattern))
+            except Exception:
+                h.configure(text="")
+
+    def _quality_hint(self):
+        fmt = (self.config.get("Clipping", "screenshot_format", "jpg") or "jpg").lower()
+        h = self.hints.get(("Clipping", "screenshot_quality"))
+        if h is not None:
+            h.configure(text={"png": "png ignores quality", "webp": "50\u2013100, higher is better"}
+                        .get(fmt, "2\u201331, lower is better"))
+
+    def _password_hint(self):
+        h = self.hints.get(("Fishtank", "password"))
+        if h is None:
+            return
+        from msr.config import FISHTANK_PASSWORD_ENV
+        if (self.environ.get(FISHTANK_PASSWORD_ENV) or "").strip():
+            text = f"set by {FISHTANK_PASSWORD_ENV} (wins)"
+        elif str(self.config.get("Fishtank", "password", "") or "").strip():
+            text = "saved - type to replace"
+        else:
+            text = "not set"
+        h.configure(text=text)
+
+    def _commit_field(self, spec, v):
+        if spec["kind"] == "password":
+            if v.get():
+                self._commit(spec["section"], spec["key"], v.get())
+                v.set("")
+            return
+        self._commit(spec["section"], spec["key"], v.get())
+
+    def _browse(self, spec, v):
+        cur = v.get().strip()
+        if spec["kind"] in ("file", "ffmpeg"):
+            got = self.ask_file(os.path.dirname(cur) if cur else "")
+        else:
+            got = self.ask_dir(cur.split(";")[-1].strip() if cur and cur.lower() != "off" else "")
+        if not got:
+            return
+        got = os.path.normpath(got)
+        if spec["kind"] == "dirlist":
+            parts = [p.strip() for p in cur.split(";") if p.strip()]
+            if got not in parts:
+                parts.append(got)
+            got = ";".join(parts)
+        v.set(got)
+        self._commit(spec["section"], spec["key"], got)
+
+    def _say(self, text, error=False):
+        t = _themes.current()
+        self.message.configure(text=text, foreground=t["error"] if error else t["muted"])
 
     def _commit(self, section, key, value):
-        current = self.config.get(section, key, "")
-        if str(value).strip() == str(current).strip():
+        current = self.config.get(section, key, default_for(section, key))
+        if str(value).strip() == str(current or "").strip():
             return
         try:
             saved = self.apply_setting(section, key, value)
         except Exception as e:
-            self.message.configure(text=str(e), foreground=_themes.current()["error"])
+            self._say(str(e), error=True)
             self.reflect(section, key)
             return
-        self.message.configure(text=f"Saved {section}.{key} = {saved}", foreground=_themes.current()["muted"])
+        from msr.control import masked
+        spec = next((r for r in all_rows() if (r["section"], r["key"]) == (section, key)), None)
+        when = {NOW: "", RESTART: " (applies after restarting MSR)",
+                NEXT: " (applies from the next recording)"}.get(spec["applies"] if spec else NOW, "")
+        label = spec["label"] if spec else f"{section}.{key}"
+        shown = masked(key, saved)
+        self._say(f"Saved {label}" + (f" = {shown}" if shown not in ("", "<set>") else "") + when)
+        self.reflect(section, key)
 
     def reflect(self, section, key):
         """Show the stored value (after a failed edit or a change from elsewhere)."""
+        if (section, key) == ("Twitch", "push_enabled"):
+            self.push_var.set(bool(self.config.getboolean("Twitch", "push_enabled", False)))
+            return
+        if (section, key) == ("Clipping", "screenshot_format"):
+            self._quality_hint()
+        if (section, key) == ("Fishtank", "password"):
+            self._password_hint()
+            return
         v = self.vars.get((section, key))
         if v is None:
-            if (section, key) == ("Twitch", "push_enabled"):
-                self.push_var.set(bool(self.config.getboolean("Twitch", "push_enabled", False)))
             return
-        kind, default, _, _ = spec_for(section, key)
-        if kind == "bool":
-            v.set(bool(self.config.getboolean(section, key, default)))
+        cur = self.config.get(section, key, default_for(section, key))
+        if isinstance(v, tk.BooleanVar):
+            v.set(str(cur).strip().lower() in ("1", "true", "yes", "on"))
         else:
-            v.set(self.config.get(section, key, str(default)))
+            v.set(cur)
+
+    # -- background checks (thread + after(); never block Tk) --
+
+    def _background(self, work, done):
+        box = []
+        threading.Thread(target=lambda: box.append(self._safe(work)), daemon=True, name="options-check").start()
+
+        def pick(tries=0):
+            if box:
+                done(box[0])
+            elif tries < 240:
+                self.frame.after(250, lambda: pick(tries + 1))
+        self.frame.after(100, pick)
+
+    @staticmethod
+    def _safe(work):
+        try:
+            return ("ok", work())
+        except Exception as e:
+            return ("error", type(e).__name__)
+
+    def check_ffmpeg(self, path):
+        path = (path or "ffmpeg").strip() or "ffmpeg"
+        h = self.hints[("Advanced", "ffmpeg_path")]
+        h.configure(text="checking\u2026", foreground=_themes.current()["muted"])
+
+        def done(res):
+            t = _themes.current()
+            ver = res[1] if res[0] == "ok" else None
+            h.configure(text=(f"ffmpeg {str(ver).split()[0]}" if ver else "does not run"),
+                        foreground=t["ok"] if ver else t["error"])
+        self._background(lambda: self.ffmpeg_check(path), done)
+
+    def test_fishtank(self):
+        from msr.config import fishtank_password
+        email = str(self.vars[("Fishtank", "email")].get() or "").strip()
+        typed = self.vars[("Fishtank", "password")].get()
+        password = typed or fishtank_password(self.config)
+        h = self.hints[("Fishtank", "password")]
+        if not email or not password:
+            h.configure(text="enter email and password first", foreground=_themes.current()["warn"])
+            return
+        h.configure(text="testing\u2026", foreground=_themes.current()["muted"])
+
+        def done(res):
+            t = _themes.current()
+            ok = res == ("ok", True)
+            h.configure(text="login OK" if ok else "login failed", foreground=t["ok"] if ok else t["error"])
+        self._background(lambda: self.fishtank_test(email, password), done)
 
     # -- Twitch --
 
@@ -201,7 +484,7 @@ class OptionsPanel:
     def connect(self):
         if self.job and self.job.running():
             return
-        self.message.configure(text="")
+        self._say("")
         self.job = self.connect_job(self.client_id(), self.data_dir, api=self.api).start()
         self.refresh_status()
         self.frame.after(100, self._poll)
@@ -212,7 +495,7 @@ class OptionsPanel:
 
     def disconnect(self):
         tc.disconnect(self.data_dir, self.api)
-        self.message.configure(text="Twitch disconnected; timed checks continue.")
+        self._say("Twitch disconnected; timed checks continue.")
         self.refresh_status()
         self.on_twitch_changed()
 
@@ -224,7 +507,7 @@ class OptionsPanel:
         if self._code:
             self.frame.clipboard_clear()
             self.frame.clipboard_append(self._code)
-            self.message.configure(text="Code copied.")
+            self._say("Code copied.")
 
     def _poll(self):
         job = self.job
@@ -232,8 +515,7 @@ class OptionsPanel:
             return
         try:
             while True:
-                ev = job.events.get_nowait()
-                self._handle(ev)
+                self._handle(job.events.get_nowait())
         except Exception:
             pass
         if job.running() or not job.events.empty():
@@ -248,37 +530,35 @@ class OptionsPanel:
             self.code_lbl.configure(text=f"Code {self._code} \u2013 open")
             self.link.configure(text=self._uri)
             self.code_row.pack(fill=tk.X, pady=(4, 0))
-            self.message.configure(text=f"Approve in the browser within {int(ev[3]) // 60} min.")
+            self._say(f"Approve in the browser within {int(ev[3]) // 60} min.")
         elif kind == "connected":
             self.job = None
             if not self.push_var.get():
                 self.push_var.set(True)
                 self._commit("Twitch", "push_enabled", "true")
-            self.message.configure(text="Connected. Instant alerts start now for running sessions.")
+            self._say("Connected. Instant alerts start now for running sessions.")
             self.refresh_status("connected", ev[1])
             self.on_twitch_changed()
         else:
             self.job = None
-            self.message.configure(text={"expired": "Code expired \u2013 click Connect Twitch again.",
-                                         "cancelled": "Cancelled."}.get(kind, f"Twitch: {ev[-1]}"))
+            self._say({"expired": "Code expired \u2013 click Connect Twitch again.",
+                       "cancelled": "Cancelled."}.get(kind, f"Twitch: {ev[-1]}"))
             self.refresh_status()
 
     def activate(self):
-        """Tab opened: validate the saved token on a thread; the result is picked up by after()."""
-        import threading
-        cid, box = self.client_id(), []
-        threading.Thread(target=lambda: box.append(tc.check_online(self.data_dir, cid, self.api)),
-                         daemon=True, name="twitch-validate").start()
+        """Tab opened: validate the saved token on a thread."""
+        cid = self.client_id()
 
-        def pick(tries=0):
-            if box:
-                if not (self.job and self.job.running()):
-                    self.refresh_status(*box[0])
-            elif tries < 120:
-                self.frame.after(250, lambda: pick(tries + 1))
-        self.frame.after(250, pick)
+        def done(res):
+            if res[0] == "ok" and not (self.job and self.job.running()):
+                self.refresh_status(*res[1])
+        self._background(lambda: tc.check_online(self.data_dir, cid, self.api), done)
 
     def apply_theme(self):
         t = _themes.current()
+        self.canvas.configure(bg=t["bg"])
         self.link.configure(foreground=t["link"])
+        for h in self.hints.values():
+            h.configure(foreground=t["muted"])
+        self._preview_pattern(self.vars[("Recording", "filename_pattern")].get())
         self.refresh_status()
