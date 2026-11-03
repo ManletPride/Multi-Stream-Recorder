@@ -71,7 +71,8 @@ def enabled(config) -> bool:
 
 
 def _write_private(path, data: bytes) -> None:
-    """Atomic write; the file is readable by this user only where the OS allows (POSIX 0600)."""
+    """Atomic write; the file is readable by this user only (POSIX 0600; Windows: a protected
+    DACL for the current user, set before the rename so the token is never exposed; fail-soft)."""
     folder = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(dir=folder, prefix=os.path.basename(path) + ".", suffix=".tmp")
     try:
@@ -79,6 +80,10 @@ def _write_private(path, data: bytes) -> None:
             fh.write(data)
         if os.name != "nt":
             os.chmod(tmp, 0o600)
+        elif os.path.basename(path) == CONTROL_FILE:
+            from msr.winacl import restrict_to_current_user
+            if not restrict_to_current_user(tmp):
+                logging.debug(f"Control: {CONTROL_FILE} keeps the folder's permissions")
         from msr.history import _replace
         _replace(tmp, path)  # retried: a reader may hold the old file open for a moment on Windows
     except BaseException:
