@@ -247,7 +247,10 @@ class TwitchPushListener:
                     "gap": (self.clock() - dropped) if (reconnect and dropped) else None},
                     daemon=True, name="twitch-push-subscribe").start()
         elif t == "reconnect":
-            self._reconnect_url = m.get("reconnect_url")
+            url = m.get("reconnect_url")
+            self._reconnect_url = te.safe_reconnect_url(url)
+            if url and not self._reconnect_url:
+                self.logger.warning("Twitch push: ignored reconnect URL not on twitch.tv; reconnecting normally")
             try:
                 ws.close()
             except Exception:

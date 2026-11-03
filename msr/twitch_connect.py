@@ -84,8 +84,9 @@ class ConnectJob:
         try:
             d = self.api.device_start(self.client_id)
             expires = int(d.get("expires_in") or 1800)
-            self.events.put(("code", d.get("verification_uri") or "https://www.twitch.tv/activate",
-                             d.get("user_code") or "", expires))
+            code = d.get("user_code") or ""
+            self.events.put(("code", te.safe_verification_uri(d.get("verification_uri"), code),
+                             code, expires))
             deadline = self.clock() + expires
             interval = max(1, int(d.get("interval") or 5))
             while self.clock() < deadline:

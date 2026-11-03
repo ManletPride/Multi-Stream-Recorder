@@ -19,8 +19,11 @@ Documented flow (dev.twitch.tv/docs/eventsub, /docs/authentication):
 * The server closes the socket if the client sends anything but pongs.
 """
 
+import base64
 import json
+import logging
 import os
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -77,12 +80,74 @@ def token_path(data_dir):
     return os.path.join(data_dir or ".", TOKEN_FILE)
 
 
-def load_token(data_dir):
+# DPAPI (current user) on Windows; plaintext elsewhere. File: {"v": 2, "dpapi": "<base64>"}.
+
+def _dpapi(data, protect):
+    import ctypes
+    from ctypes import wintypes
+
+    class BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+    crypt32, kernel32 = ctypes.windll.crypt32, ctypes.windll.kernel32
+    buf = ctypes.create_string_buffer(data, len(data))
+    src = BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    dst = BLOB()
+    fn = crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData
+    # 0x1 = CRYPTPROTECT_UI_FORBIDDEN (never prompt)
+    if not fn(ctypes.byref(src), None, None, None, None, 0x1, ctypes.byref(dst)):
+        raise OSError("DPAPI call failed")
     try:
-        with open(token_path(data_dir), "r", encoding="utf-8") as f:
-            tok = json.load(f)
+        return ctypes.string_at(dst.pbData, dst.cbData)
+    finally:
+        kernel32.LocalFree(dst.pbData)
+
+
+def dpapi_available():
+    return sys.platform == "win32"
+
+
+def _encode(tok):
+    raw = json.dumps(tok).encode("utf-8")
+    if not dpapi_available():
+        return json.dumps(tok, indent=2).encode("utf-8")
+    return json.dumps({"v": 2, "dpapi": base64.b64encode(_dpapi(raw, True)).decode("ascii")}).encode("utf-8")
+
+
+_noted = set()
+
+
+def _note_once(msg):
+    if msg not in _noted:
+        _noted.add(msg)
+        logging.getLogger().info(msg)
+
+
+def load_token(data_dir):
+    path = token_path(data_dir)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            doc = json.load(f)
     except (OSError, ValueError):
         return None
+    if not isinstance(doc, dict):
+        return None
+    if "dpapi" in doc:
+        if not dpapi_available():
+            _note_once("Twitch: saved sign-in is encrypted for Windows - click Connect Twitch")
+            return None
+        try:
+            tok = json.loads(_dpapi(base64.b64decode(doc["dpapi"]), False).decode("utf-8"))
+        except Exception:
+            _note_once("Twitch: saved sign-in can't be read by this Windows user/PC - click Connect Twitch")
+            return None
+    else:
+        tok = doc
+        if tok.get("access_token") and dpapi_available():
+            try:
+                save_token(data_dir, tok)  # migrate old plaintext file
+                _note_once("Twitch: saved sign-in is now encrypted (Windows DPAPI)")
+            except Exception:
+                pass
     if not isinstance(tok, dict) or not tok.get("access_token"):
         return None
     return tok
@@ -90,7 +155,9 @@ def load_token(data_dir):
 
 def save_token(data_dir, tok):
     from msr import history
-    history.atomic_write(token_path(data_dir), json.dumps(tok, indent=2).encode("utf-8"))
+    if not dpapi_available():
+        _note_once("Twitch: no DPAPI on this system - sign-in saved unencrypted")
+    history.atomic_write(token_path(data_dir), _encode(tok))
 
 
 def clear_token(data_dir):
@@ -114,6 +181,30 @@ def device_start(client_id, request=http_request):
     """-> {device_code, user_code, verification_uri, expires_in, interval}"""
     _, resp = request("POST", f"{OAUTH}/device", form={"client_id": client_id, "scopes": ""})
     return resp
+
+
+ACTIVATE_URL = "https://www.twitch.tv/activate"
+
+
+def safe_verification_uri(uri, user_code=""):
+    """Twitch's activate page only; anything else -> our own activate link."""
+    if isinstance(uri, str) and (uri == ACTIVATE_URL or uri.startswith(ACTIVATE_URL + "?")
+                                 or uri.startswith(ACTIVATE_URL + "/")):
+        return uri
+    code = urllib.parse.quote(str(user_code or ""), safe="")
+    return f"{ACTIVATE_URL}?device-code={code}" if code else ACTIVATE_URL
+
+
+def safe_reconnect_url(url):
+    """reconnect_url if it is wss:// on twitch.tv, else None."""
+    try:
+        u = urllib.parse.urlsplit(url) if isinstance(url, str) else None
+        host = (u.hostname or "").lower() if u else ""
+    except ValueError:
+        return None
+    if u and u.scheme == "wss" and (host == "twitch.tv" or host.endswith(".twitch.tv")):
+        return url
+    return None
 
 
 def device_poll(client_id, device_code, request=http_request, now=time.time):
@@ -271,7 +362,7 @@ def authorize_console(client_id, data_dir, request=http_request, sleep=time.slee
                       now=time.time, out=print):
     """Device flow for a console: show the code, wait for approval, save the token."""
     d = device_start(client_id, request=request)
-    out(f"Open {d.get('verification_uri')} and enter code {d.get('user_code')}")
+    out(f"Open {safe_verification_uri(d.get('verification_uri'), d.get('user_code'))} and enter code {d.get('user_code')}")
     deadline = now() + int(d.get("expires_in") or 1800)
     interval = max(1, int(d.get("interval") or 5))
     while now() < deadline:

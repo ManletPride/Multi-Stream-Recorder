@@ -8,6 +8,7 @@ never shown or logged.
 
 import logging
 import os
+import re
 import threading
 import tkinter as tk
 import webbrowser
@@ -23,6 +24,17 @@ TWITCH_TIP = ("Sign in to Twitch once so MSR gets instant go-live alerts (about 
               "No permissions requested; timed checks keep running as backup.")
 
 NOW, NEXT, RESTART = "now", "next recording", "restart"
+
+COOKIE_SYNC_WARNING = "Cookies are your browser login; keep this file out of synced or shared folders."
+_SYNCED = ("onedrive", "dropbox", "google drive", "googledrive", "my drive", "desktop", "icloud drive", "iclouddrive")
+
+
+def in_synced_folder(path):
+    """True if a folder in *path* looks like OneDrive/Dropbox/Google Drive/Desktop."""
+    if not path:
+        return False
+    parts = re.split(r"[\\/]+", os.path.abspath(str(path)).lower())[:-1]
+    return any(p == s or p.startswith(s + " ") or p.startswith(s + "-") for p in parts for s in _SYNCED)
 
 
 def row(section, key, label, kind="num", hint="", tip="", applies=NEXT, choices=(), width=8):
@@ -295,6 +307,10 @@ class OptionsPanel:
             self.groups[title] = (box, None)
         for i, spec in enumerate(rows):
             self._build_row(box, i, spec, t)
+        if title == "Folders":
+            self.cookie_warn = ttk.Label(box, text="", foreground=t["warn"])
+            self.cookie_warn.grid(row=len(rows), column=0, columnspan=3, sticky="w")
+            self._cookie_warning()
 
     def _build_row(self, box, i, spec, t):
         s, k, kind = spec["section"], spec["key"], spec["kind"]
@@ -397,6 +413,28 @@ class OptionsPanel:
         v.set(got)
         self._commit(spec["section"], spec["key"], got)
 
+    def cookies_path(self):
+        """Configured cookies file, else the auto-found one ('' if none)."""
+        cur = str(self.config.get("Paths", "cookies_file", "") or "").strip()
+        if cur:
+            return cur
+        try:
+            from msr.util import find_cookies_file
+            return find_cookies_file(self.config) or ""
+        except Exception:
+            return ""
+
+    def _cookie_warning(self):
+        lbl = getattr(self, "cookie_warn", None)
+        if lbl is None:
+            return
+        if in_synced_folder(self.cookies_path()):
+            lbl.configure(text="\u26a0 " + COOKIE_SYNC_WARNING)
+            lbl.grid()
+        else:
+            lbl.configure(text="")
+            lbl.grid_remove()
+
     def _say(self, text, error=False):
         t = _themes.current()
         self.message.configure(text=text, foreground=t["error"] if error else t["muted"])
@@ -427,6 +465,8 @@ class OptionsPanel:
             return
         if (section, key) == ("Clipping", "screenshot_format"):
             self._quality_hint()
+        if (section, key) in (("Paths", "cookies_file"), ("Paths", "streams_dir")):
+            self._cookie_warning()
         if (section, key) == ("Fishtank", "password"):
             self._password_hint()
             return
@@ -552,7 +592,7 @@ class OptionsPanel:
 
     def open_link(self):
         if self._uri:
-            self.opener(self._uri)
+            self.opener(te.safe_verification_uri(self._uri, self._code))
 
     def copy_code(self):
         if self._code:
@@ -577,7 +617,8 @@ class OptionsPanel:
     def _handle(self, ev):
         kind = ev[0]
         if kind == "code":
-            self._uri, self._code = ev[1], ev[2]
+            self._code = ev[2]
+            self._uri = te.safe_verification_uri(ev[1], self._code)
             self.code_lbl.configure(text=f"Code {self._code} \u2013 open")
             self.link.configure(text=self._uri)
             self.code_row.pack(fill=tk.X, pady=(4, 0))
