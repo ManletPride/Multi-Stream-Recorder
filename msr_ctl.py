@@ -100,6 +100,9 @@ CATALOG = {
     "library log": ("read", ["library log -n 20"]),
     "history list": ("read", ["history list channels"]),
     "history restore": ("destructive", ["history restore channels 2 --yes"]),
+    "twitch status": ("read", ["twitch status", "twitch status --online"]),
+    "twitch connect": ("write", ["twitch connect", "twitch connect --wait", "twitch connect --cancel"]),
+    "twitch disconnect": ("write", ["twitch disconnect"]),
     "call": ("depends on the command", ["call ping"]),
 }
 SAFETY_NOTES = {"deps": "deps list / check only read; deps update pip-installs (old version restored on failure)",
@@ -265,6 +268,15 @@ def build_parser():
     r.add_argument("index", type=int)
     r.add_argument("--yes", action="store_true")
 
+    p = sub.add_parser("twitch", help="Twitch sign-in (Options tab): status, connect, disconnect")
+    tsub = p.add_subparsers(dest="action", required=True)
+    tsub.add_parser("status").add_argument("--online", action="store_true", help="validate at Twitch")
+    t = tsub.add_parser("connect", help="device-code sign-in: prints the code and the twitch.tv/activate link")
+    t.add_argument("--wait", action="store_true", help="stay until approved (also resumes a started sign-in)")
+    t.add_argument("--cancel", action="store_true", help="stop a sign-in that is waiting")
+    t.add_argument("--for", dest="wait_for", type=float, default=600.0, help="seconds to wait (max 1800)")
+    tsub.add_parser("disconnect", help="revoke at Twitch and delete the saved sign-in")
+
     p = sub.add_parser("call", help="send any protocol command with JSON args")
     p.add_argument("cmd")
     p.add_argument("args", nargs="?", default="{}")
@@ -369,6 +381,14 @@ def to_request(a):
         if a.action == "list":
             return "history_list", {"file": a.file}
         return "history_restore", {"file": a.file, "index": a.index, "confirm": a.yes}
+    if c == "twitch":
+        if a.action == "status":
+            return "twitch_status", {"online": True} if a.online else {}
+        if a.action == "connect":
+            if a.cancel:
+                return "twitch_connect", {"cancel": True}
+            return "twitch_connect", {"wait": True, "timeout": a.wait_for} if a.wait else {}
+        return "twitch_disconnect", {}
     if c == "call":
         return a.cmd, json.loads(a.args)
     raise SystemExit(f"unknown command {c}")
@@ -463,12 +483,23 @@ def run_offline(data_dir, cmd, args):
         if cmd in LIVE_ONLY and not (cmd == "clip" and args.get("file")):
             return {"ok": False, "code": "not_running", "error": "Multi-Stream Recorder is not running."}, \
                 EXIT_NOT_RUNNING
-        reply = control.Controller(control.OfflineApp(config)).handle(cmd, args)
+        ctl = control.Controller(control.OfflineApp(config))
+        if cmd == "twitch_connect" and args.get("wait"):  # this process runs the sign-in
+            _show_twitch_code(ctl.handle(cmd, {"local": True}))
+        reply = ctl.handle(cmd, args)
         if cmd == "status" and reply.get("ok"):
             reply["result"]["app"]["running"] = False
         return reply, None
     finally:
         os.chdir(cwd)
+
+
+def _show_twitch_code(reply):
+    """Before a --wait: show the code to approve (stderr, so --json stdout stays one reply)."""
+    res = reply.get("result") or {}
+    if reply.get("ok") and res.get("user_code"):
+        print(f"Open {res['verification_url']} and enter code {res['user_code']} (waiting...)",
+              file=sys.stderr, flush=True)
 
 
 def _channel_lines(res):
@@ -532,6 +563,15 @@ def human(cmd, reply):
     if cmd == "recordings":
         return "\n".join(f"{r['finished_at']}  {r['channel']:<28} {r['size'] / 1e6:>9.1f} MB  {r['path']}"
                          for r in res["recordings"]) or "No finished recordings in that range."
+    if cmd == "twitch_connect" and res.get("user_code") and not res.get("connected"):
+        return (f"Open {res['verification_url']} and enter code {res['user_code']}.\n"
+                "Then run: msr_ctl.py twitch connect --wait")
+    if cmd == "twitch_status":
+        text = {"connected": f"Twitch: connected as {res.get('login') or '?'}", "expired": "Twitch: expired, connect again",
+                "none": "Twitch: not connected"}.get(res.get("state"), str(res.get("state")))
+        if res.get("connecting"):
+            text += f"\nWaiting for approval: {res['verification_url']} code {res['user_code']}"
+        return text + f"\ninstant alerts: {'on' if res.get('push_enabled') else 'off'}"
     if cmd == "wait":
         return f"#{res['seq']} {res['at']} {res['event']} {res['channel']}" + (
             f" {res['path']}" if res.get("path") else "") + (f" {res['error']}" if res.get("error") else "")
@@ -558,9 +598,11 @@ def main(argv=None):
     exit_code = None
     try:
         timeout = a.timeout
-        if cmd == "wait":
+        if cmd == "wait" or (cmd == "twitch_connect" and args.get("wait")):
             timeout = max(timeout, float(args.get("timeout", 300)) + 30)  # outlives the server's wait
             _warn_if_nothing_to_finish(data_dir, args)
+        if cmd == "twitch_connect" and args.get("wait"):
+            _show_twitch_code(control.call(data_dir, "twitch_connect", {}, timeout=60))
         reply = control.call(data_dir, cmd, args, timeout=timeout)
     except control.NotRunning:
         reply, exit_code = run_offline(data_dir, cmd, args)

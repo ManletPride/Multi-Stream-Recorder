@@ -3458,6 +3458,13 @@ def main_gui(config):
         _populate_channel_tree()
         save_channels()
 
+    def _control_twitch_changed():
+        try:
+            options_panel.refresh_status()
+        except Exception:
+            pass
+        _options_twitch_changed()
+
     def _control_reload():
         _reload_channels_from_disk()
         return len(channels)
@@ -3472,6 +3479,7 @@ def main_gui(config):
         "schedule_quit": _control_schedule_quit,
         "reload": _control_reload,
         "reflect": _reflect_setting,
+        "twitch_changed": _control_twitch_changed,
         "update_tag": lambda: _update_tag[0],
     }))
 

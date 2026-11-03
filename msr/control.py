@@ -398,6 +398,13 @@ class AppAdapter:
     def watch_changed(self) -> None:
         """The roster changed: tell a running recorder which (disabled) channels to watch."""
 
+    def twitch_changed(self) -> None:
+        """Twitch sign-in changed: a running session reconnects its push listener."""
+        rec = self.recorder
+        tw = getattr(rec, "twitch_push", None) if is_running_session(rec) else None
+        if tw is not None:
+            threading.Thread(target=tw.restart, daemon=True, name="twitch-push-restart").start()
+
     _lanes_lock = threading.Lock()
 
     def lane(self, label):
@@ -811,6 +818,10 @@ class Controller:
         self._media_jobs = set()
         self._jobs_lock = threading.Lock()   # each request runs on its own server thread
         self._retry = None
+        self._twitch = {"job": None, "state": "idle"}   # the device-code job control started
+        self._twitch_cv = threading.Condition()
+        self.twitch_api = None      # tests inject a fake msr.twitch_eventsub
+        self.twitch_job = None      # tests inject a ConnectJob factory
         self.on_change = None  # called after anything that changes state (StatusWriter.poke)
 
     # -------------------------------------------------- plumbing
@@ -1255,6 +1266,15 @@ class Controller:
             raise ControlError("No such setting.", "not_found")
         return {"settings": out, "file": os.path.basename(self.app.config.config_file)}
 
+    def _save_setting(self, section, key, value):
+        config = self.app.config
+        if not config.config.has_section(section):
+            config.config.add_section(section)
+        config.config.set(section, key, value)
+        if not config.save():
+            raise ControlError("config.ini could not be written (see the log).", "write_failed")
+        self.app.settings_changed(section, key)
+
     def cmd_config_set(self, args):
         section, key = str(args.get("section") or ""), str(args.get("key") or "").lower()
         if not section or not key or "value" not in args:
@@ -1285,6 +1305,173 @@ class Controller:
     def cmd_config_reload(self, args):
         self.app.config.reload()
         return {"reloaded": True, "note": "Running recordings keep their settings until they restart."}
+
+    # -------------------------------------------------- Twitch sign-in (Options tab parity)
+    def _tw(self):
+        from msr import twitch_eventsub as te
+        return self.twitch_api or te
+
+    def _twitch_public(self):
+        t = self._twitch
+        out = {"connecting": t["state"] == "waiting"}
+        if t["state"] == "waiting":
+            out.update(user_code=t.get("user_code"), verification_url=t.get("verification_url"),
+                       expires_at=t.get("expires_at"))
+        if t.get("result"):
+            out["last_result"] = t["result"]
+        return out
+
+    def cmd_twitch_status(self, args):
+        from msr import twitch_connect as tc
+        cid = tc.client_id_for(self.app.config, self._tw())
+        if _truthy(args.get("online")):
+            state, login = tc.check_online(self.app.data_dir, cid, self._tw())
+        else:
+            state, login = tc.status_of(self.app.data_dir, cid, self._tw())
+        out = {"state": state, "login": login,
+               "push_enabled": self.app.config.getboolean("Twitch", "push_enabled", fallback=False)}
+        with self._twitch_cv:
+            out.update(self._twitch_public())
+        return out
+
+    def _twitch_follow(self, job):
+        """Background: turn the job's events into self._twitch (and wake waiters)."""
+        while True:
+            try:
+                ev = job.events.get(timeout=0.5)
+            except Exception:
+                if not job.running() and job.events.empty():
+                    ev = ("error", "the sign-in job stopped")
+                else:
+                    continue
+            kind = ev[0]
+            if kind == "connected":  # settings first, so a waiter sees them done
+                logging.info(f"Twitch connected as {ev[1]} (control)")
+                try:
+                    if not self.app.config.getboolean("Twitch", "push_enabled", fallback=False):
+                        self._save_setting("Twitch", "push_enabled", "true")
+                except Exception as e:
+                    logging.warning(f"Twitch: could not turn on instant alerts: {e}")
+                self._twitch_changed()
+            with self._twitch_cv:
+                if self._twitch.get("job") is not job:
+                    return
+                if kind == "code":
+                    self._twitch.update(state="waiting", user_code=ev[2], verification_url=ev[1],
+                                        expires_at=round(time.time() + int(ev[3])))
+                else:
+                    result = {"connected": "connected", "expired": "expired", "cancelled": "cancelled"}.get(kind, "error")
+                    self._twitch.update(state="idle", job=None, result=result,
+                                        login=ev[1] if kind == "connected" else None,
+                                        error=str(ev[-1]) if result == "error" else None)
+                self._twitch_cv.notify_all()
+            if kind != "code":
+                if self.on_change is not None:
+                    try:
+                        self.on_change()
+                    except Exception:
+                        pass
+                return
+
+    def _twitch_changed(self):
+        try:
+            self.app.twitch_changed()
+        except Exception as e:
+            logging.debug(f"control: twitch changed: {e}")
+
+    def _twitch_wait(self, timeout):
+        """Wait until the job ends; the finished state as a reply."""
+        end = time.monotonic() + timeout
+        with self._twitch_cv:
+            while self._twitch["state"] == "waiting" and time.monotonic() < end:
+                self._twitch_cv.wait(min(1.0, max(0.0, end - time.monotonic())))
+            t = dict(self._twitch)
+        if t["state"] == "waiting":
+            raise ControlError(f"Not approved within {timeout:g}s; still waiting (code {t.get('user_code')}). "
+                               "Run twitch_connect wait=true again or twitch_status.", "timeout")
+        if t.get("result") == "connected":
+            return {"connected": True, "login": t.get("login")}
+        if t.get("result") == "error":
+            raise ControlError(f"Twitch sign-in failed: {t.get('error')}", "failed")
+        raise ControlError(f"Twitch sign-in {t.get('result')}; run twitch_connect again.", t.get("result") or "failed")
+
+    def cmd_twitch_connect(self, args):
+        """Start the device-code sign-in; the reply has user_code + verification_url to approve.
+        wait=true (or a later twitch_connect wait=true) blocks until approved. cancel=true stops it."""
+        from msr import twitch_connect as tc
+        timeout = max(1.0, min(float(args.get("timeout", 600) or 600), 1800.0))
+        if _truthy(args.get("cancel")):
+            with self._twitch_cv:
+                job = self._twitch.get("job")
+            if job is None:
+                raise ControlError("No Twitch sign-in is running.", "nothing")
+            job.cancel()
+            return {"cancelling": True}
+        if self.app.mode == "offline" and not (_truthy(args.get("wait")) or _truthy(args.get("local"))):
+            raise ControlError("MSR is not running: use wait=true (CLI: --wait) so this command stays "
+                               "until you approve, or start MSR first.", "not_running")
+        with self._twitch_cv:
+            running = self._twitch.get("job") is not None
+            if not running:
+                factory = self.twitch_job or tc.ConnectJob
+                job = factory(tc.client_id_for(self.app.config, self._tw()), self.app.data_dir, api=self._tw())
+                self._twitch = {"job": job, "state": "starting"}
+        if not running:
+            job.start()
+            threading.Thread(target=self._twitch_follow, args=(job,), daemon=True,
+                             name="control-twitch-connect").start()
+            logging.info("Twitch sign-in started (control)")
+        end = time.monotonic() + 20
+        with self._twitch_cv:  # until Twitch hands out the code (or the job fails)
+            while self._twitch["state"] == "starting" and time.monotonic() < end:
+                self._twitch_cv.wait(0.5)
+            t = dict(self._twitch)
+        if t["state"] == "starting":
+            raise ControlError("Twitch did not answer in time; try again.", "timeout")
+        if t["state"] != "waiting":
+            return self._twitch_wait(0)
+        if _truthy(args.get("wait")):
+            out = self._twitch_wait(timeout)
+            return dict(out, user_code=t.get("user_code"), verification_url=t.get("verification_url"))
+        from msr import twitch_eventsub as te
+        return {"user_code": t.get("user_code"),
+                "verification_url": te.safe_verification_uri(t.get("verification_url"), t.get("user_code") or ""),
+                "expires_at": t.get("expires_at"), "already": running,
+                "next": "Open verification_url, approve with user_code, then run twitch_connect wait=true "
+                        "or check twitch_status."}
+
+    def cmd_twitch_disconnect(self, args):
+        """Revoke the token at Twitch on a background thread and delete it locally (even if
+        revoking fails), like Options > Disconnect."""
+        from msr import twitch_connect as tc
+        with self._twitch_cv:
+            job = self._twitch.get("job")
+        if job is not None:
+            job.cancel()
+        result = {}
+        done = threading.Event()
+
+        def work():
+            try:
+                result["revoked"] = tc.disconnect(self.app.data_dir, self._tw())
+            except Exception:
+                result["revoked"] = False
+            finally:
+                done.set()
+            if not result["revoked"]:
+                logging.warning("Twitch: could not revoke the token online; deleted it locally. "
+                                "Use Manage on Twitch to remove MSR's access.")
+            self._twitch_changed()
+
+        threading.Thread(target=work, daemon=True, name="twitch-disconnect").start()
+        if not done.wait(float(args.get("timeout", 20) or 20)):
+            return {"disconnecting": True, "note": "Still revoking at Twitch in the background."}
+        logging.info("Twitch disconnected (control)")
+        out = {"disconnected": True, "revoked": result["revoked"]}
+        if not result["revoked"]:
+            out["note"] = ("Twitch was unreachable: the token was deleted here; remove MSR's access at "
+                           "https://www.twitch.tv/settings/connections.")
+        return out
 
     # -------------------------------------------------- logs
     def cmd_logs(self, args):

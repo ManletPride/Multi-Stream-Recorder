@@ -12,6 +12,15 @@ import time
 from msr import twitch_eventsub as te
 
 
+def client_id_for(config, api=te):
+    """The configured app id, or MSR's public one (shared by Options and control)."""
+    try:
+        cid = (config.get("Twitch", "client_id", fallback="") or "").strip()
+    except Exception:
+        cid = ""
+    return cid or api.DEFAULT_CLIENT_ID
+
+
 def status_of(data_dir, client_id, api=te):
     """('none'|'connected'|'expired', login) from the saved token, no network."""
     tok = api.load_token(data_dir)

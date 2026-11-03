@@ -532,7 +532,7 @@ class OptionsPanel:
     # -- Twitch --
 
     def client_id(self):
-        return (self.config.get("Twitch", "client_id", "") or "").strip() or te.DEFAULT_CLIENT_ID
+        return tc.client_id_for(self.config)
 
     def _toggle_push(self):
         self._commit("Twitch", "push_enabled", "true" if self.push_var.get() else "false")
