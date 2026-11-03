@@ -19,7 +19,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from msr import clip_core as core
-from msr import dialogs, themes
+from msr import dialogs, themes, timeline_view, waveform
 from msr.nowindow import no_window_kwargs
 
 POLL_MS = 40
@@ -28,6 +28,9 @@ QUEUE_SECONDS = 0.2       # decoded frames kept ahead (6 at 30 fps, 12 at 60)
 MAX_FPS = 60              # source rate up to this
 LIMITED_FPS = 30          # "Limit preview to 30 fps"
 LIMIT_KEY = "clip_editor_limit_30fps"
+WAVE_KEY = "clip_editor_waveform"
+WAVE_REFRESH_S = 30.0   # re-read the new end of a live file this often
+TIMELINE_H, WAVE_H = 62, 32
 CACHE_FRAMES = 16         # exact preview frames kept (about 11 MB at 640x360)
 LENGTH_EVERY_S = 2.0
 FPS = 30
@@ -36,7 +39,8 @@ NUDGE = 0.5
 REPLAY = 2.0
 MIN_SIZE = (760, 560)
 HINT = ("I / O mark, Space plays, \u2190/\u2192 step (Shift: 5 s), L jumps to live, "
-        "Ctrl+S or Enter saves the clip.")
+        "Ctrl+S or Enter saves the clip.  Timeline: Alt+wheel or +/- zooms, 0 or double-click resets, "
+        "Ctrl+wheel or Ctrl+\u2190/\u2192 steps (scales with zoom), wheel / Shift+wheel pans.")
 
 
 def _audio_player(src, ffmpeg):
@@ -133,7 +137,7 @@ class ClipEditor:
     def __init__(self, parent: tk.Misc, src: str, *, ffmpeg: str = "ffmpeg", clips_base: str,
                  title_name: str = "", live: bool = False, follow=None, state_file: str | None = None,
                  logger=None, audio_factory=_audio_player, frame_grabber=core.grab_frame,
-                 length_reader=None, opener=None, show=True):
+                 length_reader=None, opener=None, show=True, wave_runner=None, wave_cache_dir=None):
         self.src, self.ffmpeg, self.clips_base = src, ffmpeg, clips_base
         self.live, self.follow, self.logger, self.opener = live, follow, logger, opener
         self.ffprobe = core.ffprobe_for(ffmpeg)
@@ -157,6 +161,14 @@ class ClipEditor:
         self._closed = False
         self._job = None
         self.state_file = state_file
+        self.view = timeline_view.View()
+        self.wave: waveform.Wave | None = None
+        self._wave_src = None
+        self._wave_job = None
+        self._wave_seen = -1
+        self._wave_at = 0.0
+        self._wave_runner = wave_runner
+        self._wave_dir = wave_cache_dir or waveform.default_cache_dir()
         self._cache: dict = {}        # (src, t to 0.01 s) -> exact PPM, most recent last
         self._exact_gen = 0           # newest scrub position whose exact frame is on screen
         self._vinfo = None          # (w, h, fps) of the source, read once in the background
@@ -197,11 +209,13 @@ class ClipEditor:
         self.preview = ttk.Label(body, anchor="center", text="Loading preview\u2026")
         self.preview.grid(row=1, column=0, sticky="nsew", pady=(6, 6))
 
-        self.timeline = tk.Canvas(body, height=46, highlightthickness=0, bd=0)
+        self.timeline = tk.Canvas(body, height=TIMELINE_H, highlightthickness=0, bd=0)
         self.timeline.grid(row=2, column=0, sticky="ew")
         self.timeline.bind("<Configure>", lambda _e: self._draw())
         self.timeline.bind("<Button-1>", self._scrub)
         self.timeline.bind("<B1-Motion>", self._scrub)
+        self.timeline.bind("<Double-Button-1>", lambda _e: self.zoom_reset())
+        self.timeline.bind("<MouseWheel>", self._wheel)
 
         times = ttk.Frame(body)
         times.grid(row=3, column=0, sticky="ew", pady=(4, 0))
@@ -244,6 +258,11 @@ class ClipEditor:
         self.limit_fps = tk.BooleanVar(value=self._load_limit())
         ttk.Checkbutton(row2, text="Limit preview to 30 fps", variable=self.limit_fps,
                         command=self._limit_changed).pack(side="left")
+        self.show_wave = tk.BooleanVar(value=self._load_wave_pref())
+        ttk.Checkbutton(row2, text="Waveform", variable=self.show_wave,
+                        command=self._wave_changed).pack(side="left", padx=(10, 0))
+        if self.show_wave.get():
+            self.timeline.configure(height=TIMELINE_H + WAVE_H)
 
         # Own row, Save first: pack gives space in packing order, so it can never be squeezed out
         # (it was last on the crowded row above and got zero width at the default size).
@@ -277,6 +296,16 @@ class ClipEditor:
         w.bind("<Control-s>", lambda e: self.save())
         w.bind("<Control-S>", lambda e: self.save())
         w.bind("<Return>", lambda e: self.save())
+        keys = ((("<Alt-equal>", "<Alt-plus>", "<plus>", "<equal>", "<KP_Add>"), lambda: self.zoom_by(timeline_view.ZOOM_STEP)),
+                (("<Alt-minus>", "<minus>", "<KP_Subtract>"), lambda: self.zoom_by(1 / timeline_view.ZOOM_STEP)),
+                (("<Alt-Key-0>", "<Key-0>"), self.zoom_reset),
+                (("<Control-Left>",), lambda: self.step(-1)),
+                (("<Control-Right>",), lambda: self.step(1)),
+                (("<Control-Shift-Left>",), lambda: self.step(-5)),
+                (("<Control-Shift-Right>",), lambda: self.step(5)))
+        for seqs, fn in keys:
+            for seq in seqs:
+                w.bind(seq, lambda e, f=fn: None if self._typing() else (f(), "break")[1])
         # Space is play/pause only: buttons and checks must not take it
         tag = "ClipEditorKeys"
         self.win.bind_class(tag, "<space>", lambda e: (self.toggle_play(), "break")[1])
@@ -293,22 +322,136 @@ class ClipEditor:
         t = themes.current()
         c.configure(bg=t["bg"])
         c.delete("all")
-        w = max(10, c.winfo_width())
+        w = max(20, c.winfo_width())
         L = self.marks.length or 0.0
-        x = (lambda s: 6 + (w - 12) * (s / L if L > 0 else 0))  # noqa: E731
+        ww = w - 12
+        view = self.view
+        x = (lambda s: 6 + view.x(s, ww, L) if L > 0 else 6)  # noqa: E731
+        clip = (lambda v: min(max(v, 6), w - 6))  # noqa: E731
         c.create_rectangle(6, 14, w - 6, 32, fill=t["chart_track"], outline="")
         if self.marks.cut_in is not None or self.marks.cut_out is not None:
             a = self.marks.cut_in if self.marks.cut_in is not None else 0.0
             b = self.marks.cut_out if self.marks.cut_out is not None else L
-            c.create_rectangle(x(a), 14, x(b), 32, fill=t["chart_accent"], outline="")
+            if clip(x(a)) < clip(x(b)):
+                c.create_rectangle(clip(x(a)), 14, clip(x(b)), 32, fill=t["chart_accent"], outline="")
         for val, label in ((self.marks.cut_in, "I"), (self.marks.cut_out, "O")):
-            if val is not None:
-                c.create_line(x(val), 8, x(val), 38, fill=t["fg"], width=2)
+            if val is not None and 6 <= x(val) <= w - 6:
+                c.create_line(x(val), 8, x(val), 38, fill=t["fg"], width=2, tags=("mark_" + label,))
                 c.create_text(x(val), 3, text=label, fill=t["fg"], anchor="n", font=("Segoe UI", 7))
-        c.create_line(x(self.pos), 6, x(self.pos), 40, fill=t["select_bg"], width=3)
-        c.create_text(w - 6, 44, text=("LIVE " if self.live and not self._gone else "") + core.fmt_time(L),
+        if 6 <= x(self.pos) <= w - 6:
+            c.create_line(x(self.pos), 6, x(self.pos), 40, fill=t["select_bg"], width=3, tags=("playhead",))
+        a, b = view.span(L)
+        if view.zoomed() and L > 0:   # where the window sits in the whole file
+            c.create_rectangle(6, 43, w - 6, 46, fill=t["chart_track"], outline="")
+            c.create_rectangle(6 + ww * a / L, 42, 6 + max(ww * b / L, ww * a / L + 3), 47,
+                               fill=t["select_bg"], outline="", tags=("window",))
+            info = f"\u00d7{view.factor(L):.0f}  {core.fmt_time(a)} \u2013 {core.fmt_time(b)}   (0 or double-click: whole file)"
+        else:
+            info = "Alt+wheel zooms"
+        c.create_text(6, 60, text=info, fill=t["muted"], anchor="sw", font=("Segoe UI", 7), tags=("zoominfo",))
+        c.create_text(w - 6, 60, text=("LIVE " if self.live and not self._gone else "") + core.fmt_time(L),
                       fill=t["muted"], anchor="se", font=("Segoe UI", 7))
+        if self.show_wave.get():
+            self._draw_wave(c, t, a, b, ww)
         self._labels()
+
+    def _draw_wave(self, c, t, a, b, ww) -> None:
+        top, bottom = TIMELINE_H + 2, TIMELINE_H + WAVE_H - 2
+        c.create_rectangle(6, top, 6 + ww, bottom, fill=t["chart_track"], outline="")
+        wave = self.wave
+        self._wave_seen = wave.version if wave is not None else -1
+        cols = wave.window_columns(a, b, ww) if wave is not None else []
+        if not any(cols):
+            c.create_text(8 + 0, (top + bottom) / 2, anchor="w", fill=t["muted"], font=("Segoe UI", 7),
+                          text="reading audio\u2026" if self._wave_job is not None and self._wave_job.running()
+                          else "no audio", tags=("wave_note",))
+            return
+        mid, half = (top + bottom) / 2, (bottom - top) / 2
+        pts = [(6 + i, mid - h * half) for i, h in enumerate(cols)]
+        pts += [(6 + i, mid + h * half) for i, h in reversed(list(enumerate(cols)))]
+        c.create_polygon(*[v for p in pts for v in p], fill=t["chart_accent"], outline="", tags=("wave",))
+
+    # ------------------------------------------------------------- zoom / scroll
+    def _typing(self) -> bool:
+        try:
+            f = self.win.focus_get()
+        except (tk.TclError, KeyError):
+            return False
+        return f is not None and f.winfo_class() in ("Entry", "TEntry", "Spinbox", "TSpinbox", "Text", "TCombobox")
+
+    def zoom_by(self, factor: float, at: float | None = None) -> None:
+        L = self.marks.length or 0.0
+        if at is None:   # keys zoom around the playhead
+            at = self.pos
+        self.view.zoom(factor, at, L)
+        self._draw()
+
+    def zoom_reset(self) -> None:
+        self.view.reset()
+        self._draw()
+
+    def step(self, mult: float = 1.0) -> None:
+        a, b = self.view.span(self.marks.length or 0.0)
+        self.seek(self.pos + mult * timeline_view.seek_step(b - a))
+
+    def _wheel(self, event):
+        kind, n = timeline_view.wheel_action(event.state, event.delta)
+        L = self.marks.length or 0.0
+        if kind == "zoom":
+            at = self.view.t(event.x - 6, max(1, self.timeline.winfo_width() - 12), L)
+            self.view.zoom(timeline_view.WHEEL_ZOOM ** n, at, L)
+            self._draw()
+        elif kind == "seek":   # wheel up = back
+            mult = 5 if timeline_view.is_shift(event.state) else 1
+            self.step(-n * mult)
+        elif self.view.zoomed():
+            a, b = self.view.span(L)
+            self.view.pan(-n * (b - a) * timeline_view.PAN_FRACTION, L)
+            self._draw()
+        return "break"
+
+    # ------------------------------------------------------------- waveform
+    def _load_wave_pref(self) -> bool:
+        if not self.state_file:
+            return False
+        from msr import winstate
+        return bool(winstate.load(self.state_file).get(WAVE_KEY, False))
+
+    def _wave_changed(self) -> None:
+        on = bool(self.show_wave.get())
+        if self.state_file:
+            from msr import winstate
+            winstate.merge(self.state_file, {WAVE_KEY: on})
+        if not on:
+            self._wave_stop()
+        self.timeline.configure(height=TIMELINE_H + (WAVE_H if on else 0))
+        self._wave_tick()
+        self._draw()
+
+    def _wave_stop(self) -> None:
+        if self._wave_job is not None:
+            self._wave_job.cancel()
+        self._wave_job = None
+
+    def _wave_tick(self) -> None:
+        """Start / resume reading the waveform in the background; never blocks Tk."""
+        if not self.show_wave.get() or self._gone:
+            return
+        if self._wave_src != self.src:
+            self._wave_stop()
+            self._wave_src = self.src
+            self.wave = waveform.load_cache(self.src, self._wave_dir) or waveform.Wave()
+            self._wave_at = 0.0
+        busy = self._wave_job is not None and self._wave_job.running()
+        if busy:
+            return
+        L = self.marks.length or 0.0
+        now = time.monotonic()
+        due = self._wave_at == 0.0 or (self.live and now - self._wave_at >= WAVE_REFRESH_S)
+        if due and (L <= 0 or self.wave.seconds() < L - 1.0):
+            self._wave_at = now
+            self._wave_job = waveform.WaveJob(self.src, self.ffmpeg, self.wave, self._wave_dir,
+                                              run_lines=self._wave_runner).start()
 
     def _labels(self) -> None:
         m = self.marks
@@ -332,12 +475,13 @@ class ClipEditor:
             self._start_playback(self.pos, self._stop_at)
         elif preview:
             self._request_frame()
+        self.view.follow(self.pos, self.marks.length or 0.0)
         self._draw()
 
     def _scrub(self, event) -> None:
         w = max(10, self.timeline.winfo_width())
         L = self.marks.length or 0.0
-        self.seek(L * min(1.0, max(0.0, (event.x - 6) / (w - 12))))
+        self.seek(self.view.t(event.x - 6, w - 12, L))
 
     def mark_in(self) -> None:
         self.marks.set_in(self.pos)
@@ -430,6 +574,7 @@ class ClipEditor:
         if (self._stop_at is not None and p >= self._stop_at) or ended:
             self._stop_playback()
             self._request_frame()
+        self.view.follow(self.pos, self.marks.length or 0.0)
         self._draw()
 
     # ------------------------------------------------------------- settings
@@ -644,6 +789,9 @@ class ClipEditor:
             if self.playing:
                 self._tick_playback()
             self._refresh_length()
+            self._wave_tick()
+            if self.wave is not None and self.wave.version != self._wave_seen and self.show_wave.get() and not self.playing:
+                self._draw()
         except Exception:   # one bad item must not stop the loop (and freeze the window)
             if self.logger is not None:
                 self.logger.exception("Clip Editor: update failed")
@@ -653,6 +801,7 @@ class ClipEditor:
 
     def close(self) -> None:
         self._closed = True
+        self._wave_stop()
         self._stop_playback()
         if self._job is not None:
             try:
