@@ -1670,7 +1670,7 @@ def main_gui(config):
         return (config.get('Clipping', 'clips_dir', fallback='').strip()
                 or os.path.join(config.get('Paths', 'streams_dir'), 'Clips'))
 
-    def _open_clip_editor(path=None, ch_name=None, live=False):
+    def _open_clip_editor(path=None, ch_name=None, live=False, start_at=None, end_at=None):
         """The Clip Editor on a recording in progress (live) or a finished file."""
         from msr import clip_editor as _clip_editor
         rec = recorder
@@ -1682,7 +1682,7 @@ def main_gui(config):
                 root, path, ffmpeg=config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg') or 'ffmpeg',
                 clips_base=_clips_base(), title_name=_get_display_name(ch_name) if ch_name else "",
                 live=live, follow=follow if live else None, state_file=state_file, logger=logging,
-                opener=open_local_path)
+                opener=open_local_path, start_at=start_at, end_at=end_at)
         except Exception as e:
             logging.error(f"Clip Editor: could not open: {e}")
             _dialogs.show_error(root, "Clip Editor", f"Could not open the Clip Editor: {e}")
@@ -2029,7 +2029,7 @@ def main_gui(config):
             manifest_path=os.path.join(library_data_dir, "library_moves.json"),
             get_busy=_library_busy, get_purge=_library_purge_settings,
             revealer=reveal_in_file_browser, opener=open_local_path, logger=logging.getLogger("msr.library"),
-            clip_editor=lambda p: _open_clip_editor(p)),
+            clip_editor=lambda p, start=None, end=None: _open_clip_editor(p, start_at=start, end_at=end)),
         get_roots=lambda: _library.roots_from_config(config),
         get_roster=lambda: [c["name"] for c in channels],
         cache_path=os.path.join(os.path.dirname(os.path.abspath(config.config_file)), "library_cache.json"),

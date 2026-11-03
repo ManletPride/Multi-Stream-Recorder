@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from tkinter import ttk
 
+from msr import clip_core as core
 from msr import library as lib
 from msr import library_browser as lb
 from msr import library_window as lw
@@ -32,6 +33,7 @@ def build(streams: Path):
     put(streams / "Processed/kick/alice/alice_20260301_100000.mp4.part", 50)  # partial: hidden
     put(streams / "Recorded/kick/alice/alice_20260302_100000.ts", 100)        # raw, still waiting
     put(streams / "Processed/twitch/bob/bob_20260301_000000.mp4", 20, {"stream_title": "bob plays"})
+    put(streams / "Clips/kick/alice/notes.txt", 1)  # so the scan knows alice's clips folder
 
 
 class PureTests(unittest.TestCase):
@@ -109,7 +111,7 @@ class TabTests(unittest.TestCase):
         self.panel = lw.LibraryPanel(
             holder, get_roots=lambda: lib.Roots(str(self.streams)), cache_path=str(Path(self.tmp.name) / "c.json"),
             opener=lambda p: self.calls.append(("play", p)), revealer=lambda p: self.calls.append(("reveal", p)),
-            clip_editor=lambda p: self.calls.append(("clip", p)))
+            clip_editor=lambda p, start=None, end=None: self.calls.append(("clip", p) if start is None else ("clip", p, start, end)))
         self.panel.frame.pack(fill="both", expand=True)
         self.addCleanup(self.panel.shutdown)
         self.panel.activate()
@@ -170,6 +172,142 @@ class TabTests(unittest.TestCase):
         self.tab.channel_var.set("zzz")
         self.tab.jump()
         self.assertIn("No channel matches", self.tab.count.cget("text"))
+
+
+
+def clip_for(streams: Path, rec_name: str, t_in: float, t_out: float, *, sidecar=True, folder="Clips/kick/alice"):
+    """A clip as the Clip Editor saves it (name pattern, optionally with its link sidecar)."""
+    src = streams / "Processed/kick/alice" / rec_name
+    name = core.clip_name(str(src), t_in, t_out)
+    path = put(streams / folder / name, 30)
+    if sidecar:
+        res = core.CutResult(str(path), t_in, t_out, t_in, t_out, t_out - t_in, False)
+        core.write_clip_meta(res, str(src))
+    return path
+
+
+class ClipLinkTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.streams = Path(self.tmp.name) / "streams"
+        build(self.streams)
+
+    def test_sidecar_round_trip(self):
+        clip = clip_for(self.streams, "alice_20260101_120000.mp4", 61.5, 91.25)
+        link = core.read_clip_link(str(clip))
+        self.assertEqual((link["source_name"], link["in"], link["out"], link["guessed"]),
+                         ("alice_20260101_120000.mp4", 61.5, 91.25, False))
+        meta = json.loads(Path(core.clip_meta_path(str(clip))).read_text(encoding="utf-8"))
+        self.assertEqual(meta["kind"], core.CLIP_META_KIND)
+        self.assertTrue(os.path.isabs(meta["source"]))
+
+    def test_old_clip_from_name_only(self):
+        clip = clip_for(self.streams, "alice_20260101_120000.mp4", 3725, 3790, sidecar=False)
+        link = core.read_clip_link(str(clip))
+        self.assertTrue(link["guessed"])
+        self.assertEqual((link["stem"], link["in"], link["out"]), ("alice_20260101_120000", 3725.0, 3790.0))
+        self.assertIsNone(core.read_clip_link(str(put(self.streams / "Clips/kick/alice/random.mp4"))))
+
+    def test_link_by_name_then_stem_and_loose(self):
+        recs = lb.list_recordings({"processed": str(self.streams / "Processed/kick/alice"),
+                                   "recorded": str(self.streams / "Recorded/kick/alice")})
+        clip_for(self.streams, "alice_20260101_120000.mp4", 10, 20)
+        clip_for(self.streams, "alice_20260101_120000.mp4", 5, 8, sidecar=False)
+        clip_for(self.streams, "alice_20260302_100000.ts", 1, 3)   # cut live from the raw .ts
+        clip_for(self.streams, "gone_20250101_000000.mp4", 1, 3)
+        put(self.streams / "Clips/kick/alice/x.part.mp4", 5)
+        clips = lb.list_clips(str(self.streams / "Clips/kick/alice"))
+        loose = lb.link_clips(recs, clips)
+        by = {r.name: r for r in recs}
+        self.assertEqual([c.t_in for c in by["alice_20260101_120000.mp4"].clips], [5, 10])
+        self.assertEqual(len(by["alice_20260302_100000.ts"].clips), 1)
+        self.assertEqual(len(loose), 1)
+
+    def test_moved_recording_still_links_by_name(self):
+        clip_for(self.streams, "alice_20260101_120000.mp4", 10, 20)
+        moved = self.streams / "Elsewhere" / "alice_20260101_120000.mp4"
+        moved.parent.mkdir()
+        (self.streams / "Processed/kick/alice/alice_20260101_120000.mp4").rename(moved)
+        recs = lb.list_recordings({"processed": str(moved.parent)})
+        self.assertEqual(lb.link_clips(recs, lb.list_clips(str(self.streams / "Clips/kick/alice"))), [])
+        self.assertEqual(len(recs[0].clips), 1)
+
+
+class ClipTabTests(TabTests):
+    # only the clip tests here (the inherited TabTests ones already run above)
+    test_overview_tabs_unchanged_and_recordings_added = test_jump_box_lists_channel_and_actions = None
+    test_channels_tab_button_opens_recordings = test_sort_by_heading_toggles = test_unknown_channel_message = None
+
+    def show_alice(self, n=4):
+        self.tab.channel_var.set("alice  (Kick)")
+        self.tab.jump()
+        self.pump(lambda: sum(isinstance(v, lb.Recording) for v in self.tab.rows.values()) == n)
+
+    def test_clips_column_children_and_open_source(self):
+        clip_for(self.streams, "alice_20260101_120000.mp4", 61.5, 91.25)
+        clip_for(self.streams, "alice_20260101_120000.mp4", 120, 130, sidecar=False)
+        self.show_alice()
+        rid = next(i for i, r in self.tab.rows.items() if getattr(r, "name", "") == "alice_20260101_120000.mp4")
+        self.assertEqual(str(self.tab.tree.set(rid, "clips")), "2")
+        kids = self.tab.tree.get_children(rid)
+        self.assertEqual(len(kids), 2)
+        self.assertIn("2 linked clips", self.tab.count.cget("text"))
+        self.tab.tree.selection_set(kids[0])
+        self.root.update()
+        self.assertEqual(self.tab.clip_btn.cget("text"), "Open source")
+        self.tab.play()
+        self.tab.reveal()
+        self.tab.open_clip_editor()
+        clip = self.tab.rows[kids[0]]
+        src = self.tab.rows[rid].path
+        self.assertEqual(self.calls, [("play", clip.path), ("reveal", clip.path), ("clip", src, 61.5, 91.25)])
+        self.tab.select_source()
+        self.assertEqual(self.tab.tree.selection(), (rid,))
+        self.root.update()
+        self.assertEqual(self.tab.clip_btn.cget("text"), "Clip Editor")
+        self.tab._build_menu()  # recording menu offers show/hide clips
+        labels = [self.tab.menu.entrycget(i, "label") for i in range(self.tab.menu.index("end") + 1)
+                  if self.tab.menu.type(i) == "command"]
+        self.assertIn("Show / hide clips (2)", labels)
+        self.tab.toggle_clips()
+        self.tab.search_var.set("")  # refill keeps the row open
+        again = next(i for i, r in self.tab.rows.items() if isinstance(r, lb.Recording) and r.path == src)
+        self.assertTrue(self.tab.tree.item(again, "open"))
+
+    def test_old_style_editor_callback_gets_path_only(self):
+        clip_for(self.streams, "alice_20260101_120000.mp4", 1, 2)
+        self.tab.clip_editor = lambda p: self.calls.append(("old", p))
+        self.show_alice()
+        cid = next(i for i, r in self.tab.rows.items() if isinstance(r, lb.ClipRef))
+        self.tab.tree.selection_set(cid)
+        self.tab.open_source()
+        self.assertEqual(self.calls[-1][0], "old")
+
+
+
+class EditorStartAtTests(unittest.TestCase):
+    def test_opens_at_in_point_with_marks(self):
+        from unittest import mock
+        from msr import clip_editor
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"no display: {exc}")
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        with tempfile.TemporaryDirectory() as d:
+            src = put(Path(d) / "Processed/kick/a/a_20260101_000000.mp4", 2000)
+            ed = clip_editor.ClipEditor(root, str(src), clips_base=d, show=False, audio_factory=mock.MagicMock(),
+                                        frame_grabber=lambda *_a, **_k: None, length_reader=lambda _p: 600.0,
+                                        start_at=61.5, end_at=91.25)
+            self.addCleanup(ed.close)
+            end = time.time() + 10
+            while not ed.marks.length and time.time() < end:
+                root.update()
+                time.sleep(0.02)
+            self.assertEqual(ed.pos, 61.5)
+            self.assertEqual((ed.marks.cut_in, ed.marks.cut_out), (61.5, 91.25))
 
 
 if __name__ == "__main__":

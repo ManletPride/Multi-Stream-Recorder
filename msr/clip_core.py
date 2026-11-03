@@ -431,6 +431,66 @@ def make_clip(ffmpeg: str, src: str, start: float, end: float, out_dir: str, *, 
     return CutResult(final, start, end, cut_from, real_end, real_end - cut_from, exact)
 
 
+# ------------------------------------------------------------------ clip -> source link
+CLIP_META_KIND = "msr-clip"
+CLIP_META_SUFFIX = ".meta.json"
+_CLIP_NAME_RE = re.compile(r"^(?P<stem>.+)_clip_(?P<a>\d+(?:-\d\d){1,2})_to_(?P<b>\d+(?:-\d\d){1,2})"
+                           r"_\d{8}_\d{6}(?:_\d+)?\.mp4$", re.I)
+
+
+def clip_meta_path(clip: str) -> str:
+    return os.path.splitext(clip)[0] + CLIP_META_SUFFIX
+
+
+def write_clip_meta(res: CutResult, src: str, now: datetime.datetime | None = None) -> str | None:
+    """Sidecar next to a saved clip naming its source and in/out times. It travels with the clip
+    (library moves take sidecars along); the source is found again by its file name. Best effort."""
+    data = {"kind": CLIP_META_KIND, "source": os.path.abspath(src), "source_name": os.path.basename(src),
+            "in": round(res.start, 3), "out": round(res.end, 3), "requested_in": round(res.requested_start, 3),
+            "exact": bool(res.exact), "created": (now or datetime.datetime.now()).isoformat(timespec="seconds")}
+    path = clip_meta_path(res.path)
+    try:
+        with open(path + ".tmp", "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, ensure_ascii=False)
+        os.replace(path + ".tmp", path)
+        return path
+    except OSError:
+        _remove(path + ".tmp")
+        return None
+
+
+def safe_stem(name: str) -> str:
+    """A recording's stem as clip_name() writes it into a clip's name."""
+    stem = os.path.splitext(os.path.basename(name))[0]
+    return re.sub(r"[^\w.\-]+", "_", stem)[:80].strip("_") or "clip"
+
+
+def _dash_time(text: str) -> float:
+    total = 0
+    for part in text.split("-"):
+        total = total * 60 + int(part)
+    return float(total)
+
+
+def read_clip_link(clip: str) -> dict | None:
+    """{'source_name', 'source', 'stem', 'in', 'out', 'guessed'} for a clip: from its sidecar, else
+    (older clips) from the Clip Editor's name pattern, whole seconds only. None if neither."""
+    try:
+        with open(clip_meta_path(clip), "r", encoding="utf-8") as fh:
+            meta = json.load(fh)
+        if isinstance(meta, dict) and meta.get("kind") == CLIP_META_KIND and meta.get("source_name"):
+            return {"source_name": str(meta["source_name"]), "source": str(meta.get("source") or ""),
+                    "stem": safe_stem(meta["source_name"]), "in": float(meta.get("in") or 0.0),
+                    "out": float(meta.get("out") or 0.0), "guessed": False}
+    except (OSError, ValueError, TypeError):
+        pass
+    m = _CLIP_NAME_RE.match(os.path.basename(clip))
+    if not m:
+        return None
+    return {"source_name": "", "source": "", "stem": m.group("stem"), "in": _dash_time(m.group("a")),
+            "out": _dash_time(m.group("b")), "guessed": True}
+
+
 def _remove(path):
     try:
         os.remove(path)

@@ -133,8 +133,10 @@ class ClipEditor:
     def __init__(self, parent: tk.Misc, src: str, *, ffmpeg: str = "ffmpeg", clips_base: str,
                  title_name: str = "", live: bool = False, follow=None, state_file: str | None = None,
                  logger=None, audio_factory=_audio_player, frame_grabber=core.grab_frame,
-                 length_reader=None, opener=None, show=True):
+                 length_reader=None, opener=None, show=True, start_at: float | None = None,
+                 end_at: float | None = None):
         self.src, self.ffmpeg, self.clips_base = src, ffmpeg, clips_base
+        self._start_at, self._end_at = start_at, end_at   # 'Open source' from a clip: go there, marked
         self.live, self.follow, self.logger, self.opener = live, follow, logger, opener
         self.ffprobe = core.ffprobe_for(ffmpeg)
         self._audio_factory, self._grab = audio_factory, frame_grabber
@@ -562,6 +564,11 @@ class ClipEditor:
                 self.say("A new part of the recording started; this editor keeps the part you opened.")
         if first and n:
             self.pos = max(0.0, n - 10.0) if self.live else 0.0
+            if self._start_at is not None and not self.live:
+                self.pos = min(max(0.0, self._start_at), n)
+                if self._end_at is not None and self._end_at > self._start_at:
+                    self.marks.set_in(self.pos)
+                    self.marks.set_out(self._end_at)
             self._request_frame()
         self._draw()
 
@@ -585,6 +592,7 @@ class ClipEditor:
         def work():
             try:
                 res = core.make_clip(self.ffmpeg, src, a, b, out_dir, exact=exact, ffprobe=self.ffprobe)
+                core.write_clip_meta(res, src)   # links the clip to its source (Library > Recordings)
                 self.q.put(("saved", res, None))
             except core.ClipError as e:
                 self.q.put(("saved", None, str(e)))

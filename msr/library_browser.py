@@ -5,6 +5,10 @@ Channels tab ("Recordings" button / menu). The list shows date, length, stream t
 length and title come from the .meta.json MSR writes next to each recording (no ffprobe).
 Listing runs on a worker thread that only posts to a queue; the tab drains it with after().
 Read-only: Open folder (Explorer with the file selected), Play, Open in Clip Editor.
+
+Clips: each recording row expands to the clips cut from it in the Clip Editor. The link comes
+from the clip's .meta.json (msr.clip_core.write_clip_meta), else from the editor's clip name
+pattern; a clip is matched to a recording by file name (stem), so moved recordings still match.
 """
 
 from __future__ import annotations
@@ -16,10 +20,13 @@ import queue
 import re
 import threading
 import tkinter as tk
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from tkinter import ttk
 from typing import Callable
 
+import inspect
+
+from msr import clip_core as core
 from msr import dialogs
 from msr import library as lib
 
@@ -38,6 +45,20 @@ class Recording:
     title: str
     size: int
     raw: bool            # still a raw .ts in Recorded/
+    clips: list = field(default_factory=list)   # ClipRef cut from this recording
+
+
+@dataclass
+class ClipRef:
+    path: str
+    name: str
+    size: int
+    mtime: float
+    stem: str            # source stem as written into the clip name
+    source_name: str     # source file name from the sidecar ('' for name-only matches)
+    t_in: float
+    t_out: float
+    guessed: bool        # times from the file name (older clip, no sidecar)
 
 
 # ------------------------------------------------------------------ Tk-free helpers
@@ -137,14 +158,75 @@ def list_recordings(folders: dict, cancel: threading.Event | None = None) -> lis
     return out
 
 
+def list_clips(folder: str | None, cancel: threading.Event | None = None) -> list[ClipRef]:
+    """Clips in a channel's clips folder that name their source (sidecar or name pattern)."""
+    out: list[ClipRef] = []
+    if not folder or not os.path.isdir(folder):
+        return out
+    stack = [folder]
+    while stack:
+        if cancel is not None and cancel.is_set():
+            break
+        try:
+            entries = list(os.scandir(stack.pop()))
+        except OSError:
+            continue
+        for e in entries:
+            try:
+                if e.is_symlink():
+                    continue
+                if e.is_dir(follow_symlinks=False):
+                    stack.append(e.path)
+                    continue
+                low = e.name.lower()
+                if low.endswith(lib.PARTIAL_SUFFIXES) or ".part." in low or os.path.splitext(low)[1] not in lib.VIDEO_EXT:
+                    continue
+                link = core.read_clip_link(e.path)
+                if link is None:
+                    continue
+                st = e.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            out.append(ClipRef(e.path, e.name, st.st_size, st.st_mtime, link["stem"], link["source_name"],
+                               link["in"], link["out"], link["guessed"]))
+    return out
+
+
+def link_clips(recs: list[Recording], clips: list[ClipRef]) -> list[ClipRef]:
+    """Attach clips to recordings: same source file name first, then the same stem (a live .ts
+    that became an .mp4 keeps its stem). Returns the clips that matched nothing."""
+    by_name = {r.name.lower(): r for r in recs}
+    by_stem: dict[str, Recording] = {}
+    for r in sorted(recs, key=lambda r: r.raw):   # finished .mp4 wins over a leftover .ts
+        by_stem.setdefault(core.safe_stem(r.name).lower(), r)
+    loose = []
+    for c in clips:
+        rec = by_name.get(c.source_name.lower()) if c.source_name else None
+        rec = rec or by_stem.get(c.stem.lower())
+        if rec is None:
+            loose.append(c)
+        else:
+            rec.clips.append(c)
+    for r in recs:
+        r.clips.sort(key=lambda c: c.t_in)
+    return loose
+
+
 # (id, heading, width, anchor, sort key, cell text)
 COLUMNS = (
     ("date", "Date", 120, "w", lambda r: r.when, lambda r: fmt_when(r.when)),
     ("length", "Length", 70, "e", lambda r: -1 if r.seconds is None else r.seconds, lambda r: fmt_length(r.seconds)),
     ("title", "Stream title", 330, "w", lambda r: r.title.lower(), lambda r: r.title or "-"),
+    ("clips", "Clips", 45, "e", lambda r: len(r.clips), lambda r: len(r.clips) or ""),
     ("file", "File", 250, "w", lambda r: r.name.lower(), lambda r: r.name + ("  (raw)" if r.raw else "")),
     ("size", "Size", 80, "e", lambda r: r.size, lambda r: lib.fmt_size(r.size)),
 )
+
+
+def clip_cells(c: ClipRef) -> list:
+    """A clip's child row, in COLUMNS order."""
+    span = f"clip {fmt_length(c.t_in)} – {fmt_length(c.t_out)}" + ("  (times from name)" if c.guessed else "")
+    return [fmt_when(c.mtime), fmt_length(max(0.0, c.t_out - c.t_in)), span, "", c.name, lib.fmt_size(c.size)]
 _COLUMN = {c[0]: c for c in COLUMNS}
 
 
@@ -180,7 +262,10 @@ class RecordingsTab:
         self.channels: dict[str, lib.ChannelStat] = {}   # label -> channel
         self.current: lib.ChannelStat | None = None
         self.recs: list[Recording] = []
-        self.rows: dict[str, Recording] = {}
+        self.rows: dict[str, object] = {}   # iid -> Recording or ClipRef
+        self.parent_of: dict[str, Recording] = {}   # clip iid -> its recording
+        self.loose = 0                      # clips whose recording was not found
+        self._open: set[str] = set()        # recordings expanded to show clips (by path)
         self.sort_col, self.sort_desc = "date", True
         self.out: queue.Queue = queue.Queue()
         self._gen = 0
@@ -213,7 +298,9 @@ class RecordingsTab:
 
         box = ttk.Frame(f)
         box.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(box, columns=[c[0] for c in COLUMNS], show="headings", selectmode="browse", height=14)
+        self.tree = ttk.Treeview(box, columns=[c[0] for c in COLUMNS], show=("tree", "headings"), selectmode="browse",
+                                 height=14)
+        self.tree.column("#0", width=24, minwidth=24, stretch=False)  # expander for clips
         for cid, heading, width, anchor, _k, _t in COLUMNS:
             self.tree.heading(cid, text=heading, command=lambda c=cid: self.sort_by(c))
             self.tree.column(cid, width=width, anchor=anchor, stretch=cid in ("title", "file"))
@@ -221,18 +308,13 @@ class RecordingsTab:
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
-        self.tree.bind("<Double-1>", lambda e: self.play() if self.tree.identify_row(e.y) else None)
+        self.tree.bind("<Double-1>", self._double)
+        self.tree.bind("<<TreeviewOpen>>", lambda _e: self._opened(True))
+        self.tree.bind("<<TreeviewClose>>", lambda _e: self._opened(False))
         self.tree.bind("<Return>", lambda _e: self.play())
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._sync())
         self.tree.bind("<Button-3>", self._menu)
-        self.menu = tk.Menu(self.tree, tearoff=0)
-        self.menu.add_command(label="Play", command=self.play)
-        self.menu.add_command(label="Open folder (select file)", command=self.reveal)
-        if clip_editor is not None:
-            self.menu.add_command(label="Open in Clip Editor", command=self.open_clip_editor)
-        self.menu.add_separator()
-        self.menu.add_command(label="Copy title", command=lambda: self._copy("title"))
-        self.menu.add_command(label="Copy path", command=lambda: self._copy("path"))
+        self.menu = tk.Menu(self.tree, tearoff=0)   # filled per row in _menu()
         if clip_editor is None:
             self.clip_btn.pack_forget()
         self.frame.bind("<Destroy>", lambda e: self.shutdown() if e.widget is self.frame else None, add="+")
@@ -277,12 +359,15 @@ class RecordingsTab:
         gen, cancel, out = self._gen, threading.Event(), self.out
         self._cancel = cancel
         folders = {k: v for k, v in ch.paths.items() if k in LIST_CATEGORIES}
+        clips_dir = ch.paths.get("clips")
 
         def work():  # worker: no Tk here, only the queue
             try:
-                out.put((gen, list_recordings(folders, cancel), None))
+                recs = list_recordings(folders, cancel)
+                loose = link_clips(recs, list_clips(clips_dir, cancel))
+                out.put((gen, recs, len(loose), None))
             except Exception as exc:  # pragma: no cover - reported in the tab
-                out.put((gen, [], exc))
+                out.put((gen, [], 0, exc))
         threading.Thread(target=work, daemon=True, name="msr-library-recordings").start()
         self._schedule_poll()
 
@@ -294,10 +379,10 @@ class RecordingsTab:
         self._poll_id = None
         try:
             while True:
-                gen, recs, err = self.out.get_nowait()
+                gen, recs, loose, err = self.out.get_nowait()
                 if gen != self._gen:
                     continue  # an older channel's listing
-                self.recs = recs
+                self.recs, self.loose = recs, loose
                 self.fill()
                 if err is not None:
                     self.count.configure(text=f"Could not list the folder: {err}")
@@ -325,17 +410,24 @@ class RecordingsTab:
         self.fill()
 
     def fill(self) -> None:
-        keep = self.selected()
+        keep = self.selected_item()
         self.tree.delete(*self.tree.get_children())
-        self.rows = {}
+        self.rows, self.parent_of = {}, {}
         shown = filter_sort(self.recs, self.search_var.get(), self.sort_col, self.sort_desc)
         for i, r in enumerate(shown):
             iid = f"r{i}"
             self.rows[iid] = r
-            self.tree.insert("", "end", iid=iid, values=[c[5](r) for c in COLUMNS])
-            if keep is not None and r.path == keep.path:
-                self.tree.selection_set(iid)
-                self.tree.see(iid)
+            self.tree.insert("", "end", iid=iid, values=[c[5](r) for c in COLUMNS], open=r.path in self._open)
+            for j, clip in enumerate(r.clips):
+                cid = f"{iid}c{j}"
+                self.rows[cid], self.parent_of[cid] = clip, r
+                self.tree.insert(iid, "end", iid=cid, values=clip_cells(clip))
+        if keep is not None:
+            for iid, item in self.rows.items():
+                if item.path == keep.path:
+                    self.tree.selection_set(iid)
+                    self.tree.see(iid)
+                    break
         for cid, heading, *_ in COLUMNS:
             arrow = (" \u25bc" if self.sort_desc else " \u25b2") if cid == self.sort_col else ""
             self.tree.heading(cid, text=heading + arrow)
@@ -343,21 +435,49 @@ class RecordingsTab:
             total = sum(r.seconds or 0 for r in shown)
             extra = f", {fmt_length(total)} known length" if total else ""
             of = f" of {len(self.recs):,}" if len(shown) != len(self.recs) else ""
+            nclips = sum(len(r.clips) for r in shown)
+            extra += f", {nclips:,} linked clips" if nclips else ""
+            extra += f" ({self.loose:,} clips match no recording here)" if self.loose else ""
             self.count.configure(text=f"{self.current.name}: {len(shown):,}{of} recordings{extra}")
         self._sync()
 
-    def selected(self) -> Recording | None:
+    def selected_item(self):
         picked = self.tree.selection()
         return self.rows.get(picked[0]) if picked else None
 
+    def selected(self) -> Recording | None:
+        item = self.selected_item()
+        return item if isinstance(item, Recording) else None
+
+    def selected_clip(self) -> ClipRef | None:
+        item = self.selected_item()
+        return item if isinstance(item, ClipRef) else None
+
+    def source_of(self, clip: ClipRef) -> Recording | None:
+        return next((r for iid, r in self.parent_of.items() if self.rows.get(iid) is clip), None)
+
+    def _opened(self, is_open: bool) -> None:
+        iid = self.tree.focus()
+        rec = self.rows.get(iid)
+        if isinstance(rec, Recording):
+            (self._open.add if is_open else self._open.discard)(rec.path)
+
+    def _double(self, event):
+        if self.tree.identify_row(event.y) and self.tree.identify_column(event.x) != "#0":
+            self.play()
+            return "break"
+        return None
+
     def _sync(self) -> None:
-        rec = self.selected()
+        item = self.selected_item()
+        clip = isinstance(item, ClipRef)
+        self.clip_btn.configure(text="Open source" if clip else "Clip Editor")
         for b, fn in ((self.reveal_btn, self.revealer), (self.play_btn, self.opener), (self.clip_btn, self.clip_editor)):
-            b.state(["!disabled"] if rec is not None and fn is not None else ["disabled"])
+            b.state(["!disabled"] if item is not None and fn is not None else ["disabled"])
 
     # -- actions
     def _run(self, fn, title: str) -> None:
-        rec = self.selected()
+        rec = self.selected_item()
         if rec is None or fn is None:
             return
         try:
@@ -372,23 +492,88 @@ class RecordingsTab:
         self._run(self.opener, "Play")
 
     def open_clip_editor(self) -> None:
+        if self.selected_clip() is not None:
+            self.open_source()
+            return
         rec = self.selected()
         if rec is not None and not rec.path.lower().endswith(CLIP_EXT):
             dialogs.show_info(self.frame.winfo_toplevel(), "Clip Editor", "The Clip Editor opens video files only.")
             return
         self._run(self.clip_editor, "Clip Editor")
 
+    def open_source(self) -> None:
+        """A clip's recording in the Clip Editor at the clip's in point (with in/out marked)."""
+        clip = self.selected_clip()
+        rec = self.source_of(clip) if clip is not None else None
+        if rec is None or self.clip_editor is None:
+            return
+        if not rec.path.lower().endswith(CLIP_EXT):
+            self.select_source()
+            return
+        try:
+            if _takes_times(self.clip_editor):
+                self.clip_editor(rec.path, clip.t_in, clip.t_out)
+            else:
+                self.clip_editor(rec.path)
+        except Exception as exc:
+            dialogs.show_error(self.frame.winfo_toplevel(), "Open source", f"Could not open it: {exc}")
+
+    def select_source(self) -> None:
+        picked = self.tree.selection()
+        if picked and self.tree.parent(picked[0]):
+            parent = self.tree.parent(picked[0])
+            self.tree.selection_set(parent)
+            self.tree.focus(parent)
+            self.tree.see(parent)
+
+    def toggle_clips(self) -> None:
+        picked = self.tree.selection()
+        if picked and self.tree.get_children(picked[0]):
+            iid = picked[0]
+            is_open = not self.tree.item(iid, "open")
+            self.tree.item(iid, open=is_open)
+            (self._open.add if is_open else self._open.discard)(self.rows[iid].path)
+
     def _copy(self, what: str) -> None:
-        rec = self.selected()
-        if rec is None:
+        item = self.selected_item()
+        if item is None:
             return
         self.frame.clipboard_clear()
-        self.frame.clipboard_append(rec.title if what == "title" else rec.path)
+        self.frame.clipboard_append(getattr(item, "title", item.name) if what == "title" else item.path)
+
+    def _build_menu(self) -> None:
+        m = self.menu
+        m.delete(0, "end")
+        m.add_command(label="Play", command=self.play)
+        m.add_command(label="Open folder (select file)", command=self.reveal)
+        if self.selected_clip() is not None:
+            if self.clip_editor is not None:
+                m.add_command(label="Open source in Clip Editor (at in point)", command=self.open_source)
+            m.add_command(label="Select source recording", command=self.select_source)
+        else:
+            if self.clip_editor is not None:
+                m.add_command(label="Open in Clip Editor", command=self.open_clip_editor)
+            rec = self.selected()
+            if rec is not None and rec.clips:
+                m.add_command(label=f"Show / hide clips ({len(rec.clips)})", command=self.toggle_clips)
+            m.add_separator()
+            m.add_command(label="Copy title", command=lambda: self._copy("title"))
+        m.add_command(label="Copy path", command=lambda: self._copy("path"))
 
     def _menu(self, event) -> None:
         iid = self.tree.identify_row(event.y)
         if iid:
             self.tree.selection_set(iid)
-        if self.selected() is not None:
+        if self.selected_item() is not None:
+            self._build_menu()
             from msr.library_manage import popup
             popup(self.frame, self.menu, event)
+
+
+def _takes_times(fn) -> bool:
+    """True if the Clip Editor callback accepts (path, start, end)."""
+    try:
+        inspect.signature(fn).bind("p", 0.0, 1.0)
+        return True
+    except (TypeError, ValueError):
+        return False
