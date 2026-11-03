@@ -171,5 +171,38 @@ class WindowTests(unittest.TestCase):
         self.assertIn("ERROR: boom", seen["log"])
 
 
+class WindowLookTests(unittest.TestCase):
+    def test_themed_caption_scrollbar_and_vertical_resize(self):
+        from tkinter import ttk
+        from msr import themes
+        win = venv._progress_window(show=False)
+        if win is None:
+            self.skipTest("no display")
+        root = win.root
+        self.addCleanup(root.destroy)
+        self.assertTrue(win.themed)
+        self.assertTrue(getattr(root, "_msr_title_bar", False))   # dialogs.apply_title_bar ran
+        style = ttk.Style(root)
+        self.assertEqual(style.theme_use(), "clam")                # not the white native look
+        t = themes.current()
+        self.assertEqual(str(style.lookup("Vertical.TScrollbar", "troughcolor")).lower(),
+                         str(style.lookup(".", "troughcolor")).lower())
+        self.assertEqual(str(style.lookup(".", "background")).lower(), t["bg"].lower())
+        self.assertEqual(tuple(bool(x) for x in root.resizable()), (True, True))
+        mw, mh = root.minsize()
+        self.assertGreater(mh, 100)
+        # taller window: the log takes the extra height
+        root.geometry("+-3000+-3000")
+        root.deiconify()
+        root.update()
+        before = win.log.winfo_height()
+        root.geometry(f"{root.winfo_width()}x{root.winfo_height() + 200}")
+        root.update()
+        self.assertGreater(win.log.winfo_height(), before + 150)
+        win.failed("x", "C:/msr/msr_venv_setup.log")
+        root.update()
+        self.assertTrue(win.button.winfo_ismapped())
+
+
 if __name__ == "__main__":
     unittest.main()

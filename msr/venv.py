@@ -483,8 +483,12 @@ class SetupWindow:
         self.tk = tk
         self.started = time.time()
         root = self.root = tk.Tk()
-        if not show:
-            root.withdraw()
+        root.withdraw()   # built hidden: the caption is themed before it is ever shown (no white flash)
+        try:  # MSR's ttk styles (clam): themed scrollbar, progress bar and button
+            from msr import themeui
+            themeui.apply_ttk(root, ttk.Style(root), theme)
+        except Exception:
+            pass
         try:
             from msr import appicon
             appicon.set_app_id()
@@ -493,7 +497,7 @@ class SetupWindow:
             pass
         root.title("Multi-Stream Recorder \u2014 first-time setup")
         root.configure(bg=theme["bg"])
-        root.resizable(True, False)
+        root.resizable(True, True)
         bg, fg = theme["bg"], theme["fg"]
         self.status = tk.Label(root, text="Preparing\u2026", bg=bg, fg=fg, wraplength=520, justify="left",
                                anchor="w", padx=12, pady=8)
@@ -503,6 +507,8 @@ class SetupWindow:
         self.bar = ttk.Progressbar(root, mode="indeterminate", length=520)
         self.bar.pack(fill="x", padx=12, pady=(4, 6))
         self.bar.start(12)
+        self.footer = tk.Frame(root, bg=bg)   # holds Continue on failure (packed before the log grows)
+        self.footer.pack(side="bottom", fill="x")
         box = tk.Frame(root, bg=bg)
         box.pack(fill="both", expand=True, padx=12, pady=(0, 10))
         self.log = tk.Text(box, height=6, width=80, wrap="none", bg=theme["log_bg"], fg=theme["log_fg"],
@@ -510,13 +516,23 @@ class SetupWindow:
                            font=("Consolas", 9), state="disabled")
         scroll = ttk.Scrollbar(box, orient="vertical", command=self.log.yview)
         self.log.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")   # first, so a narrow window never hides it
         self.log.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
-        self.button = ttk.Button(root, text="Continue", command=root.destroy)
+        self.button = ttk.Button(self.footer, text="Continue", command=root.destroy)
         root.update_idletasks()
         w, h = root.winfo_reqwidth(), root.winfo_reqheight()
+        root.minsize(min(w, 420), max(160, h - self.log.winfo_reqheight() + 3 * 15))   # ~3 log lines
         root.geometry(f"+{(root.winfo_screenwidth() - w) // 2}+{(root.winfo_screenheight() - h) // 3}")
         root.protocol("WM_DELETE_WINDOW", lambda: None)   # setup finishes on its own
+        self.themed = False
+        try:  # same caption as every MSR window (dark mode + theme caption colours, re-applied on <Map>)
+            from msr import dialogs
+            dialogs.apply_title_bar(root, getattr(theme, "dark", True))
+            self.themed = True
+        except Exception:
+            pass
+        if show:
+            root.deiconify()
         self.lines = 0
 
     def set_status(self, text: str) -> None:
@@ -544,7 +560,7 @@ class SetupWindow:
         self.bar.pack_forget()
         self.set_status(f"Setup did not finish: {message}\n\nFull log: {log_path}\n"
                         "Multi-Stream Recorder will start on your normal Python and try again next time.")
-        self.button.pack(anchor="e", padx=12, pady=(0, 10))
+        self.button.pack(side="right", padx=12, pady=(0, 10))
         self.root.protocol("WM_DELETE_WINDOW", self.root.destroy)
         self.button.focus_set()
         self.root.bind("<Return>", lambda _e: self.root.destroy())
