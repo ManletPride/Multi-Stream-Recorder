@@ -2047,25 +2047,15 @@ def main_gui(config):
 
     notebook.bind("<<NotebookTabChanged>>", _library_tab_opened, add="+")
 
-    # Options tab: settings without editing config.ini; same validation + save path as msr_ctl.
+    # Options tab: settings without editing config.ini; control.apply_setting is shared with config_set.
     def _options_apply_setting(section, key, value):
-        if not _control.known_setting(config, section, key):
-            raise ValueError(f"Unknown setting {section}.{key}.")
-        if (section, key) == ("Paths", "streams_dir") and recorder and recorder.is_running:
-            raise ValueError("Stop recording before changing the recordings folder.")
-        if (section, key) == ("Paths", "streams_dir") and not os.path.isdir(str(value).strip()):
-            raise ValueError("That recordings folder does not exist.")
+        running = bool(recorder and recorder.is_running)
         try:
-            value = _control.validate_setting(section, key, value)
+            value = _control.apply_setting(
+                config, section, key, value, recording=running,
+                live=(lambda v: recorder.set_poll_interval(float(v))) if running else None)
         except _control.ControlError as e:
             raise ValueError(str(e)) from None
-        if not config.config.has_section(section):
-            config.config.add_section(section)
-        config.config.set(section, key, value)
-        if not config.save():
-            raise ValueError("config.ini could not be written (see the log).")
-        if (section, key) in _control.LIVE_SETTINGS and recorder and recorder.is_running:
-            recorder.set_poll_interval(float(value))
         _reflect_setting(section, key)
         logging.info(f"Setting {section}.{key} changed in Options")
         return value
@@ -3421,41 +3411,14 @@ def main_gui(config):
     root.protocol("WM_DELETE_WINDOW", on_close)
 
     # ── Agent / headless control (msr/control.py, msr_ctl.py) ──
-    # Commands arrive on a server thread. Roster edits run here on the Tk thread (_on_tk) so the
-    # list, the tree and channels.json stay one thing; recorder calls run on the server thread,
-    # as the GUI's own background stop/start helpers do. refresh_status shows the result.
-    _tk_thread = threading.current_thread()
+    # Commands arrive on server threads and only queue work: _control_jobs is drained here on
+    # the Tk thread by its own after(50) loop, so every read or change of window state (roster,
+    # tree, start/stop, quit, selectors) happens on this thread, in order. Recorder calls go
+    # through the adapter's recorder lane. See msr/control_exec.py.
+    from msr import control_exec as _control_exec
     _control_service = [None]
-
-    def _on_tk(fn, timeout=30):
-        if threading.current_thread() is _tk_thread:
-            return fn()
-        box = {}
-        done = threading.Event()
-        lock = threading.Lock()
-
-        def run():
-            with lock:   # a timed-out request must not run later (a retry would do it twice)
-                if box.get("cancelled"):
-                    return
-                box["started"] = True
-            try:
-                box["value"] = fn()
-            except BaseException as e:  # handed to the caller's thread
-                box["error"] = e
-            finally:
-                done.set()
-
-        root.after(0, run)
-        if not done.wait(timeout):
-            with lock:
-                started = box.get("started")
-                box["cancelled"] = not started
-            if not started or not done.wait(timeout):
-                raise _control.ControlError("The window did not respond in time; try again.", "busy")
-        if "error" in box:
-            raise box["error"]
-        return box.get("value")
+    _control_jobs = _control_exec.SerialQueue("window")
+    _control_pump = _control_exec.TkPump(root, _control_jobs).start()
 
     def _reflect_setting(section, key):
         """Show a setting changed by control in the selectors that display it."""
@@ -3475,56 +3438,51 @@ def main_gui(config):
             clip_var.set(shown)
             _last_clip_display[0] = shown
 
-    class _GuiControlApp(_control.AppAdapter):
-        mode = "gui"
+    def _control_schedule_quit(after_children=None):
+        if after_children is None:
+            root.after(300, on_close)
+        else:
+            root.after(300, lambda: _full_quit(after_children=after_children))
 
-        @property
-        def recorder(self):
-            return recorder
+    def _control_after_edit():
+        _populate_channel_tree()
+        save_channels()
 
-        @property
-        def presence(self):
-            return presence_store
+    def _control_apply_setting(section, key, value):
+        # same checks + save as Options; control does the live hand-off on its recorder lane
+        value = _control.apply_setting(config, section, key, value,
+                                       recording=bool(recorder and recorder.is_running))
+        _reflect_setting(section, key)
+        return value
 
-        def records(self):
-            return [dict(c) for c in list(channels)]
+    def _control_twitch_changed():
+        try:
+            options_panel.refresh_status()
+        except Exception:
+            pass
+        _options_twitch_changed()
 
-        def mutate(self, fn):
-            def work():
-                result = fn(channels)
-                _populate_channel_tree()
-                save_channels()
-                return result
-            return _on_tk(work)
+    def _control_reload():
+        _reload_channels_from_disk()
+        return len(channels)
 
-        def start_session(self):
-            return _on_tk(lambda: start_recording(interactive=False))
-
-        def stop_session(self):
-            if not (recorder and recorder.is_running):
-                raise _control.ControlError("Recording is not running.", "conflict")
-            _on_tk(stop_recording)
-            return "stopping"
-
-        def request_quit(self, after_children=None):
-            if after_children is None:
-                root.after(300, on_close)
-            else:
-                root.after(300, lambda: _full_quit(after_children=after_children))
-
-        def reload_channels(self):
-            def work():
-                _reload_channels_from_disk()
-                return len(channels)
-            return _on_tk(work)
-
-        def settings_changed(self, section, key):
-            _on_tk(lambda: _reflect_setting(section, key))
-
-        def update_info(self):
-            return {"available": bool(_update_tag[0]), "latest": _update_tag[0]}
-
-    _control_service[0] = _control.Service.start_for(_GuiControlApp(config))
+    _control_service[0] = _control.Service.start_for(_control_exec.GuiBridge(config, _control_jobs, {
+        "get_recorder": lambda: recorder,
+        "get_presence": lambda: presence_store,
+        "channels": lambda: channels,
+        "after_edit": _control_after_edit,
+        "start": lambda: start_recording(interactive=False),
+        "stop": stop_recording,
+        "schedule_quit": _control_schedule_quit,
+        "reload": _control_reload,
+        "reflect": _reflect_setting,
+        "twitch_changed": _control_twitch_changed,
+        "apply_setting": _control_apply_setting,
+        "health_report": lambda: health_ctl.report,
+        "health_check_now": health_ctl.check_now,
+        "sound_test": sounds.test,
+        "update_tag": lambda: _update_tag[0],
+    }))
 
     # ── Apply theme and start refresh loops ──
     apply_theme()

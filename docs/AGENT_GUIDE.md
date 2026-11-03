@@ -86,6 +86,39 @@ python msr_ctl.py deps update yt-dlp    # pip, hidden; restores the old version 
 MSR keeps its packages in `.venv` in the MSR folder; `deps` runs there automatically (or call `.venv\Scripts\python msr_ctl.py ...`, Linux `.venv/bin/python`). Outside a venv `deps update` is refused (`not_venv`); never add `--system` without the user's OK, it changes the Python other programs use.
 `deps update` changes MSR's packages: ask first unless the user asked for it. ffmpeg and MSR itself are never updated by `deps` (MSR: `update install --yes`).
 
+**Twitch sign-in** (same as Options > Twitch)
+```
+python msr_ctl.py --json twitch status       # connected, login, push channels
+python msr_ctl.py twitch connect             # prints a code + twitch.tv/activate link; give both to the user
+python msr_ctl.py twitch disconnect          # revokes and deletes the token (ask first)
+```
+Only one sign-in runs at a time. If one is already running (also from the Options tab), connect fails with code `busy` plus its `user_code` and `verification_url`; `twitch connect --cancel` or Options > Cancel stops it.
+
+**Change a setting** (same checks as the Options tab)
+```
+python msr_ctl.py config set Recording.min_disk_space_gb 50
+```
+Unknown keys, bad values and a recordings folder change while recording are refused. Secrets are stored encrypted and never shown; pass them with `--stdin`.
+
+**Recordings tab and clips**
+```
+python msr_ctl.py --json recordings browse --channel knut --sort date --limit 20   # like Library > Recordings
+python msr_ctl.py --json recordings clips --path "<recording.mp4>"                 # clips cut from it
+```
+
+**Sounds and Health window**
+```
+python msr_ctl.py sound-test live            # live | problem | clip, plays like the Sounds test button
+python msr_ctl.py --json health --check-now  # also runs the window's Health check again
+```
+
+**App-wide events and live stream**
+```
+python msr_ctl.py wait --event disk_low --timeout 3600     # health_problem | disk_low | update_available | library_action
+python msr_ctl.py subscribe --after 41 --for 600           # JSON lines as events happen, plus heartbeats
+```
+App-wide events have `channel: null`, so don't pass `--channel` for them. `subscribe` ends with a `bye` line when MSR stops; at most 8 at a time.
+
 ## 4. Output and exit codes
 
 Add `--json` (before the command) to get the full reply: `{"ok": true, "result": ...}` or `{"ok": false, "code": "...", "error": "..."}`. Errors go to stderr.

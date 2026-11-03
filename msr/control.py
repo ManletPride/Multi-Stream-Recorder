@@ -3,8 +3,8 @@
 Three pieces, no tkinter here:
 
 * ``Controller`` runs the commands (status, roster edits, start/stop, check, clip, settings,
-  library, history, logs, update, quit) against an *app adapter*: the GUI (``msr/gui.py``
-  marshals roster edits onto the Tk thread), the headless loop (``HeadlessApp``) or no running
+  library, history, logs, update, quit) against an *app adapter*: the GUI
+  (``control_exec.GuiBridge``: window work is queued to the Tk thread), the headless loop (``HeadlessApp``) or no running
   copy at all (``OfflineApp``, used by ``msr_ctl.py`` to edit the files atomically).
 * ``ControlServer``: newline-delimited JSON over TCP on 127.0.0.1 only, one request per
   connection, every request must carry the random token written to ``msr_control.json`` in the
@@ -39,6 +39,7 @@ PROTOCOL = 1
 # additions. msr_ctl.py refuses another api_version (exit 7).
 API_VERSION = 1
 MAX_REQUEST = 1 << 20
+MAX_SUBSCRIBERS = 8          # open "subscribe" streams at once
 STATUS_INTERVAL = 3.0
 
 # Settings an agent may change beyond Config.DEFAULT_CONFIG (sections the app reads with fallbacks).
@@ -55,9 +56,10 @@ NOW_SETTINGS = {("Clipping", "clip_length_seconds"), ("Clipping", "screenshot_fo
 class ControlError(Exception):
     """A command that could not be done. ``code`` is stable and machine-readable."""
 
-    def __init__(self, message, code="error"):
+    def __init__(self, message, code="error", data=None):
         super().__init__(message)
         self.code = code
+        self.data = data or {}
 
 
 # ------------------------------------------------------------------ small helpers
@@ -71,7 +73,8 @@ def enabled(config) -> bool:
 
 
 def _write_private(path, data: bytes) -> None:
-    """Atomic write; the file is readable by this user only where the OS allows (POSIX 0600)."""
+    """Atomic write; the file is readable by this user only (POSIX 0600; Windows: a protected
+    DACL for the current user, set before the rename so the token is never exposed; fail-soft)."""
     folder = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(dir=folder, prefix=os.path.basename(path) + ".", suffix=".tmp")
     try:
@@ -79,6 +82,10 @@ def _write_private(path, data: bytes) -> None:
             fh.write(data)
         if os.name != "nt":
             os.chmod(tmp, 0o600)
+        elif os.path.basename(path) == CONTROL_FILE:
+            from msr.winacl import restrict_to_current_user
+            if not restrict_to_current_user(tmp):
+                logging.debug(f"Control: {CONTROL_FILE} keeps the folder's permissions")
         from msr.history import _replace
         _replace(tmp, path)  # retried: a reader may hold the old file open for a moment on Windows
     except BaseException:
@@ -338,6 +345,40 @@ def validate_setting(section, key, value) -> str:
     return value
 
 
+def setting_applies(section, key) -> str:
+    if (section, key) in LIVE_SETTINGS or (section, key) in NOW_SETTINGS:
+        return "now"
+    if section == "Control":
+        return "restart"
+    return "next_start"
+
+
+def apply_setting(config, section, key, value, recording=False, live=None) -> str:
+    """The one write path for a setting (Options tab and config_set): known key, guards,
+    type/range checks, save (secrets DPAPI-encrypted by Config.save), then ``live(value)``
+    for settings a running session takes at once. Returns the stored value."""
+    section, key = str(section or ""), str(key or "").lower()
+    if not known_setting(config, section, key):
+        raise ControlError(f"Unknown setting {section}.{key}.", "not_found")
+    if key.endswith("_dpapi"):
+        raise ControlError(f"Set {section}.{key[:-6]} instead; the encrypted copy is managed by MSR.", "invalid")
+    if (section, key) == ("Paths", "streams_dir") and recording:
+        raise ControlError("Stop recording before changing the recordings folder.", "conflict")
+    value = validate_setting(section, key, value)
+    if (section, key) == ("Paths", "streams_dir") and not os.path.isdir(value):
+        raise ControlError("That recordings folder does not exist.", "invalid")
+    if not config.config.has_section(section):
+        config.config.add_section(section)
+    config.config.set(section, key, value)
+    if (section, key) in SECRET_KEYS and not value.strip():  # clearing also drops the encrypted copy
+        config.config.remove_option(section, key + "_dpapi")
+    if not config.save():
+        raise ControlError("config.ini could not be written (see the log).", "write_failed")
+    if live is not None and (section, key) in LIVE_SETTINGS:
+        live(value)
+    return value
+
+
 # ------------------------------------------------------------------ app adapters
 class AppAdapter:
     """What the Controller needs from the running app. Subclasses: HeadlessApp, OfflineApp, the GUI's."""
@@ -384,6 +425,12 @@ class AppAdapter:
     def settings_changed(self, section, key) -> None:
         pass
 
+    def apply_setting(self, section, key, value) -> str:
+        """Check and save one setting (no live hand-off: the Controller does that)."""
+        value = apply_setting(self.config, section, key, value, recording=is_running_session(self.recorder))
+        self.settings_changed(section, key)
+        return value
+
     def log_path(self) -> str:
         for handler in logging.root.handlers:
             name = getattr(handler, "baseFilename", None)
@@ -397,6 +444,46 @@ class AppAdapter:
 
     def watch_changed(self) -> None:
         """The roster changed: tell a running recorder which (disabled) channels to watch."""
+
+    def health_report(self):
+        """The window's Health monitor report (msr.health.Report), or None (headless)."""
+        return None
+
+    def health_check_now(self) -> bool:
+        return False
+
+    def sound_test(self, event) -> bool:
+        from msr.sounds import Sounds
+        return Sounds(self.config).test(event)
+
+    def twitch_changed(self) -> None:
+        """Twitch sign-in changed: a running session reconnects its push listener."""
+        rec = self.recorder
+        tw = getattr(rec, "twitch_push", None) if is_running_session(rec) else None
+        if tw is not None:
+            threading.Thread(target=tw.restart, daemon=True, name="twitch-push-restart").start()
+
+    _lanes_lock = threading.Lock()
+
+    def lane(self, label):
+        """A SerialExecutor of this adapter, made on first use (closed by ``close``)."""
+        from msr.control_exec import SerialExecutor
+        with self._lanes_lock:
+            lanes = self.__dict__.setdefault("_lanes", {})
+            ex = lanes.get(label)
+            if ex is None or ex.closed:
+                ex = lanes[label] = SerialExecutor(label)
+            return ex
+
+    def run_recorder(self, fn, what=None):
+        """Recorder calls from control (start/stop/check a channel, poll interval) run here,
+        one at a time in arrival order."""
+        return self.lane("recorder lane").call(fn, what)
+
+    def close(self) -> None:
+        with self._lanes_lock:
+            for ex in self.__dict__.pop("_lanes", {}).values():
+                ex.close()
 
 
 class FileRoster:
@@ -468,14 +555,18 @@ class HeadlessApp(AppAdapter):
         return self.roster.records()
 
     def mutate(self, fn):
-        result = self.roster.mutate(fn)
-        self.watch_changed()
-        return result
+        def work():
+            result = self.roster.mutate(fn)
+            self.watch_changed()
+            return result
+        return self.lane("headless loop").call(work)
 
     def reload_channels(self):
-        count = self.roster.reload()
-        self.watch_changed()
-        return count
+        def work():
+            count = self.roster.reload()
+            self.watch_changed()
+            return count
+        return self.lane("headless loop").call(work)
 
     def enabled_keys(self):
         return [r["name"] for r in self.records() if r.get("enabled", True)]
@@ -785,6 +876,10 @@ class Controller:
         self._media_jobs = set()
         self._jobs_lock = threading.Lock()   # each request runs on its own server thread
         self._retry = None
+        self._twitch = {"job": None, "state": "idle"}   # the device-code job control started
+        self._twitch_cv = threading.Condition()
+        self.twitch_api = None      # tests inject a fake msr.twitch_eventsub
+        self.twitch_job = None      # tests inject a ConnectJob factory
         self.on_change = None  # called after anything that changes state (StatusWriter.poke)
 
     # -------------------------------------------------- plumbing
@@ -799,10 +894,12 @@ class Controller:
         if fn is None:
             return {"ok": False, "code": "unknown_command", "error": f"Unknown command '{cmd}'.",
                     "commands": self.commands()}
+        from msr.control_exec import command_name
         try:
-            result = fn(args)
+            with command_name(cmd):
+                result = fn(args)
         except ControlError as e:
-            return {"ok": False, "code": e.code, "error": str(e)}
+            return dict(e.data, ok=False, code=e.code, error=str(e))
         except Exception as e:
             from msr.util import redact_for_log
             logging.exception(f"Control command {cmd} failed")
@@ -819,6 +916,14 @@ class Controller:
             if job in self._media_jobs:
                 raise ControlError(busy_text, "busy")
             self._media_jobs.add(job)
+
+    def _rec_call(self, rec, method, *a):
+        """One recorder call, through the adapter's ordered recorder lane."""
+        fn = lambda: getattr(rec, method)(*a)  # noqa: E731
+        if not isinstance(self.app, AppAdapter):
+            return fn()
+        from msr.control_exec import current_command
+        return self.app.run_recorder(fn, f"{current_command()} ({method})")
 
     def _recorder(self, need=True):
         rec = self.app.recorder
@@ -874,7 +979,7 @@ class Controller:
             return {"monitoring": is_running_session(rec)}
         if is_running_session(rec):
             for key in keys:
-                rec.start_channel(key)
+                self._rec_call(rec, "start_channel", key)
             return {"monitoring": True, "session": "running"}
         if getattr(self.app, "auto_session", False) and not getattr(self.app, "paused", False):
             try:
@@ -890,7 +995,7 @@ class Controller:
             if is_running_session(rec):
                 for key in keys:
                     if key not in getattr(rec, "channels", []) and key not in getattr(rec, "processes", {}):
-                        rec.start_channel(key)
+                        self._rec_call(rec, "start_channel", key)
             return {"monitoring": True, "session": "running" if is_running_session(rec) else "starting"}
         return {"monitoring": False,
                 "hint": "Recording is stopped; run start to watch and record the enabled channels."}
@@ -909,7 +1014,7 @@ class Controller:
         for key in keys:
             if rec is not None:
                 recording = str((before.get(key) or {}).get("status", "")).lower().startswith("recording")
-                rec.remove_channel(key)
+                self._rec_call(rec, "remove_channel", key)
                 if tracker is not None and key in before:
                     tracker.stopping(key, recording)
         drop = set(keys)
@@ -978,7 +1083,7 @@ class Controller:
 
         key = self.app.mutate(edit)
         if rec is not None and old != key:
-            rec.remove_channel(old)
+            self._rec_call(rec, "remove_channel", old)
         return {"old": display_name(old), "new": display_name(key)}
 
     def cmd_channels_reload(self, args):
@@ -1022,7 +1127,7 @@ class Controller:
         for key in keys:
             if self.app.tracker is not None:
                 self.app.tracker.started(key)
-            rec.start_channel(key)
+            self._rec_call(rec, "start_channel", key)
         return {"started": [display_name(k) for k in keys]}
 
     def cmd_record_stop(self, args):
@@ -1034,7 +1139,7 @@ class Controller:
         for key in keys:
             status = str((before.get(key) or {}).get("status", "") or "")
             recording = status.lower().startswith("recording")
-            rec.stop_channel(key)
+            self._rec_call(rec, "stop_channel", key)
             row = {"name": display_name(key), "result": "stopped_recording" if recording else "was_idle",
                    "status_before": status}
             if self.app.tracker is not None:
@@ -1052,9 +1157,9 @@ class Controller:
             recs = self.app.records()
             keys = [recs[resolve_channel(recs, r)]["name"] for r in _refs(args)]
             for key in keys:
-                rec.check_now(key)
+                self._rec_call(rec, "check_now", key)
             return {"checking": [display_name(k) for k in keys]}
-        rec.check_all_now()
+        self._rec_call(rec, "check_all_now")
         return {"checking": "all"}
 
     def cmd_clip(self, args):
@@ -1219,36 +1324,212 @@ class Controller:
             raise ControlError("No such setting.", "not_found")
         return {"settings": out, "file": os.path.basename(self.app.config.config_file)}
 
+    def _save_setting(self, section, key, value):
+        value = self.app.apply_setting(section, key, value)
+        rec = self.app.recorder
+        if (section, key) in LIVE_SETTINGS and is_running_session(rec):
+            self._rec_call(rec, "set_poll_interval", float(value))
+        return value
+
     def cmd_config_set(self, args):
+        """Same checks and save as the Options tab (control.apply_setting)."""
         section, key = str(args.get("section") or ""), str(args.get("key") or "").lower()
         if not section or not key or "value" not in args:
             raise ControlError("Give section, key and value.", "bad_request")
-        config = self.app.config
-        if not known_setting(config, section, key):
-            raise ControlError(f"Unknown setting {section}.{key}.", "not_found")
-        value = validate_setting(section, key, args["value"])
-        if not config.config.has_section(section):
-            config.config.add_section(section)
-        config.config.set(section, key, value)
-        if not config.save():
-            raise ControlError("config.ini could not be written (see the log).", "write_failed")
-        applies = "next_start"
-        rec = self.app.recorder
-        if (section, key) in LIVE_SETTINGS:
-            applies = "now"
-            if is_running_session(rec):
-                rec.set_poll_interval(float(value))
-        elif (section, key) in NOW_SETTINGS:
-            applies = "now"
-        elif section == "Control":
-            applies = "restart"
-        self.app.settings_changed(section, key)
+        value = self._save_setting(section, key, args["value"])
         logging.info(f"Setting {section}.{key} changed by control")
-        return {"section": section, "key": key, "value": masked(key, value), "applies": applies}
+        return {"section": section, "key": key, "value": masked(key, value),
+                "applies": setting_applies(section, key)}
 
     def cmd_config_reload(self, args):
         self.app.config.reload()
         return {"reloaded": True, "note": "Running recordings keep their settings until they restart."}
+
+    # -------------------------------------------------- Twitch sign-in (Options tab parity)
+    def _tw(self):
+        from msr import twitch_eventsub as te
+        return self.twitch_api or te
+
+    def _twitch_public(self):
+        t = self._twitch
+        out = {"connecting": t["state"] == "waiting"}
+        if t["state"] == "waiting":
+            out.update(user_code=t.get("user_code"), verification_url=t.get("verification_url"),
+                       expires_at=t.get("expires_at"))
+        if t.get("result"):
+            out["last_result"] = t["result"]
+        return out
+
+    def cmd_twitch_status(self, args):
+        from msr import twitch_connect as tc
+        cid = tc.client_id_for(self.app.config, self._tw())
+        if _truthy(args.get("online")):
+            state, login = tc.check_online(self.app.data_dir, cid, self._tw())
+        else:
+            state, login = tc.status_of(self.app.data_dir, cid, self._tw())
+        out = {"state": state, "login": login,
+               "push_enabled": self.app.config.getboolean("Twitch", "push_enabled", fallback=False)}
+        with self._twitch_cv:
+            out.update(self._twitch_public())
+        return out
+
+    def _twitch_follow(self, job):
+        """Background: turn the job's events into self._twitch (and wake waiters)."""
+        while True:
+            try:
+                ev = job.events.get(timeout=0.5)
+            except Exception:
+                if not job.running() and job.events.empty():
+                    ev = ("error", "the sign-in job stopped")
+                else:
+                    continue
+            kind = ev[0]
+            if kind == "connected":  # settings first, so a waiter sees them done
+                logging.info(f"Twitch connected as {ev[1]} (control)")
+                try:
+                    if not self.app.config.getboolean("Twitch", "push_enabled", fallback=False):
+                        self._save_setting("Twitch", "push_enabled", "true")
+                except Exception as e:
+                    logging.warning(f"Twitch: could not turn on instant alerts: {e}")
+                self._twitch_changed()
+            with self._twitch_cv:
+                if self._twitch.get("job") is not job:
+                    return
+                if kind == "code":
+                    self._twitch.update(state="waiting", user_code=ev[2], verification_url=ev[1],
+                                        expires_at=round(time.time() + int(ev[3])))
+                else:
+                    result = {"connected": "connected", "expired": "expired", "cancelled": "cancelled"}.get(kind, "error")
+                    self._twitch.update(state="idle", job=None, result=result,
+                                        login=ev[1] if kind == "connected" else None,
+                                        error=str(ev[-1]) if result == "error" else None)
+                self._twitch_cv.notify_all()
+            if kind != "code":
+                if self.on_change is not None:
+                    try:
+                        self.on_change()
+                    except Exception:
+                        pass
+                return
+
+    def _twitch_changed(self):
+        try:
+            self.app.twitch_changed()
+        except Exception as e:
+            logging.debug(f"control: twitch changed: {e}")
+
+    def _twitch_wait(self, timeout):
+        """Wait until the job ends; the finished state as a reply."""
+        end = time.monotonic() + timeout
+        with self._twitch_cv:
+            while self._twitch["state"] == "waiting" and time.monotonic() < end:
+                self._twitch_cv.wait(min(1.0, max(0.0, end - time.monotonic())))
+            t = dict(self._twitch)
+        if t["state"] == "waiting":
+            raise ControlError(f"Not approved within {timeout:g}s; still waiting (code {t.get('user_code')}). "
+                               "Run twitch_connect wait=true again or twitch_status.", "timeout")
+        if t.get("result") == "connected":
+            return {"connected": True, "login": t.get("login")}
+        if t.get("result") == "error":
+            raise ControlError(f"Twitch sign-in failed: {t.get('error')}", "failed")
+        raise ControlError(f"Twitch sign-in {t.get('result')}; run twitch_connect again.", t.get("result") or "failed")
+
+    @staticmethod
+    def _sign_in_busy(job):
+        from msr import twitch_eventsub as te
+        info = dict(getattr(job, "info", {}) or {})
+        data = {k: info[k] for k in ("user_code", "verification_url", "expires_at") if info.get(k)}
+        if data.get("verification_url"):
+            data["verification_url"] = te.safe_verification_uri(data["verification_url"], data.get("user_code") or "")
+        data["started_by"] = getattr(job, "owner", "") or "unknown"
+        where = "the Options tab" if data["started_by"] == "options" else "another request"
+        raise ControlError(f"A Twitch sign-in is already in progress (started from {where}). Approve it with "
+                           "the code shown, or cancel it (twitch_connect cancel=true).", "busy", data)
+
+    def cmd_twitch_connect(self, args):
+        """Start the device-code sign-in; the reply has user_code + verification_url to approve.
+        wait=true (or a later twitch_connect wait=true) blocks until approved. cancel=true stops it."""
+        from msr import twitch_connect as tc
+        timeout = max(1.0, min(float(args.get("timeout", 600) or 600), 1800.0))
+        if _truthy(args.get("cancel")):
+            with self._twitch_cv:
+                job = self._twitch.get("job") or tc.active()  # also cancels one started in Options
+            if job is None:
+                raise ControlError("No Twitch sign-in is running.", "nothing")
+            job.cancel()
+            return {"cancelling": True}
+        if self.app.mode == "offline" and not (_truthy(args.get("wait")) or _truthy(args.get("local"))):
+            raise ControlError("MSR is not running: use wait=true (CLI: --wait) so this command stays "
+                               "until you approve, or start MSR first.", "not_running")
+        with self._twitch_cv:
+            running = self._twitch.get("job") is not None
+            if not running:
+                other = tc.active()
+                if other is not None:
+                    self._sign_in_busy(other)
+                factory = self.twitch_job or tc.ConnectJob
+                job = factory(tc.client_id_for(self.app.config, self._tw()), self.app.data_dir, api=self._tw())
+                job.owner = "control"
+                try:
+                    job.start()
+                except tc.SignInBusy as e:
+                    self._sign_in_busy(e.job)
+                self._twitch = {"job": job, "state": "starting"}
+        if not running:
+            threading.Thread(target=self._twitch_follow, args=(job,), daemon=True,
+                             name="control-twitch-connect").start()
+            logging.info("Twitch sign-in started (control)")
+        end = time.monotonic() + 20
+        with self._twitch_cv:  # until Twitch hands out the code (or the job fails)
+            while self._twitch["state"] == "starting" and time.monotonic() < end:
+                self._twitch_cv.wait(0.5)
+            t = dict(self._twitch)
+        if t["state"] == "starting":
+            raise ControlError("Twitch did not answer in time; try again.", "timeout")
+        if t["state"] != "waiting":
+            return self._twitch_wait(0)
+        if _truthy(args.get("wait")):
+            out = self._twitch_wait(timeout)
+            return dict(out, user_code=t.get("user_code"), verification_url=t.get("verification_url"))
+        from msr import twitch_eventsub as te
+        return {"user_code": t.get("user_code"),
+                "verification_url": te.safe_verification_uri(t.get("verification_url"), t.get("user_code") or ""),
+                "expires_at": t.get("expires_at"), "already": running,
+                "next": "Open verification_url, approve with user_code, then run twitch_connect wait=true "
+                        "or check twitch_status."}
+
+    def cmd_twitch_disconnect(self, args):
+        """Revoke the token at Twitch on a background thread and delete it locally (even if
+        revoking fails), like Options > Disconnect."""
+        from msr import twitch_connect as tc
+        with self._twitch_cv:
+            job = self._twitch.get("job")
+        if job is not None:
+            job.cancel()
+        result = {}
+        done = threading.Event()
+
+        def work():
+            try:
+                result["revoked"] = tc.disconnect(self.app.data_dir, self._tw())
+            except Exception:
+                result["revoked"] = False
+            finally:
+                done.set()
+            if not result["revoked"]:
+                logging.warning("Twitch: could not revoke the token online; deleted it locally. "
+                                "Use Manage on Twitch to remove MSR's access.")
+            self._twitch_changed()
+
+        threading.Thread(target=work, daemon=True, name="twitch-disconnect").start()
+        if not done.wait(float(args.get("timeout", 20) or 20)):
+            return {"disconnecting": True, "note": "Still revoking at Twitch in the background."}
+        logging.info("Twitch disconnected (control)")
+        out = {"disconnected": True, "revoked": result["revoked"]}
+        if not result["revoked"]:
+            out["note"] = ("Twitch was unreachable: the token was deleted here; remove MSR's access at "
+                           "https://www.twitch.tv/settings/connections.")
+        return out
 
     # -------------------------------------------------- logs
     def cmd_logs(self, args):
@@ -1312,9 +1593,27 @@ class Controller:
     def cmd_health(self, args):
         from msr.agent_status import health
         out = health(self.app.config, update=self.app.update_info())
+        if _truthy(args.get("check_now")):
+            out["check_started"] = bool(self.app.health_check_now())
+        report = self.app.health_report()
+        if report is not None:  # the window's Health line (startup + periodic checks)
+            out["monitor"] = {"level": report.level, "checked_at": round(report.checked_at, 1),
+                              "issues": [{"level": i.level, "key": i.key, "text": redact_for_log(i.text),
+                                          "action": i.action} for i in report.issues]}
         if self.app.mode == "offline":
             out["note"] = "MSR is not running; this is the state of the files and drives."
         return out
+
+    def cmd_sound_test(self, args):
+        """Options > Sounds Test button: play one event's sound (ignores its checkbox)."""
+        from msr.sounds import EVENTS, Sounds
+        self._need_live()
+        event = str(args.get("event") or "")
+        if event not in EVENTS:
+            raise ControlError(f"event must be one of {', '.join(EVENTS)}.", "bad_request")
+        played = bool(self.app.sound_test(event))
+        return {"event": event, "played": played, "enabled": Sounds(self.app.config).enabled(event),
+                "note": "" if played else "No sound player here (Windows only)."}
 
     def _channel_key(self, ref):
         recs = self.app.records()
@@ -1350,6 +1649,91 @@ class Controller:
         tracker = self.app.tracker
         return {"recordings": out, "count": len(recs), "truncated": max(0, len(recs) - limit),
                 "this_run": tracker.recent_finished(50) if tracker is not None else []}
+
+    # -------------------------------------------------- Library > Recordings (archive + clip links)
+    SORT_COLUMNS = ("date", "length", "title", "clips", "file", "size")
+
+    def _archive_channels(self):
+        from msr import recordings_index as ri
+        stats = self._scan()
+        return [c for c in stats.ranked_channels() if any(k in c.paths for k in ri.LIST_CATEGORIES)]
+
+    def _archive_channel(self, ref):
+        """The Library channel for a roster ref (#N, key, name) or a folder name (platform:name)."""
+        from msr.util import channel_key_to_dirs
+        chans = self._archive_channels()
+        ref = str(ref or "").strip()
+        wanted = []
+        try:
+            platform, user = channel_key_to_dirs(self._channel_key(ref))
+            wanted.append((platform.lower(), user.split("/")[-1].lower()))
+        except ControlError:
+            pass
+        if ":" in ref:
+            p, n = ref.split(":", 1)
+            wanted.append((p.strip().lower(), n.strip().lstrip("@").lower()))
+        for p, n in wanted:
+            for c in chans:
+                if (c.platform.lower(), c.name.lower()) == (p, n):
+                    return c
+        named = [c for c in chans if c.name.lower() == ref.lower().lstrip("@")]
+        if len(named) == 1:
+            return named[0]
+        if len(named) > 1:
+            raise ControlError(f"'{ref}' is in {len(named)} platforms; write platform:name.", "ambiguous")
+        raise ControlError(f"No recordings folder for '{ref}' (see recordings_browse with no channel).", "not_found")
+
+    def cmd_recordings_browse(self, args):
+        """Library > Recordings: one channel's recordings (date, length, title, size, path) with
+        the clips cut from each. text= searches title + file name; sort= date|length|title|clips|
+        file|size; order=asc|desc. No channel: the channels that have recordings."""
+        from msr import recordings_index as ri
+        if not args.get("channel"):
+            return {"channels": [{"channel": f"{c.platform}:{c.name}", "files": c.rec_files + c.raw_files,
+                                  "bytes": c.recordings_bytes} for c in self._archive_channels()]}
+        sort = str(args.get("sort") or "date").lower()
+        if sort not in self.SORT_COLUMNS:
+            raise ControlError(f"sort must be one of {', '.join(self.SORT_COLUMNS)}.", "bad_request")
+        order = str(args.get("order") or "desc").lower()
+        if order not in ("asc", "desc"):
+            raise ControlError("order must be asc or desc.", "bad_request")
+        ch = self._archive_channel(args["channel"])
+        recs, loose = ri.channel_listing(ch.paths)
+        rows = ri.filter_sort(recs, str(args.get("text") or ""), sort, order == "desc")
+        limit = max(1, min(int(args.get("limit", 200)), 20000))
+        with_clips = not (args.get("clips") is not None and not _truthy(args.get("clips")))
+        return {"channel": f"{ch.platform}:{ch.name}", "count": len(rows), "truncated": max(0, len(rows) - limit),
+                "recordings": [ri.recording_dict(r, clips=with_clips) for r in rows[:limit]],
+                "unlinked_clips": len(loose)}
+
+    def cmd_recordings_clips(self, args):
+        """Clip <-> source: path= a recording gives its clips; path= a clip gives its source
+        recording (from the clip's .meta.json, else the Clip Editor's name pattern)."""
+        from msr import clip_core as core
+        from msr import recordings_index as ri
+        path = os.path.abspath(os.path.expanduser(str(args.get("path") or "")))
+        if not args.get("path") or not os.path.isfile(path):
+            raise ControlError(f"No such file: {args.get('path')}", "not_found")
+        want = os.path.normcase(path)
+        for ch in self._archive_channels():
+            folders = [v for k, v in ch.paths.items() if k in ri.LIST_CATEGORIES + ("clips",)]
+            if not any(want.startswith(os.path.normcase(os.path.abspath(f)) + os.sep) for f in folders):
+                continue
+            recs, _loose = ri.channel_listing(ch.paths)
+            for r in recs:
+                if os.path.normcase(r.path) == want:
+                    if r.orphan:
+                        break
+                    return {"kind": "recording", "recording": ri.recording_dict(r)}
+                for c in r.clips + r.related:
+                    if os.path.normcase(c.path) == want:
+                        return {"kind": "clip", "clip": ri.clip_dict(c), "source": ri.recording_dict(r, clips=False)}
+            break
+        link = core.read_clip_link(path)
+        if link is not None:
+            return {"kind": "clip", "source": None, "source_name": link["source_name"] or link["stem"],
+                    "note": "The source recording is not in the library any more."}
+        raise ControlError("That file is not a recording or clip in the library.", "not_found")
 
     def cmd_recordings_pending(self, args):
         """Raw .ts waiting for the cleanup remux, and what sits in PendingDeletion."""
@@ -1402,8 +1786,8 @@ class Controller:
         return {"events": tracker.events(int(args.get("after", 0) or 0)), "seq": tracker.seq}
 
     def cmd_wait(self, args):
-        """Block until a live / stopped / remux_started / finished / error / offline / ended event (for one channel),
-        or time out. A "finished" wait for a channel that was stopped starts at that stop, so a
+        """Block until an event (agent_status.EVENT_KINDS; for one channel: app-wide events such as
+        health_problem have channel null and only match a wait without channel), or time out. A "finished" wait for a channel that was stopped starts at that stop, so a
         finish that happened between the stop and the wait is returned at once."""
         from msr.agent_status import EVENT_KINDS
         tracker = self.app.tracker
@@ -1432,6 +1816,11 @@ class Controller:
         if ev is None:
             raise ControlError(f"No {'/'.join(kinds)} event within {timeout:g}s.", "timeout")
         return ev
+
+    def cmd_subscribe(self, args):
+        """Streaming: handled by ControlServer on its own connection (JSON lines until closed)."""
+        raise ControlError("subscribe streams events on its own connection: use control.subscribe() "
+                           "or msr_ctl.py subscribe.", "bad_request")
 
     # -------------------------------------------------- quit
     def cmd_quit(self, args):
@@ -1670,6 +2059,8 @@ class ControlServer:
         self._sock = None
         self._thread = None
         self._closing = threading.Event()
+        self._subs = 0
+        self._subs_lock = threading.Lock()
 
     @property
     def port(self):
@@ -1732,7 +2123,12 @@ class ControlServer:
                     buf += chunk
                     if len(buf) > MAX_REQUEST:
                         raise ValueError("request too large")
-                reply = self.dispatch(buf.split(b"\n", 1)[0])
+                line = buf.split(b"\n", 1)[0]
+                req = self._parse(line)
+                if req is not None and req.get("cmd") == "subscribe" and self._authorized(req):
+                    self._subscribe(conn, req.get("args") or {})
+                    return
+                reply = self.dispatch(line)
             except (OSError, ValueError) as e:
                 reply = {"ok": False, "code": "bad_request", "error": str(e)}
             try:
@@ -1740,18 +2136,101 @@ class ControlServer:
             except OSError:
                 pass
 
-    def dispatch(self, line: bytes) -> dict:
+    @staticmethod
+    def _parse(line):
         try:
             req = json.loads(line.decode("utf-8"))
-            if not isinstance(req, dict):
-                raise ValueError
         except (ValueError, UnicodeDecodeError):
-            return {"ok": False, "code": "bad_request", "error": "Send one JSON object per line."}
+            return None
+        return req if isinstance(req, dict) else None
+
+    def _authorized(self, req):
         token = req.get("token")
-        if not isinstance(token, str) or not hmac.compare_digest(token.encode(), self.token.encode()):
+        return isinstance(token, str) and hmac.compare_digest(token.encode(), self.token.encode())
+
+    def dispatch(self, line: bytes) -> dict:
+        req = self._parse(line)
+        if req is None:
+            return {"ok": False, "code": "bad_request", "error": "Send one JSON object per line."}
+        if not self._authorized(req):
             logging.warning("Control: request with a wrong or missing token refused")
             return {"ok": False, "code": "auth", "error": "Wrong or missing token."}
         return self.controller.handle(req.get("cmd"), req.get("args") or {})
+
+    # -------------------------------------------------- subscribe (one open stream per client)
+    def _subscribe(self, conn, args):
+        """JSON lines on this connection: the ack, then {"type": "event"}, {"type": "heartbeat"}
+        every ``heartbeat`` s, and {"type": "bye"} when the server stops or ``max_seconds`` ends.
+        A closed client ends it at once."""
+        from msr.agent_status import EVENT_KINDS
+
+        def send(obj):
+            conn.sendall(json.dumps(obj).encode("utf-8") + b"\n")
+
+        tracker = getattr(self.controller.app, "tracker", None)
+        try:
+            kinds = args.get("events") or list(EVENT_KINDS)
+            if isinstance(kinds, str):
+                kinds = [k.strip() for k in kinds.split(",") if k.strip()]
+            bad = [k for k in kinds if k not in EVENT_KINDS]
+            if bad:
+                raise ControlError(f"event must be one of {', '.join(EVENT_KINDS)}.", "bad_request")
+            heartbeat = max(1.0, min(float(args.get("heartbeat", 15)), 300.0))
+            max_seconds = float(args.get("max_seconds") or 0)
+            channel = self.controller._channel_key(args["channel"]) if args.get("channel") else None
+            if tracker is None:
+                raise ControlError("Multi-Stream Recorder is not running.", "not_running")
+        except ControlError as e:
+            send({"ok": False, "code": e.code, "error": str(e)})
+            return
+        except (TypeError, ValueError) as e:
+            send({"ok": False, "code": "bad_request", "error": str(e)})
+            return
+        with self._subs_lock:
+            if self._subs >= MAX_SUBSCRIBERS:
+                send({"ok": False, "code": "busy", "error": f"Too many subscribers (max {MAX_SUBSCRIBERS})."})
+                return
+            self._subs += 1
+        try:
+            after = int(args["after"]) if args.get("after") not in (None, "") else tracker.seq
+            send({"ok": True, "result": {"subscribed": True, "seq": after, "heartbeat": heartbeat,
+                                         "events": list(kinds)}})
+            wanted = set(kinds)
+            started = time.monotonic()
+            last_beat = time.monotonic()
+            while True:
+                if self._closing.is_set():
+                    send({"type": "bye", "reason": "server stopping"})
+                    return
+                if max_seconds and time.monotonic() - started >= max_seconds:
+                    send({"type": "bye", "reason": "max_seconds"})
+                    return
+                if self._peer_closed(conn):
+                    return
+                for ev in tracker.events_after(after, min(1.0, heartbeat)):
+                    after = max(after, ev["seq"])
+                    if ev["event"] in wanted and (channel is None or ev["channel"] == channel):
+                        send({"type": "event", "event": ev})
+                if time.monotonic() - last_beat >= heartbeat:
+                    send({"type": "heartbeat", "seq": tracker.seq, "time": round(time.time(), 1)})
+                    last_beat = time.monotonic()
+        except OSError:
+            return  # the client went away
+        finally:
+            with self._subs_lock:
+                self._subs -= 1
+
+    @staticmethod
+    def _peer_closed(conn) -> bool:
+        conn.setblocking(False)
+        try:
+            return conn.recv(1) == b""   # anything sent by the client is ignored
+        except (BlockingIOError, InterruptedError):
+            return False
+        except OSError:
+            return True
+        finally:
+            conn.settimeout(30)
 
 
 # ------------------------------------------------------------------ the client
@@ -1814,6 +2293,47 @@ def call(data_dir, cmd, args=None, timeout=600.0, token=None):
         raise NotRunning("no answer") from None
 
 
+def subscribe(data_dir, args=None, token=None, idle_timeout=None):
+    """Yield the stream's JSON objects (the ack first) until the server says bye or closes.
+    ``idle_timeout``: give up when nothing (not even a heartbeat) came for that long."""
+    info = read_control_file(data_dir)
+    if info is None:
+        raise NotRunning("no msr_control.json")
+    if info.get("api_version") != API_VERSION:
+        raise ApiMismatch(f"The running Multi-Stream Recorder speaks control API v{info.get('api_version')}, "
+                          f"this client v{API_VERSION}.")
+    args = dict(args or {})
+    beat = float(args.get("heartbeat", 15))
+    idle = float(idle_timeout or beat * 3 + 10)
+    try:
+        sock = socket.create_connection(("127.0.0.1", int(info["port"])), timeout=5)
+    except OSError as e:
+        raise NotRunning(str(e)) from None
+    with sock:
+        sock.sendall(json.dumps({"token": token if token is not None else info["token"], "cmd": "subscribe",
+                                 "args": args}).encode("utf-8") + b"\n")
+        buf = b""
+        last = time.monotonic()
+        while True:
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                obj = json.loads(line.decode("utf-8"))
+                yield obj
+                if obj.get("type") == "bye" or obj.get("ok") is False:
+                    return
+            if time.monotonic() - last > idle:
+                raise socket.timeout("the stream went quiet")
+            sock.settimeout(1.0)  # short slices: Ctrl+C is seen at once on Windows
+            try:
+                chunk = sock.recv(65536)
+            except socket.timeout:
+                continue
+            if not chunk:
+                return
+            last = time.monotonic()
+            buf += chunk
+
+
 # ------------------------------------------------------------------ wiring for the app
 class Service:
     """Server + status writer for one app adapter; ``start_for`` returns None when turned off."""
@@ -1827,7 +2347,9 @@ class Service:
         except Exception:
             pass
         from msr.agent_status import Tracker
+        from msr import library_actions
         app.tracker = Tracker(app.config)
+        library_actions.add_listener(app.tracker.on_library)
         self.status = StatusWriter(app, interval)
         self.controller.on_change = self.status.poke
         self.server = ControlServer(self.controller, app.data_dir, app.mode)
@@ -1849,4 +2371,10 @@ class Service:
     def stop(self):
         if self.server is not None:
             self.server.stop()
+        from msr import library_actions
+        library_actions.remove_listener(self.app.tracker.on_library)
+        try:  # queued requests fail at once instead of waiting on a closing window
+            self.app.close()
+        except Exception:
+            pass
         self.status.stop()

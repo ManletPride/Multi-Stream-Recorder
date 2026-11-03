@@ -60,7 +60,8 @@ CATALOG = {
     "channels": ("read", ["channels"]),
     "ping": ("read", ["ping"]),
     "help": ("read", ["help --json"]),
-    "health": ("read", ["health"]),
+    "health": ("read", ["health", "health --check-now"]),
+    "sound-test": ("read", ["sound-test live"]),
     "start": ("session", ["start"]),
     "stop": ("session", ["stop"]),
     "quit": ("session", ["quit"]),
@@ -71,10 +72,13 @@ CATALOG = {
     "disable": ("write", ["disable knut", "disable --all"]),
     "record-start": ("session", ["record-start knut"]),
     "record-stop": ("session", ["record-stop knut"]),
-    "recordings": ("read", ["recordings --since 24h", "recordings pending", "recordings retry"]),
+    "recordings": ("read", ["recordings --since 24h", "recordings pending", "recordings retry",
+                            "recordings browse --channel knut --search tokyo --sort length",
+                            "recordings clips --path D:/streams/Clips/kick/knut/clip.mp4"]),
     "wait": ("read", ["wait --event finished --channel knut --timeout 600",
                       "wait --event offline --channel knut --timeout 3600"]),
     "events": ("read", ["events --after 0"]),
+    "subscribe": ("read", ["subscribe", "subscribe --event finished --event health_problem --heartbeat 30"]),
     "move": ("write", ["move knut --to top"]),
     "sort": ("write", ["sort platform"]),
     "edit": ("write", ["edit twitch:old --name new"]),
@@ -100,11 +104,35 @@ CATALOG = {
     "library log": ("read", ["library log -n 20"]),
     "history list": ("read", ["history list channels"]),
     "history restore": ("destructive", ["history restore channels 2 --yes"]),
+    "twitch status": ("read", ["twitch status", "twitch status --online"]),
+    "twitch connect": ("write", ["twitch connect", "twitch connect --wait", "twitch connect --cancel"]),
+    "twitch disconnect": ("write", ["twitch disconnect"]),
     "call": ("depends on the command", ["call ping"]),
+}
+# Window feature -> CLI commands (help --json "gui_features"; a test checks every name exists).
+GUI_FEATURES = {
+    "Channels tab (roster, add/remove, tick, move, sort)": ["channels", "add", "remove", "enable", "disable",
+                                                             "move", "sort", "edit", "reload-channels"],
+    "Start / Stop Recording, per-channel start/stop, Check Now": ["start", "stop", "record-start", "record-stop",
+                                                                   "check"],
+    "Clip Now, Screenshot, Clip Editor cut": ["clip", "screenshot"],
+    "Options tab: settings (folders, clips, cleanup, timing, Fishtank login, ffmpeg)": ["config get", "config set",
+                                                                                         "config reload"],
+    "Options tab: Twitch connect / disconnect": ["twitch status", "twitch connect", "twitch disconnect"],
+    "Options tab: Sounds (checkboxes = config set Sounds.*, Test button)": ["config set", "sound-test"],
+    "Health line and details": ["health", "config set"],
+    "Library tab, PendingDeletion / Clean up": ["library summary", "library files", "library plan", "library run",
+                                                "library pending", "library batches", "library restore",
+                                                "library suggest", "library log"],
+    "Library > Recordings (list, search, sort, clips under each recording)": ["recordings"],
+    "Logs tab": ["logs"],
+    "Updates window": ["update check", "update install", "deps"],
+    "Restore previous channel list / settings": ["history list", "history restore"],
+    "Quit": ["quit"],
 }
 SAFETY_NOTES = {"deps": "deps list / check only read; deps update pip-installs (old version restored on failure)",
                 "recordings": "recordings retry runs the cleanup remux (write; originals kept until verified)"}
-LIVE_ONLY = {"start", "stop", "quit", "record_start", "record_stop", "check", "clip", "screenshot",
+LIVE_ONLY = {"subscribe", "sound_test", "start", "stop", "quit", "record_start", "record_stop", "check", "clip", "screenshot",
              "update_install", "wait", "events"}
 CODE_EXIT = {"auth": EXIT_AUTH, "confirm_required": EXIT_CONFIRM, "not_running": EXIT_NOT_RUNNING,
              "timeout": EXIT_TIMEOUT}
@@ -154,8 +182,12 @@ def build_parser():
                        ("ping", "is a copy running?"),
                        ("start", "Start Recording"), ("stop", "Stop Recording"), ("quit", "quit the app cleanly"),
                        ("reload-channels", "re-read channels.json"),
-                       ("health", "tools, disk space, cookies, Fishtank login, problems")):
+                       ):
         sub.add_parser(name, help=text)
+    sub.add_parser("health", help="tools, disk space, cookies, Fishtank login, problems; the window's Health line") \
+        .add_argument("--check-now", action="store_true", help="window: run the full Health check again")
+    sub.add_parser("sound-test", help="Options > Sounds: play one sound (ignores its checkbox)") \
+        .add_argument("event", choices=["live", "problem", "clip"])
 
     sub.add_parser("help", help="every command: arguments, safety, examples (local; --json for agents)") \
         .add_argument("--json", dest="help_json", action="store_true", help="machine-readable catalog")
@@ -173,11 +205,16 @@ def build_parser():
         p.add_argument("channels", nargs="*", help="#N, key or shown name")
         p.add_argument("--all", action="store_true", help="every channel in the roster")
 
-    p = sub.add_parser("recordings", help="finished recordings; 'pending' = waiting files; 'retry' = run cleanup")
-    p.add_argument("action", nargs="?", default="list", choices=["list", "pending", "retry"])
+    p = sub.add_parser("recordings", help="finished recordings; 'pending' = waiting files; 'retry' = run cleanup; "
+                                          "'browse' = Library > Recordings (title, length, clips); 'clips' = clip <-> source")
+    p.add_argument("action", nargs="?", default="list", choices=["list", "pending", "retry", "browse", "clips"])
     p.add_argument("--since", help="24h, 7d, 2026-10-29 or '2026-10-29 14:00'")
     p.add_argument("--channel")
-    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--limit", type=int)
+    p.add_argument("--search", help="browse: words in the title or file name")
+    p.add_argument("--sort", choices=["date", "length", "title", "clips", "file", "size"], help="browse")
+    p.add_argument("--asc", action="store_true", help="browse: oldest / smallest first")
+    p.add_argument("--path", help="clips: a recording or a clip file")
     p = sub.add_parser("wait", help="block until a channel goes live, a recording finishes or an error")
     p.add_argument("--event", action="append", choices=list(EVENT_KINDS),
                    help="repeatable; default: any. A 'finished' wait for a channel that was stopped "
@@ -187,6 +224,12 @@ def build_parser():
                    help="seconds (max 3600); exit code 6 when nothing happened")
     p.add_argument("--after", type=int, help="event seq to continue from (no event is missed between waits)")
     sub.add_parser("events", help="recent events (" + "/".join(EVENT_KINDS) + ")").add_argument("--after", type=int, default=0)
+    p = sub.add_parser("subscribe", help="stay connected and print events as they happen (JSON lines with --json)")
+    p.add_argument("--event", action="append", choices=list(EVENT_KINDS), help="repeatable; default: all")
+    p.add_argument("--channel")
+    p.add_argument("--after", type=int, help="also send events after this seq first")
+    p.add_argument("--heartbeat", type=float, default=15.0, help="seconds between heartbeats (1-300)")
+    p.add_argument("--for", dest="max_seconds", type=float, help="stop after this many seconds")
     p = sub.add_parser("move", help="reorder")
     p.add_argument("channels", nargs="+")
     p.add_argument("--to", required=True, choices=["top", "bottom", "up", "down"])
@@ -265,6 +308,15 @@ def build_parser():
     r.add_argument("index", type=int)
     r.add_argument("--yes", action="store_true")
 
+    p = sub.add_parser("twitch", help="Twitch sign-in (Options tab): status, connect, disconnect")
+    tsub = p.add_subparsers(dest="action", required=True)
+    tsub.add_parser("status").add_argument("--online", action="store_true", help="validate at Twitch")
+    t = tsub.add_parser("connect", help="device-code sign-in: prints the code and the twitch.tv/activate link")
+    t.add_argument("--wait", action="store_true", help="stay until approved (also resumes a started sign-in)")
+    t.add_argument("--cancel", action="store_true", help="stop a sign-in that is waiting")
+    t.add_argument("--for", dest="wait_for", type=float, default=600.0, help="seconds to wait (max 1800)")
+    tsub.add_parser("disconnect", help="revoke at Twitch and delete the saved sign-in")
+
     p = sub.add_parser("call", help="send any protocol command with JSON args")
     p.add_argument("cmd")
     p.add_argument("args", nargs="?", default="{}")
@@ -287,11 +339,21 @@ def to_request(a):
     if c == "remove":
         return "channel_" + c, {"channels": a.channels}
     if c == "health":
-        return "health", {}
+        return "health", {"check_now": True} if a.check_now else {}
+    if c == "sound-test":
+        return "sound_test", {"event": a.event}
     if c == "recordings":
         if a.action == "list":
             return "recordings", {k: v for k, v in {"since": a.since, "channel": a.channel,
-                                                    "limit": a.limit}.items() if v is not None}
+                                                    "limit": a.limit or 50}.items() if v is not None}
+        if a.action == "browse":
+            return "recordings_browse", {k: v for k, v in {
+                "channel": a.channel, "text": a.search, "sort": a.sort, "order": "asc" if a.asc else None,
+                "limit": a.limit}.items() if v is not None}
+        if a.action == "clips":
+            if not a.path:
+                raise SystemExit("recordings clips: give --path")
+            return "recordings_clips", {"path": a.path}
         return "recordings_" + a.action, {}
     if c == "wait":
         args = {"events": a.event or list(EVENT_KINDS), "timeout": a.wait_timeout}
@@ -302,6 +364,10 @@ def to_request(a):
         return "wait", args
     if c == "events":
         return "events", {"after": a.after}
+    if c == "subscribe":
+        return "subscribe", {k: v for k, v in {"events": a.event, "channel": a.channel, "after": a.after,
+                                               "heartbeat": a.heartbeat, "max_seconds": a.max_seconds}.items()
+                             if v is not None}
     if c in ("record-start", "record-stop"):
         return c.replace("-", "_"), {"channels": a.channels}
     if c == "move":
@@ -369,6 +435,14 @@ def to_request(a):
         if a.action == "list":
             return "history_list", {"file": a.file}
         return "history_restore", {"file": a.file, "index": a.index, "confirm": a.yes}
+    if c == "twitch":
+        if a.action == "status":
+            return "twitch_status", {"online": True} if a.online else {}
+        if a.action == "connect":
+            if a.cancel:
+                return "twitch_connect", {"cancel": True}
+            return "twitch_connect", {"wait": True, "timeout": a.wait_for} if a.wait else {}
+        return "twitch_disconnect", {}
     if c == "call":
         return a.cmd, json.loads(a.args)
     raise SystemExit(f"unknown command {c}")
@@ -431,6 +505,7 @@ def catalog():
                           "session": "starts or stops recording, or the app",
                           "destructive": "removes or replaces something; needs --yes or --confirm WORD"},
         "commands": commands,
+        "gui_features": GUI_FEATURES,
     }
 
 
@@ -463,12 +538,23 @@ def run_offline(data_dir, cmd, args):
         if cmd in LIVE_ONLY and not (cmd == "clip" and args.get("file")):
             return {"ok": False, "code": "not_running", "error": "Multi-Stream Recorder is not running."}, \
                 EXIT_NOT_RUNNING
-        reply = control.Controller(control.OfflineApp(config)).handle(cmd, args)
+        ctl = control.Controller(control.OfflineApp(config))
+        if cmd == "twitch_connect" and args.get("wait"):  # this process runs the sign-in
+            _show_twitch_code(ctl.handle(cmd, {"local": True}))
+        reply = ctl.handle(cmd, args)
         if cmd == "status" and reply.get("ok"):
             reply["result"]["app"]["running"] = False
         return reply, None
     finally:
         os.chdir(cwd)
+
+
+def _show_twitch_code(reply):
+    """Before a --wait: show the code to approve (stderr, so --json stdout stays one reply)."""
+    res = reply.get("result") or {}
+    if reply.get("ok") and res.get("user_code"):
+        print(f"Open {res['verification_url']} and enter code {res['user_code']} (waiting...)",
+              file=sys.stderr, flush=True)
 
 
 def _channel_lines(res):
@@ -529,9 +615,24 @@ def human(cmd, reply):
         for name, t in (res.get("tools") or {}).items():
             lines.append(f"{name}: {(t.get('version') or 'yes') if t.get('available') else 'missing'}")
         return "\n".join(lines)
+    if cmd == "recordings_browse" and "recordings" in res:
+        lines = []
+        for r in res["recordings"]:
+            lines.append(f"{(r['date'] or '?')[:16]:<16} {r['length'] or '-':>8} {r['size'] / 1e6:>9.1f} MB  "
+                         f"{r['title'] or '-'}  [{r['file']}]" + (f"  {r['clip_count']} clip(s)" if r["clip_count"] else ""))
+        return "\n".join(lines) or "No recordings match."
     if cmd == "recordings":
         return "\n".join(f"{r['finished_at']}  {r['channel']:<28} {r['size'] / 1e6:>9.1f} MB  {r['path']}"
                          for r in res["recordings"]) or "No finished recordings in that range."
+    if cmd == "twitch_connect" and res.get("user_code") and not res.get("connected"):
+        return (f"Open {res['verification_url']} and enter code {res['user_code']}.\n"
+                "Then run: msr_ctl.py twitch connect --wait")
+    if cmd == "twitch_status":
+        text = {"connected": f"Twitch: connected as {res.get('login') or '?'}", "expired": "Twitch: expired, connect again",
+                "none": "Twitch: not connected"}.get(res.get("state"), str(res.get("state")))
+        if res.get("connecting"):
+            text += f"\nWaiting for approval: {res['verification_url']} code {res['user_code']}"
+        return text + f"\ninstant alerts: {'on' if res.get('push_enabled') else 'off'}"
     if cmd == "wait":
         return f"#{res['seq']} {res['at']} {res['event']} {res['channel']}" + (
             f" {res['path']}" if res.get("path") else "") + (f" {res['error']}" if res.get("error") else "")
@@ -555,12 +656,16 @@ def main(argv=None):
         handed = _deps_in_venv(argv)
         if handed is not None:
             return handed
+    if cmd == "subscribe":
+        return run_subscribe(data_dir, args, a.json)
     exit_code = None
     try:
         timeout = a.timeout
-        if cmd == "wait":
+        if cmd == "wait" or (cmd == "twitch_connect" and args.get("wait")):
             timeout = max(timeout, float(args.get("timeout", 300)) + 30)  # outlives the server's wait
             _warn_if_nothing_to_finish(data_dir, args)
+        if cmd == "twitch_connect" and args.get("wait"):
+            _show_twitch_code(control.call(data_dir, "twitch_connect", {}, timeout=60))
         reply = control.call(data_dir, cmd, args, timeout=timeout)
     except control.NotRunning:
         reply, exit_code = run_offline(data_dir, cmd, args)
@@ -578,6 +683,35 @@ def main(argv=None):
         pass
     print(out, file=stream)
     return exit_code
+
+
+def run_subscribe(data_dir, args, as_json, out=None):
+    """Print the stream until the server says bye, the link drops or Ctrl+C (exit 130)."""
+    out = out or sys.stdout
+    try:
+        for obj in control.subscribe(data_dir, args):
+            if obj.get("ok") is False:
+                print(human("subscribe", obj), file=sys.stderr)
+                return CODE_EXIT.get(obj.get("code"), EXIT_FAILED)
+            if as_json:
+                print(json.dumps(obj), file=out, flush=True)
+            elif obj.get("type") == "event":
+                ev = obj["event"]
+                extra = {k: v for k, v in ev.items() if k not in ("seq", "event", "channel", "time", "at")}
+                print(f"#{ev['seq']} {ev['at']} {ev['event']} {ev['channel'] or '-'} "
+                      + " ".join(f"{k}={v}" for k, v in extra.items()), file=out, flush=True)
+            elif obj.get("type") == "bye":
+                print(f"(stream ended: {obj.get('reason')})", file=sys.stderr)
+    except control.NotRunning:
+        print("error (not_running): Multi-Stream Recorder is not running.", file=sys.stderr)
+        return EXIT_NOT_RUNNING
+    except control.ApiMismatch as e:
+        print(f"error (api_mismatch): {e}", file=sys.stderr)
+        return EXIT_API
+    except (socket.timeout, TimeoutError):
+        print("error (timeout): the stream went quiet (no heartbeat).", file=sys.stderr)
+        return EXIT_TIMEOUT
+    return EXIT_OK
 
 
 def _deps_in_venv(argv, run=subprocess.run):

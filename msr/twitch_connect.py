@@ -3,6 +3,7 @@
 Events go to a queue the Options tab drains with after():
 ("code", uri, user_code, expires_in) / ("connected", login) /
 ("expired",) / ("error", text) / ("cancelled",).
+Only one job runs per process (Options or control): start() raises SignInBusy.
 """
 
 import queue
@@ -10,6 +11,32 @@ import threading
 import time
 
 from msr import twitch_eventsub as te
+
+_lock = threading.Lock()
+_active = None
+
+
+class SignInBusy(Exception):
+    """Another sign-in is running; .job is it (its .info has the code once known)."""
+
+    def __init__(self, job):
+        super().__init__("A Twitch sign-in is already in progress.")
+        self.job = job
+
+
+def active():
+    """The running sign-in job (Options or control), or None."""
+    with _lock:
+        return _active if _active is not None and not _active.done else None
+
+
+def client_id_for(config, api=te):
+    """The configured app id, or MSR's public one (shared by Options and control)."""
+    try:
+        cid = (config.get("Twitch", "client_id", fallback="") or "").strip()
+    except Exception:
+        cid = ""
+    return cid or api.DEFAULT_CLIENT_ID
 
 
 def status_of(data_dir, client_id, api=te):
@@ -59,8 +86,11 @@ def disconnect(data_dir, api=te):
 
 
 class ConnectJob:
-    def __init__(self, client_id, data_dir, api=te, sleep=None, clock=time.time):
+    def __init__(self, client_id, data_dir, api=te, sleep=None, clock=time.time, owner=""):
         self.client_id = client_id
+        self.owner = owner
+        self.info = {}      # user_code, verification_url, expires_at once Twitch answers
+        self.done = False
         self.data_dir = data_dir
         self.api = api
         self.clock = clock
@@ -70,6 +100,11 @@ class ConnectJob:
         self.thread = None
 
     def start(self):
+        global _active
+        with _lock:
+            if _active is not None and not _active.done:
+                raise SignInBusy(_active)
+            _active = self
         self.thread = threading.Thread(target=self._run, daemon=True, name="twitch-connect")
         self.thread.start()
         return self
@@ -78,13 +113,25 @@ class ConnectJob:
         self._cancel.set()
 
     def running(self):
-        return bool(self.thread and self.thread.is_alive())
+        return bool(self.thread and self.thread.is_alive() and not self.done)
 
     def _run(self):
+        global _active
+        try:
+            self._flow()
+        finally:
+            with _lock:
+                self.done = True
+                if _active is self:
+                    _active = None
+
+    def _flow(self):
         try:
             d = self.api.device_start(self.client_id)
             expires = int(d.get("expires_in") or 1800)
             code = d.get("user_code") or ""
+            self.info = {"user_code": code, "expires_at": round(time.time() + expires),
+                         "verification_url": te.safe_verification_uri(d.get("verification_uri"), code)}
             self.events.put(("code", te.safe_verification_uri(d.get("verification_uri"), code),
                              code, expires))
             deadline = self.clock() + expires
