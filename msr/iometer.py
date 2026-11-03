@@ -390,6 +390,11 @@ def format_tooltip(snap: IoSnapshot) -> str:
     return "\n".join(lines)
 
 
+def _monotonic():
+    # own name so tests can fake this clock without patching time.monotonic for every thread
+    return time.monotonic()
+
+
 class IoSampler:
     """Pair consecutive OS / file-size samples into rates."""
 
@@ -416,7 +421,7 @@ class IoSampler:
         )
 
     def sample(self, msr_sizes=None, msr_stream_mbps: float = 0.0) -> IoSnapshot:
-        now = time.monotonic()
+        now = _monotonic()
         disk = read_disk_write(self.path)
         recv = read_net_recv_bytes()
         sizes = dict(msr_sizes or {})

@@ -196,9 +196,9 @@ class DiskKeyTests(unittest.TestCase):
 class SamplerTests(unittest.TestCase):
     @mock.patch("msr.iometer.read_net_recv_bytes")
     @mock.patch("msr.iometer.read_disk_write")
-    @mock.patch("msr.iometer.time.monotonic")
+    @mock.patch("msr.iometer._monotonic")
     def test_second_sample_yields_rates(self, mono, disk, net):
-        mono.side_effect = [1.0, 2.0]
+        mono.side_effect = _clock(1.0, 2.0)
         disk.side_effect = [
             ("E:", 1_000_000, 10.0),
             ("E:", 3_000_000, 110.0),
@@ -221,9 +221,9 @@ class SamplerTests(unittest.TestCase):
 
     @mock.patch("msr.iometer.read_net_recv_bytes")
     @mock.patch("msr.iometer.read_disk_write")
-    @mock.patch("msr.iometer.time.monotonic")
+    @mock.patch("msr.iometer._monotonic")
     def test_sleep_gap_resets(self, mono, disk, net):
-        mono.side_effect = [1.0, 10.0]
+        mono.side_effect = _clock(1.0, 10.0)
         disk.side_effect = [
             ("E:", 1_000_000, 0.0),
             ("E:", 9_000_000, 0.0),
@@ -238,7 +238,7 @@ class SamplerTests(unittest.TestCase):
 
     @mock.patch("msr.iometer.read_net_recv_bytes")
     @mock.patch("msr.iometer.read_disk_write")
-    @mock.patch("msr.iometer.time.monotonic")
+    @mock.patch("msr.iometer._monotonic")
     def test_msr_growth_on_third_tick(self, mono, disk, net):
         mono.side_effect = _clock(1.0, 2.0, 3.0)
         disk.side_effect = [
@@ -256,7 +256,7 @@ class SamplerTests(unittest.TestCase):
 
     @mock.patch("msr.iometer.read_net_recv_bytes")
     @mock.patch("msr.iometer.read_disk_write")
-    @mock.patch("msr.iometer.time.monotonic")
+    @mock.patch("msr.iometer._monotonic")
     def test_sparse_worker_size_bytes_not_a_one_second_spike(self, mono, disk, net):
         # Worker status only moves every 5s; GUI samples every 1s.
         mono.side_effect = _clock(0.0, 1.0, 2.0, 3.0, 4.0, 5.0)
