@@ -77,7 +77,11 @@ def installed_version(dist: str) -> str | None:
 def _get_json(url: str, timeout: float = 10.0, opener=None):
     req = urllib.request.Request(url, headers={"User-Agent": "MultiStreamRecorder-deps",
                                                "Accept": "application/json"})
-    with (opener or urllib.request.urlopen)(req, timeout=timeout) as resp:
+    if opener is None:
+        from msr.tls import https_context
+        ctx = https_context()
+        opener = lambda r, timeout: urllib.request.urlopen(r, timeout=timeout, context=ctx)  # noqa: E731
+    with opener(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -179,9 +183,25 @@ def python_label() -> str:
 def _why(e: Exception) -> str:
     if isinstance(e, urllib.error.HTTPError):
         return "No published release found." if e.code == 404 else f"Update server answered HTTP {e.code}."
+    from msr.tls import is_cert_error
+    if is_cert_error(e):
+        return ("Secure connection failed: the server's certificate is not trusted on this PC "
+                f"({str(getattr(e, 'reason', e))[:120]}).")
     if _offline(e):
-        return "Could not reach the update server (offline?)."
+        reason = str(getattr(e, "reason", "") or e)[:120]
+        return f"Could not reach the update server (offline? {reason})." if reason else \
+            "Could not reach the update server (offline?)."
     return f"Check failed: {type(e).__name__}: {str(e)[:150]}"
+
+
+def summary_text(rs: list[dict]) -> str:
+    """Footer after a check: never "up to date" when an item could not be checked."""
+    n = len(updates_available(rs))
+    failed = [r["label"] for r in rs if r.get("status") == "unknown"]
+    if failed:
+        rest = f"{n} update(s) available for the rest." if n else "other items are up to date."
+        return f"Could not check {', '.join(failed)}; {rest}"
+    return f"{n} update(s) available." if n else "Everything is up to date."
 
 
 def updates_available(rs: list[dict]) -> list[str]:

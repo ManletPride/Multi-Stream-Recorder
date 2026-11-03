@@ -523,7 +523,8 @@ def check_for_updates(current_version, callback=None):
                 'User-Agent': f'MultiStreamRecorder/{current_version}',
             })
 
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            from msr.tls import https_context
+            with urllib.request.urlopen(req, timeout=10, context=https_context()) as resp:
                 data = json.loads(resp.read().decode('utf-8'))
 
             latest_tag = data.get('tag_name', '').lstrip('vV')

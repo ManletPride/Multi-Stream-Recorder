@@ -145,8 +145,7 @@ def open_deps_dialog(parent, *, config, state_file, ffmpeg_path="ffmpeg", on_msr
                 state["busy"] = False
                 if kind == "rows":
                     state["rows"] = payload
-                    n = len(depsupdate.updates_available(payload))
-                    msg.configure(text=f"{n} update(s) available." if n else "Everything is up to date.")
+                    msg.configure(text=depsupdate.summary_text(payload))
                 elif kind == "update":
                     res, rs = payload
                     state["rows"] = rs

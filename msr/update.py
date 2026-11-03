@@ -169,7 +169,8 @@ def download_zipball(url, dest_path, timeout=60):
         "User-Agent": f"MultiStreamRecorder/{__version__}",
     })
     written = 0
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    from msr.tls import https_context
+    with urllib.request.urlopen(req, timeout=timeout, context=https_context()) as resp:
         final = resp.geturl() or url
         if not zipball_url_is_allowed(final):
             raise ValueError("update redirected off GitHub")
