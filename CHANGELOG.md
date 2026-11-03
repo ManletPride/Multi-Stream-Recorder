@@ -2,8 +2,37 @@
 
 ## Unreleased
 
+Toward v3.1.0.
+
 ### Added
-- YouTube: a broadcast found live within its first 15 minutes is recorded from its start (yt-dlp `--live-from-start`), then follows live. Older broadcasts record live only. `[YouTube] live_from_start` (on) and `live_from_start_max_minutes` (15, 0–7200, 0 = no limit, never below the check interval + 2 min), both in Options → YouTube.
+
+**YouTube: record from the start (experimental)**
+- A YouTube broadcast found live within its first 15 minutes is recorded from its start (yt-dlp `--live-from-start`), then follows live, so a start between two checks is not lost. Older broadcasts record live only.
+- Only the first segment of a broadcast does this; reconnects, size/time splits and a second sighting of the same video record live as before.
+- The limit is in **Options > YouTube** (`[YouTube] live_from_start_max_minutes`, 15, 0-7200, 0 = no limit). It is never below the check interval + jitter + 2 min. `live_from_start = false` turns it off.
+- While it catches up the status says **catching up from start**; Clip Now and the preview don't work until it reaches live. yt-dlp writes video and audio as separate parts; MSR merges them when the recording ends, or at the next start if MSR was stopped.
+- yt-dlp calls `--live-from-start` experimental. Downloading a finished broadcast (VOD) is a separate, future feature.
+
+**Agent control v2** (`msr_ctl.py`, `api_version` stays 1)
+- `twitch status | connect | disconnect` (same as Options > Twitch); only one Twitch sign-in can run at a time, from the window or control.
+- `config set` uses the same checks and save as the Options tab (types, ranges, recordings-folder guards, secrets encrypted, `--stdin` for secrets).
+- `sound-test live|problem|clip`, `health --check-now` (reruns the window's Health check).
+- `recordings browse` and `recordings clips` (like Library > Recordings).
+- `subscribe`: a live stream of events as JSON lines with heartbeats, at most 8 at once.
+- New app-wide events: `health_problem`, `disk_low`, `update_available`, `library_action`.
+
+**Options tab**
+- **Manage on Twitch** button (opens your Twitch connections page). **Disconnect** revokes the token at Twitch in the background and always deletes it locally.
+
+### Changed
+- In the window, control commands now run through a queue the Tk thread drains, so no command touches the window from another thread. A command that cannot start within 30 s gets `busy`.
+- Library: the Files tab is folded into **Clean up** (single files to tick and delete are listed below the suggestions).
+
+### Security
+- `twitch_token.json` and the Fishtank password in `config.ini` are encrypted with Windows DPAPI (`password_dpapi`); existing plain values are migrated. Other systems keep plain text as before. **Older MSR versions see the Fishtank password as blank** after this; enter it again there if you go back.
+- `msr_control.json` (control port and token) is readable only by your Windows user.
+- Twitch reconnect URLs must be `wss://*.twitch.tv`, and only `twitch.tv/activate` links are opened.
+- Options warns when `cookies.txt` is in a synced folder (OneDrive, Dropbox, Google Drive...).
 
 ## v3.0.0 (2026-10-30)
 

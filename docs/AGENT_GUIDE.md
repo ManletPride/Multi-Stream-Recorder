@@ -119,6 +119,12 @@ python msr_ctl.py subscribe --after 41 --for 600           # JSON lines as event
 ```
 App-wide events have `channel: null`, so don't pass `--channel` for them. `subscribe` ends with a `bye` line when MSR stops; at most 8 at a time.
 
+**YouTube from the start**
+```
+python msr_ctl.py config set YouTube.live_from_start_max_minutes 60   # 0-7200, 0 = no limit
+```
+While a recording catches up, its status detail says `catching up from start`; `clip` works only after it reaches live.
+
 ## 4. Output and exit codes
 
 Add `--json` (before the command) to get the full reply: `{"ok": true, "result": ...}` or `{"ok": false, "code": "...", "error": "..."}`. Errors go to stderr.

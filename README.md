@@ -28,6 +28,13 @@ This README describes **v3.0.0**. Full history: [CHANGELOG.md](CHANGELOG.md).
 
 </details>
 
+## Coming in 3.1 (not released yet)
+
+- **YouTube from the start** (experimental): a broadcast MSR finds in its first 15 minutes is recorded from the beginning. See *Channels* below.
+- **More agent control**: Twitch sign-in, every Options setting, sound tests, Health check, Recordings browsing and a live event stream (`subscribe`). See [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md).
+- **Safer secrets**: the Twitch token and Fishtank password are encrypted on Windows; the control file is readable only by you.
+- **Options**: Manage on Twitch button, and a warning when `cookies.txt` sits in a synced folder.
+
 ## What's new in 3.0
 
 - **Clip Editor**: a DVR-style editor with a timeline, sound and a volume slider, smooth preview up to 60 fps, In/Out marks and lossless or frame-exact clips, also while the stream is still recording.
@@ -158,7 +165,7 @@ Use **+ Add channel**. Accepted forms:
 | Fishtank | `fishtank:director` or a raw stream id |
 | Custom | any URL yt-dlp supports, or an `.m3u8` |
 
-**YouTube from the start:** when a YouTube channel is found live within its first 15 minutes, MSR records it from the beginning (yt-dlp `--live-from-start`), so a start between two checks is not lost. It catches up faster than real time, then follows live. Later broadcasts record live only. The limit is **Options → YouTube → Only if live for at most (min)** (`[YouTube] live_from_start_max_minutes`, 0–7200, 0 = no limit). It is never below the check interval + 2 min. Raise it to grab older footage, which works more like a VOD download. Turn it off with `live_from_start = false`.
+**YouTube from the start:** when a YouTube channel is found live within its first 15 minutes, MSR records it from the beginning (yt-dlp `--live-from-start`), so a start between two checks is not lost. It catches up faster than real time, then follows live. Later broadcasts record live only. The limit is **Options → YouTube → Only if live for at most (min)** (`[YouTube] live_from_start_max_minutes`, 0–7200, 0 = no limit). Raise it to grab older footage, which works more like a VOD download. Turn it off with `live_from_start = false`. It counts as at least the check interval + jitter + 2 min. While it catches up the status says *catching up from start*, and Clip Now and the preview only work once it reaches live. Video and audio come down as separate parts that MSR merges at the end. yt-dlp marks this feature experimental; downloading a finished broadcast (VOD) is a separate, future feature.
 
 **Other sources:** Fishtank.live support is built in, but the show is between seasons and has no live cameras right now. Its camera list changes every season, so it may need an update when a new one starts. Details: [docs/fishtank.md](docs/fishtank.md).
 
@@ -180,7 +187,7 @@ The indicator under the roster shows whether cookies were found and when auth co
 email = you@example.com
 password = ...
 ```
-Or leave the password out and set the `MSR_FISHTANK_PASSWORD` environment variable. Camera names, season aliases and stream ids: [docs/fishtank.md](docs/fishtank.md).
+Or leave the password out and set the `MSR_FISHTANK_PASSWORD` environment variable. On Windows MSR encrypts the password on first start (stored as `password_dpapi`); an older MSR version then sees it as blank. The Options tab warns if `cookies.txt` is in a synced folder. Camera names, season aliases and stream ids: [docs/fishtank.md](docs/fishtank.md).
 
 ## Configuration
 
@@ -228,7 +235,7 @@ Run these with the environment's Python: `.venv\Scripts\python Multi-Stream-Reco
 Everything you do in the window can be done without it. A running copy (window or `--headless`) accepts commands on a local control channel, and `msr_ctl.py` is the command-line client. With nothing running, `msr_ctl.py` edits `channels.json` / `config.ini` directly.
 
 - **Start here:** [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md). `python msr_ctl.py help --json` lists every command with its arguments, safety level and an example.
-- **Local only:** `127.0.0.1` on a random port, with a random token in `msr_control.json` in the data folder (removed when MSR quits). Turn it off with `[Control] enabled = false` or `MSR_CONTROL=0`.
+- **Local only:** `127.0.0.1` on a random port, with a random token in `msr_control.json` in the data folder (readable only by your user, removed when MSR quits). Turn it off with `[Control] enabled = false` or `MSR_CONTROL=0`.
 - **Live status:** `msr_status.json` in the data folder (every 3 s): channels, recordings, errors, health (tools, disk space, cookie expiry), with no passwords, cookie values or tokens.
 - `msr_ctl.py` runs with any Python 3.10+; `deps` commands switch to `.venv` by themselves. Add `--json` for machine-readable output.
 
@@ -242,7 +249,9 @@ python msr_ctl.py clip NAME --seconds 30      # Clip Now
 python msr_ctl.py clip NAME --from=-1:00 --to end
 python msr_ctl.py clip --file "D:\...\x.mp4" --from 1:02:03 --to 1:02:48 --exact
 python msr_ctl.py wait --event finished --channel NAME --timeout 3600
-python msr_ctl.py health
+python msr_ctl.py health --check-now      # also reruns the window's Health check
+python msr_ctl.py twitch status            # or twitch connect | disconnect
+python msr_ctl.py subscribe --for 600      # live events as JSON lines (max 8 at once)
 python msr_ctl.py recordings --since 24h
 python msr_ctl.py library suggest --free 200 --older-days 90
 python msr_ctl.py config set Timeouts.poll_interval_minutes 1
