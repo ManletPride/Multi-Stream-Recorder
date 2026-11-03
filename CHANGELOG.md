@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Clip Editor: timeline zoom and scrub (Alt+wheel zooms at the pointer, Ctrl+wheel zoom-scaled step, wheel/Shift+wheel pan, +/-/0 keys, double-click reset, a zoom-window indicator, playhead follow while playing).
+- Clip Editor: optional waveform strip under the timeline (off by default, remembered). Read in the background with ffmpeg astats, cached in LocalAppData, incremental for live files, with one last read when the live edge stops growing.
+
 ## v3.1.1 (2026-11-03)
 
 Release notes: [docs/release_notes/RELEASE_NOTES_v3.1.1.md](docs/release_notes/RELEASE_NOTES_v3.1.1.md).
