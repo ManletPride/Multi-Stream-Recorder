@@ -23,7 +23,10 @@ class WinAclTests(unittest.TestCase):
             sddl = winacl.dacl_sddl(path)
             self.assertTrue(sddl.startswith("D:P"), sddl)    # protected: nothing inherited
             self.assertEqual(sddl.count("(A;"), 1, sddl)       # one allow entry ...
-            self.assertIn(sid, sddl)                            # ... for this user
+            # ... for this user; SDDL writes some SIDs as aliases (built-in Administrator, RID 500 = "LA",
+            # the CI runner account)
+            names = {sid} | ({"LA"} if sid.endswith("-500") else set())
+            self.assertTrue(any(f";;;{n})" in sddl for n in names), (sid, sddl))
             with open(path, "rb") as fh:
                 self.assertEqual(fh.read(), b"{}")              # still readable by us
             control._write_private(path, b"{1}")                # rewrite works too

@@ -358,10 +358,11 @@ def apply_setting(config, section, key, value, recording=False, live=None) -> st
     type/range checks, save (secrets DPAPI-encrypted by Config.save), then ``live(value)``
     for settings a running session takes at once. Returns the stored value."""
     section, key = str(section or ""), str(key or "").lower()
+    # before the known-key check: the _dpapi copy only exists in config.ini on Windows
+    if key.endswith("_dpapi") and ((section, key[:-6]) in SECRET_KEYS or known_setting(config, section, key)):
+        raise ControlError(f"Set {section}.{key[:-6]} instead; the encrypted copy is managed by MSR.", "invalid")
     if not known_setting(config, section, key):
         raise ControlError(f"Unknown setting {section}.{key}.", "not_found")
-    if key.endswith("_dpapi"):
-        raise ControlError(f"Set {section}.{key[:-6]} instead; the encrypted copy is managed by MSR.", "invalid")
     if (section, key) == ("Paths", "streams_dir") and recording:
         raise ControlError("Stop recording before changing the recordings folder.", "conflict")
     value = validate_setting(section, key, value)
