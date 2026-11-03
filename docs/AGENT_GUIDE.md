@@ -123,7 +123,7 @@ App-wide events have `channel: null`, so don't pass `--channel` for them. `subsc
 ```
 python msr_ctl.py config set YouTube.live_from_start_max_minutes 60   # 0-7200, 0 = no limit
 ```
-While a recording catches up, its status detail says `catching up from start`; `clip` works only after it reaches live.
+While a recording catches up, its status detail says `catching up from start` and `clip` / `screenshot` return code `busy` ("Available once caught up to live"). When it reaches live MSR starts a normal live part and they work again; `wait --event live` is not needed, just retry.
 
 ## 4. Output and exit codes
 

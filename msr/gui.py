@@ -53,7 +53,7 @@ from msr.iometer import (
     IoSampler, format_header, format_tooltip, meter_severity, sum_stream_mbps,
 )
 from msr.worker import (
-    channel_status_allows_clip, create_clip, create_preview_frame,
+    CATCHUP_UNAVAILABLE, channel_status_allows_clip, clip_unavailable_reason, create_clip, create_preview_frame,
     create_screenshot, find_active_recording_file, screenshot_extension,
 )
 
@@ -1643,6 +1643,9 @@ def main_gui(config):
         if not channel_status_allows_clip(st.get("status", "")):
             logging.info(f"Clip Now: {_get_display_name(ch_name)} is not currently recording")
             return
+        if clip_unavailable_reason(st):
+            logging.info(f"Clip Now: {_get_display_name(ch_name)} - {CATCHUP_UNAVAILABLE} (catching up from the start)")
+            return
         clip_seconds = config.getint('Clipping', 'clip_length_seconds', fallback=30)
         _start_media_job(
             ch_name, "clip",
@@ -1660,6 +1663,9 @@ def main_gui(config):
         st = recorder.status_dict.get(ch_name, {})
         if not channel_status_allows_clip(st.get("status", "")):
             logging.info(f"Screenshot Now: {_get_display_name(ch_name)} is not currently recording")
+            return
+        if clip_unavailable_reason(st):
+            logging.info(f"Screenshot Now: {_get_display_name(ch_name)} - {CATCHUP_UNAVAILABLE} (catching up from the start)")
             return
         _start_media_job(
             ch_name, "screenshot",
@@ -1709,6 +1715,12 @@ def main_gui(config):
         raw = None
         if recorder and recorder.is_running:
             st = recorder.status_dict.get(ch_name, {})
+            if clip_unavailable_reason(st):
+                _dialogs.show_info(root, "Clip Editor",
+                                   f"{_get_display_name(ch_name)}: {CATCHUP_UNAVAILABLE}.\n\n"
+                                   "It is still catching up from the start of the broadcast. "
+                                   "The live Clip Editor works once it reaches live.")
+                return "break"
             if channel_status_allows_clip(st.get("status", "")):
                 raw = find_active_recording_file(recorder, ch_name)
         if raw:
@@ -1795,10 +1807,18 @@ def main_gui(config):
                               command=_clip_selected_channel, width=9)
     clip_now_btn.pack(side=tk.RIGHT, padx=(0, 6))
     clip_now_btn.bind("<Shift-Button-1>", _clip_editor_selected_channel)
-    _Tooltip(clip_now_btn,
-             "Cut the last N seconds (Clip Length setting)\n"
-             "of the channel selected in the status list.\n"
-             "Shift+click or DVR: open the Clip Editor.")
+    _CLIP_TIP = ("Cut the last N seconds (Clip Length setting)\n"
+                 "of the channel selected in the status list.\n"
+                 "Shift+click or DVR: open the Clip Editor.")
+
+    def _clip_now_tip():
+        # a YouTube from-start capture has no live file yet: say so instead
+        ch = _get_selected_status_channel()
+        st = recorder.status_dict.get(ch, {}) if (ch and recorder) else {}
+        if clip_unavailable_reason(st):
+            return f"{CATCHUP_UNAVAILABLE}.\nStill catching up from the start of the broadcast.\n\n" + _CLIP_TIP
+        return _CLIP_TIP
+    _Tooltip(clip_now_btn, _clip_now_tip)
 
     # Whole-disk write + NIC download, right-aligned on its own row under the header.
     # Hidden when psutil is missing — there is no fallback counter.
@@ -1869,7 +1889,9 @@ def main_gui(config):
                 status_ctx_menu.add_command(label="Stop Channel", command=_stop_selected_channel)
                 if status_lower.startswith(("offline", "error")):
                     status_ctx_menu.add_command(label="Check Now", command=_check_now_selected_channel)
-                if channel_status_allows_clip(status_lower):
+                if channel_status_allows_clip(status_lower) and clip_unavailable_reason(st):
+                    status_ctx_menu.add_command(label=f"Clip Now: {CATCHUP_UNAVAILABLE}", state=tk.DISABLED)
+                elif channel_status_allows_clip(status_lower):
                     clip_seconds = config.getint('Clipping', 'clip_length_seconds', fallback=30)
                     status_ctx_menu.add_command(
                         label=f"Clip Now ({clip_seconds}s)", command=_clip_selected_channel)

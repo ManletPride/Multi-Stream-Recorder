@@ -201,7 +201,7 @@ Status-tab stills from the live `.ts`. Constants in `msr/gui.py`: `PREVIEW_W`/`P
 ## YouTube from the start (`msr/yt_live_start.py`)
 
 - Only the **first segment** of a broadcast uses `--live-from-start`; reconnects, splits and a second sighting of the same video id record live. A broadcast older than `[YouTube] live_from_start_max_minutes` (15, 0-7200, 0 = no limit, floor = check interval + jitter + 2 min) records live only. No start time or no DVR falls back to live.
-- yt-dlp uses its own DASH downloader and writes video and audio parts; never merge them while yt-dlp runs. Size/time splits wait until it has caught up. Clip Now and previews are not available until then.
+- yt-dlp uses its own DASH downloader and writes video and audio parts; never merge them while yt-dlp runs. Size/time splits wait until it has caught up; once caught up the monitor always splits (overlap hand-off) so the next part is a normal live `.ts`. Status rows carry `from_start: true` while the from-start part runs; `worker.clip_unavailable_reason` makes Clip Now, Screenshot, `clip` / `screenshot` (code `busy`) and the live Clip Editor refuse with "Available once caught up to live" (`find_active_recording_file` only sees `.ts`, so it would find nothing or an older file). The preview reads the video part and shows the downloaded point, not live. Tests: `tests/test_catchup_clip_guard.py`.
 - Experimental in yt-dlp. A VOD download is a separate future feature, not this one. Tests: `tests/test_yt_live_start.py`.
 
 ## Other behavior that must not regress

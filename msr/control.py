@@ -1183,10 +1183,13 @@ class Controller:
         else:
             if not args.get("channel"):
                 raise ControlError("Give a channel or file.", "bad_request")
-            from msr.worker import find_active_recording_file
+            from msr.worker import CATCHUP_EXPLAIN, clip_unavailable_reason, find_active_recording_file
             rec = self._recorder()
             recs = self.app.records()
             key = recs[resolve_channel(recs, args.get("channel"))]["name"]
+            st = _status_copy(rec).get(key, {}) if rec is not None else {}
+            if clip_unavailable_reason(st):
+                raise ControlError(f"{display_name(key)}: {clip_unavailable_reason(st)}. {CATCHUP_EXPLAIN}", "busy")
             src = find_active_recording_file(rec, key)
             if not src:
                 raise ControlError(f"{display_name(key)} has no recording in progress; pass file= for a "
@@ -1227,8 +1230,9 @@ class Controller:
     def _media(self, args, kind):
         import datetime
         from msr.util import channel_file_stem, channel_key_to_dirs
-        from msr.worker import (channel_status_allows_clip, create_clip, create_screenshot,
-                                find_active_recording_file, screenshot_extension)
+        from msr.worker import (CATCHUP_EXPLAIN, channel_status_allows_clip, clip_unavailable_reason,
+                                create_clip, create_screenshot, find_active_recording_file,
+                                screenshot_extension)
         rec = self._recorder()
         config = self.app.config
         recs = self.app.records()
@@ -1236,6 +1240,8 @@ class Controller:
         st = _status_copy(rec).get(key, {})
         if not channel_status_allows_clip(st.get("status", "")):
             raise ControlError(f"{display_name(key)} is not recording right now.", "not_recording")
+        if clip_unavailable_reason(st):
+            raise ControlError(f"{display_name(key)}: {clip_unavailable_reason(st)}. {CATCHUP_EXPLAIN}", "busy")
         job = (key, kind)
         self._claim(job, "One is already being made for this channel.")
         try:

@@ -10,7 +10,8 @@ Toward v3.1.0.
 - A YouTube broadcast found live within its first 15 minutes is recorded from its start (yt-dlp `--live-from-start`), then follows live, so a start between two checks is not lost. Older broadcasts record live only.
 - Only the first segment of a broadcast does this; reconnects, size/time splits and a second sighting of the same video record live as before.
 - The limit is in **Options > YouTube** (`[YouTube] live_from_start_max_minutes`, 15, 0-7200, 0 = no limit). It is never below the check interval + jitter + 2 min. `live_from_start = false` turns it off.
-- While it catches up the status says **catching up from start**; Clip Now and the preview don't work until it reaches live. yt-dlp writes video and audio as separate parts; MSR merges them when the recording ends, or at the next start if MSR was stopped.
+- While it catches up the status says **catching up from start**. Clip Now, Screenshot and the live Clip Editor are refused with "Available once caught up to live" (in the window and in agent control, code `busy`); before, they failed with "no active recording" or could cut an older leftover file. The preview shows the downloaded point, not live.
+- Once caught up, MSR ends the from-start part and continues with a normal live recording (an overlap split, no gap), so clips work again. yt-dlp writes video and audio as separate parts; MSR merges them when the recording ends, or at the next start if MSR was stopped.
 - yt-dlp calls `--live-from-start` experimental. Downloading a finished broadcast (VOD) is a separate, future feature.
 
 **Agent control v2** (`msr_ctl.py`, `api_version` stays 1)

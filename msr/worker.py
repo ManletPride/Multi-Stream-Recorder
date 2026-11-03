@@ -167,6 +167,22 @@ def find_active_recording_file(recorder, channel_key):
     return max(ts_files, key=os.path.getmtime)
 
 
+CATCHUP_UNAVAILABLE = "Available once caught up to live"
+CATCHUP_EXPLAIN = ("This YouTube recording is still catching up from the start of the broadcast, "
+                   "so there is no live file to cut from yet. MSR switches to a normal live recording "
+                   "when it reaches live, and Clip Now works again.")
+
+
+def clip_unavailable_reason(entry):
+    """Why Clip Now / Screenshot / the live Clip Editor can't use this status row now, or None.
+
+    A from-start capture writes separate DASH video/audio parts, not the live .ts
+    these read (find_active_recording_file would find nothing, or an older .ts)."""
+    if isinstance(entry, dict) and entry.get("from_start"):
+        return CATCHUP_UNAVAILABLE
+    return None
+
+
 def channel_status_allows_clip(status):
     """True when Clip Now / Screenshot can run against this channel's status.
 
@@ -1272,14 +1288,20 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                 # parts of at most this length instead of running until 8 GB.
                 over_size = max_file_size_bytes > 0 and size >= max_file_size_bytes
                 over_time = max_record_hours > 0 and elapsed >= max_record_hours * 3600
+                # Caught up with live: split now so the next part records a normal live .ts
+                # (Clip Now, Screenshot and the Clip Editor need it).
+                caught_up_split = from_start is not None and from_start.caught_up
                 if (over_size or over_time) and from_start is not None and not from_start.caught_up:
                     if not split_deferred_logged:
                         logger.info("Split limit reached while catching up from the start - "
                                     "splitting once the capture reaches the live edge")
                         split_deferred_logged = True
                     over_size = over_time = False
-                if over_size or over_time:
-                    if over_size:
+                if over_size or over_time or caught_up_split:
+                    if caught_up_split and not (over_size or over_time):
+                        logger.info("From-start capture reached live - switching to a normal live "
+                                    "recording (Clip Now works again)")
+                    elif over_size:
                         logger.info(
                             f"File reached {human_size(size)} — splitting "
                             f"(limit: {max_file_size_gb:.1f} GB)"
@@ -1330,6 +1352,8 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                     "progress": progress_pct,
                     "raw_file": status_file,
                 }
+                if from_start is not None:
+                    new_status["from_start"] = True   # clip guard: see clip_unavailable_reason
                 if new_status != last_status:
                     status_queue.put((channel_key, new_status))
                     last_status = new_status.copy()
