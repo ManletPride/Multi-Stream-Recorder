@@ -415,6 +415,10 @@ def main_gui(config):
         log_text.tag_raise("find")
         if _library_panel[0] is not None:
             _library_panel[0].refresh_theme()  # charts, site colours and tooltips follow the theme
+        try:
+            options_panel.apply_theme()
+        except NameError:
+            pass  # built after the first apply_theme
 
         # Status bar at bottom
         status_bar.configure(bg=t['bg'], fg=t['offline_fg'])
@@ -2040,6 +2044,10 @@ def main_gui(config):
     def _options_apply_setting(section, key, value):
         if not _control.known_setting(config, section, key):
             raise ValueError(f"Unknown setting {section}.{key}.")
+        if (section, key) == ("Paths", "streams_dir") and recorder and recorder.is_running:
+            raise ValueError("Stop recording before changing the recordings folder.")
+        if (section, key) == ("Paths", "streams_dir") and not os.path.isdir(str(value).strip()):
+            raise ValueError("That recordings folder does not exist.")
         try:
             value = _control.validate_setting(section, key, value)
         except _control.ControlError as e:
@@ -2160,6 +2168,10 @@ def main_gui(config):
         if recorder and recorder.is_running:
             recorder.set_poll_interval(minutes)
         _last_poll_display[0] = display_name
+        try:
+            options_panel.reflect('Timeouts', 'poll_interval_minutes')
+        except NameError:
+            pass
         logging.info(f"Polling interval changed to {minutes} minutes ({display_name})")
 
     def on_poll_change(*_args):
@@ -2232,6 +2244,10 @@ def main_gui(config):
             pass
         _last_clip_display[0] = display_name
         logging.info(f"Clip length changed to {int(seconds)}s ({display_name})")
+        try:
+            options_panel.reflect('Clipping', 'clip_length_seconds')
+        except NameError:
+            pass
 
     def on_clip_length_change(*_args):
         selected = clip_var.get()
