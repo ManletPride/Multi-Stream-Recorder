@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## v3.1.2 (2026-11-03)
+
+Release notes: [docs/release_notes/RELEASE_NOTES_v3.1.2.md](docs/release_notes/RELEASE_NOTES_v3.1.2.md).
 
 ### Added
 - Clip Editor: timeline zoom and scrub (Alt+wheel zooms at the pointer, Ctrl+wheel zoom-scaled step, wheel/Shift+wheel pan, +/-/0 keys, double-click reset, a zoom-window indicator, playhead follow while playing).
