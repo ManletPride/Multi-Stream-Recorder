@@ -282,7 +282,7 @@ class LibraryManageSmokeTests(unittest.TestCase):
         self.assertNotIn("Traceback", done.stderr)
         out = json.loads(done.stdout)
         self.assertTrue(out["scanned"], out)
-        self.assertEqual(out["tabs"], ["Overview", "Channels", "Files", "PendingDeletion", "Clean up"])
+        self.assertEqual(out["tabs"], ["Overview", "Channels", "Recordings", "Files", "PendingDeletion", "Clean up"])
         self.assertLessEqual(out["panel_req"], 1060 - (40 if os.name == "nt" else 20), out)  # fits the minimum window; Linux fonts run wider
         self.assertTrue(out["delete_enabled"])
         self.assertEqual(out["dark"], dark)

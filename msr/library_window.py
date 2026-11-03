@@ -20,6 +20,7 @@ from typing import Callable
 
 from msr import charts, dialogs
 from msr import library as lib
+from msr import library_browser as browse
 from msr import library_actions as act
 from msr import library_manage as manage
 
@@ -124,7 +125,8 @@ class LibraryPanel:
 
     def __init__(self, container, get_roots: Callable[[], lib.Roots], get_roster: Callable[[], list[str]] | None = None,
                  cache_path: str | None = None, ffprobe: str | None = None,
-                 opener: Callable[[str], None] | None = None, manage_ctx: manage.ManageContext | None = None):
+                 opener: Callable[[str], None] | None = None, manage_ctx: manage.ManageContext | None = None,
+                 revealer: Callable[[str], None] | None = None, clip_editor: Callable[[str], None] | None = None):
         self.get_roots, self.get_roster = get_roots, get_roster
         self.mgr: manage.Manager | None = None
         self._manage_ctx = manage_ctx
@@ -186,6 +188,13 @@ class LibraryPanel:
 
         self.channels_tab = channels
         self._build_channels_tab(channels)
+        # per-channel recordings list (Library > Recordings); actions default to the manage context's
+        ctx = manage_ctx
+        self.recordings = browse.RecordingsTab(
+            self.tabs, self, opener=opener or (ctx.opener if ctx else None),
+            revealer=revealer or (ctx.revealer if ctx else None),
+            clip_editor=clip_editor or (ctx.clip_editor if ctx else None))
+        self.tabs.add(self.recordings.frame, text="  Recordings  ")
         self.donut.on_click = self.donut.on_double = self.pick_site
         self.bars.on_click = self.pick_channel
         self.bars.on_double = lambda key: (self.pick_channel(key), self.open_selected_folder())
@@ -222,6 +231,8 @@ class LibraryPanel:
         bar.pack(fill="x", pady=(6, 4))
         self.open_btn = ttk.Button(bar, text="Open folder", command=self.open_selected_folder)
         self.open_btn.pack(side="left")
+        self.recs_btn = ttk.Button(bar, text="Recordings", command=self.show_selected_recordings)
+        self.recs_btn.pack(side="left", padx=(6, 0))
         self.files_btn = ttk.Button(bar, text="Files\u2026", command=self.show_selected_files)
         self.delete_btn = ttk.Button(bar, text="Delete\u2026", command=lambda: self.delete_selected())
         if self.mgr_enabled:
@@ -248,6 +259,7 @@ class LibraryPanel:
         self.tree.bind("<Button-3>", self._channel_menu)
         self.menu = tk.Menu(self.tree, tearoff=0)
         self.menu.add_command(label="Open folder", command=self.open_selected_folder)
+        self.menu.add_command(label="Show recordings", command=self.show_selected_recordings)
         self.menu.add_command(label="Copy summary of selection", command=self.copy_selection_summary)
         if self.mgr_enabled:
             self.tree.bind("<Delete>", lambda _e: (self.delete_selected(), "break")[1])
@@ -339,6 +351,13 @@ class LibraryPanel:
         self.mgr.files.set_channel(channel.platform, channel.name)
         self.tabs.select(self.mgr.files.frame)
 
+    def show_selected_recordings(self) -> None:
+        """Channels tab -> Recordings tab for the selected channel."""
+        channel = self.selected_channel()
+        if channel is not None:
+            self.recordings.show_channel(channel)
+            self.tabs.select(self.recordings.frame)
+
     def delete_selected(self, method: str | None = None) -> None:
         if self.mgr is not None and self.tree.selection():
             self.mgr.delete_channels(self.selected_channels(), method)
@@ -368,6 +387,8 @@ class LibraryPanel:
         self.copy_btn.state(["!disabled"] if self.stats is not None else ["disabled"])
         channel = self.selected_channel() if hasattr(self, "tree") else None
         self.open_btn.state(["!disabled"] if channel and channel.best_folder() else ["disabled"])
+        if hasattr(self, "recs_btn"):
+            self.recs_btn.state(["!disabled"] if channel else ["disabled"])
         picked = bool(self.tree.selection()) if hasattr(self, "tree") else False
         for button in (self.files_btn, self.delete_btn):
             button.state(["!disabled"] if picked and not busy and self.stats is not None else ["disabled"])
@@ -424,6 +445,8 @@ class LibraryPanel:
 
     def shutdown(self) -> None:
         """Stop the scan and the polling (the window is closing)."""
+        if hasattr(self, "recordings"):
+            self.recordings.shutdown()
         if self.job is not None:
             self.job.cancel()
         if self._poll_id is not None:
@@ -547,6 +570,7 @@ class LibraryPanel:
         if self.mgr is not None:
             self.mgr.on_stats(stats)
         self._fill_tree()
+        self.recordings.set_stats(stats)
 
     def _set_chart_data(self, stats) -> None:
         self.donut.center_text = lib.fmt_size(stats.recordings_bytes) if stats.recordings_bytes else ""
