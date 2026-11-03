@@ -338,6 +338,40 @@ def validate_setting(section, key, value) -> str:
     return value
 
 
+def setting_applies(section, key) -> str:
+    if (section, key) in LIVE_SETTINGS or (section, key) in NOW_SETTINGS:
+        return "now"
+    if section == "Control":
+        return "restart"
+    return "next_start"
+
+
+def apply_setting(config, section, key, value, recording=False, live=None) -> str:
+    """The one write path for a setting (Options tab and config_set): known key, guards,
+    type/range checks, save (secrets DPAPI-encrypted by Config.save), then ``live(value)``
+    for settings a running session takes at once. Returns the stored value."""
+    section, key = str(section or ""), str(key or "").lower()
+    if not known_setting(config, section, key):
+        raise ControlError(f"Unknown setting {section}.{key}.", "not_found")
+    if key.endswith("_dpapi"):
+        raise ControlError(f"Set {section}.{key[:-6]} instead; the encrypted copy is managed by MSR.", "invalid")
+    if (section, key) == ("Paths", "streams_dir") and recording:
+        raise ControlError("Stop recording before changing the recordings folder.", "conflict")
+    value = validate_setting(section, key, value)
+    if (section, key) == ("Paths", "streams_dir") and not os.path.isdir(value):
+        raise ControlError("That recordings folder does not exist.", "invalid")
+    if not config.config.has_section(section):
+        config.config.add_section(section)
+    config.config.set(section, key, value)
+    if (section, key) in SECRET_KEYS and not value.strip():  # clearing also drops the encrypted copy
+        config.config.remove_option(section, key + "_dpapi")
+    if not config.save():
+        raise ControlError("config.ini could not be written (see the log).", "write_failed")
+    if live is not None and (section, key) in LIVE_SETTINGS:
+        live(value)
+    return value
+
+
 # ------------------------------------------------------------------ app adapters
 class AppAdapter:
     """What the Controller needs from the running app. Subclasses: HeadlessApp, OfflineApp, the GUI's."""
@@ -383,6 +417,12 @@ class AppAdapter:
 
     def settings_changed(self, section, key) -> None:
         pass
+
+    def apply_setting(self, section, key, value) -> str:
+        """Check and save one setting (no live hand-off: the Controller does that)."""
+        value = apply_setting(self.config, section, key, value, recording=is_running_session(self.recorder))
+        self.settings_changed(section, key)
+        return value
 
     def log_path(self) -> str:
         for handler in logging.root.handlers:
@@ -1267,40 +1307,21 @@ class Controller:
         return {"settings": out, "file": os.path.basename(self.app.config.config_file)}
 
     def _save_setting(self, section, key, value):
-        config = self.app.config
-        if not config.config.has_section(section):
-            config.config.add_section(section)
-        config.config.set(section, key, value)
-        if not config.save():
-            raise ControlError("config.ini could not be written (see the log).", "write_failed")
-        self.app.settings_changed(section, key)
+        value = self.app.apply_setting(section, key, value)
+        rec = self.app.recorder
+        if (section, key) in LIVE_SETTINGS and is_running_session(rec):
+            self._rec_call(rec, "set_poll_interval", float(value))
+        return value
 
     def cmd_config_set(self, args):
+        """Same checks and save as the Options tab (control.apply_setting)."""
         section, key = str(args.get("section") or ""), str(args.get("key") or "").lower()
         if not section or not key or "value" not in args:
             raise ControlError("Give section, key and value.", "bad_request")
-        config = self.app.config
-        if not known_setting(config, section, key):
-            raise ControlError(f"Unknown setting {section}.{key}.", "not_found")
-        value = validate_setting(section, key, args["value"])
-        if not config.config.has_section(section):
-            config.config.add_section(section)
-        config.config.set(section, key, value)
-        if not config.save():
-            raise ControlError("config.ini could not be written (see the log).", "write_failed")
-        applies = "next_start"
-        rec = self.app.recorder
-        if (section, key) in LIVE_SETTINGS:
-            applies = "now"
-            if is_running_session(rec):
-                self._rec_call(rec, "set_poll_interval", float(value))
-        elif (section, key) in NOW_SETTINGS:
-            applies = "now"
-        elif section == "Control":
-            applies = "restart"
-        self.app.settings_changed(section, key)
+        value = self._save_setting(section, key, args["value"])
         logging.info(f"Setting {section}.{key} changed by control")
-        return {"section": section, "key": key, "value": masked(key, value), "applies": applies}
+        return {"section": section, "key": key, "value": masked(key, value),
+                "applies": setting_applies(section, key)}
 
     def cmd_config_reload(self, args):
         self.app.config.reload()

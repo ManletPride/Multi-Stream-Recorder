@@ -1,8 +1,8 @@
 """The Options tab: Twitch connect plus grouped settings, scrollable.
 
-Rows come from ``GROUPS``; type/range checks are ``control.validate_setting``
-(config._coerce_specs). Writes go through ``apply_setting(section, key, value)``
-(gui.py: validate, Config.save, live apply, sync other selectors). Secrets are
+Rows come from ``GROUPS``. Writes go through ``apply_setting(section, key, value)``
+(gui.py: ``control.apply_setting``, the same checks and save as ``config_set``, then live
+apply and sync other selectors). Secrets are
 never shown or logged.
 """
 

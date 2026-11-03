@@ -2047,25 +2047,15 @@ def main_gui(config):
 
     notebook.bind("<<NotebookTabChanged>>", _library_tab_opened, add="+")
 
-    # Options tab: settings without editing config.ini; same validation + save path as msr_ctl.
+    # Options tab: settings without editing config.ini; control.apply_setting is shared with config_set.
     def _options_apply_setting(section, key, value):
-        if not _control.known_setting(config, section, key):
-            raise ValueError(f"Unknown setting {section}.{key}.")
-        if (section, key) == ("Paths", "streams_dir") and recorder and recorder.is_running:
-            raise ValueError("Stop recording before changing the recordings folder.")
-        if (section, key) == ("Paths", "streams_dir") and not os.path.isdir(str(value).strip()):
-            raise ValueError("That recordings folder does not exist.")
+        running = bool(recorder and recorder.is_running)
         try:
-            value = _control.validate_setting(section, key, value)
+            value = _control.apply_setting(
+                config, section, key, value, recording=running,
+                live=(lambda v: recorder.set_poll_interval(float(v))) if running else None)
         except _control.ControlError as e:
             raise ValueError(str(e)) from None
-        if not config.config.has_section(section):
-            config.config.add_section(section)
-        config.config.set(section, key, value)
-        if not config.save():
-            raise ValueError("config.ini could not be written (see the log).")
-        if (section, key) in _control.LIVE_SETTINGS and recorder and recorder.is_running:
-            recorder.set_poll_interval(float(value))
         _reflect_setting(section, key)
         logging.info(f"Setting {section}.{key} changed in Options")
         return value
@@ -3458,6 +3448,13 @@ def main_gui(config):
         _populate_channel_tree()
         save_channels()
 
+    def _control_apply_setting(section, key, value):
+        # same checks + save as Options; control does the live hand-off on its recorder lane
+        value = _control.apply_setting(config, section, key, value,
+                                       recording=bool(recorder and recorder.is_running))
+        _reflect_setting(section, key)
+        return value
+
     def _control_twitch_changed():
         try:
             options_panel.refresh_status()
@@ -3480,6 +3477,7 @@ def main_gui(config):
         "reload": _control_reload,
         "reflect": _reflect_setting,
         "twitch_changed": _control_twitch_changed,
+        "apply_setting": _control_apply_setting,
         "update_tag": lambda: _update_tag[0],
     }))
 

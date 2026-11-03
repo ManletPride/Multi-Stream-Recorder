@@ -215,7 +215,8 @@ class GuiBridge(AppAdapter):
     list, the tree, start/stop, quit, setting selectors) runs on the Tk thread via ``jobs``.
 
     ``hooks``: get_recorder, get_presence, channels (the live list), after_edit (redraw + save),
-    start, stop, schedule_quit(after_children), reload (count), reflect(section, key), twitch_changed, update_tag."""
+    start, stop, schedule_quit(after_children), reload (count), reflect(section, key),
+    apply_setting(section, key, value) (checks + save + reflect), twitch_changed, update_tag."""
 
     mode = "gui"
 
@@ -265,6 +266,9 @@ class GuiBridge(AppAdapter):
 
     def settings_changed(self, section, key):
         self.jobs.call(lambda: self._h("reflect")(section, key))
+
+    def apply_setting(self, section, key, value):
+        return self.jobs.call(lambda: self._h("apply_setting")(section, key, value))
 
     def twitch_changed(self):
         self.jobs.post(self._h("twitch_changed"))
