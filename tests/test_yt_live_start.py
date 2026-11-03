@@ -99,9 +99,9 @@ class CheckInfoTests(unittest.TestCase):
 class PlanTests(TmpCase):
     NOW = 1_800_000_000
 
-    def plan(self, info=None, enabled=True, max_hours=12, cont=False, platform="youtube"):
+    def plan(self, info=None, enabled=True, max_minutes=15, cont=False, platform="youtube"):
         info = {"video_id": "abcdefghijk", "release_timestamp": self.NOW - 600} if info is None else info
-        return ls.plan(enabled, max_hours, platform, info, cont, base_dir=self.tmp, now=self.NOW)
+        return ls.plan(enabled, max_minutes, platform, info, cont, base_dir=self.tmp, now=self.NOW)
 
     def test_first_segment_uses_from_start(self):
         use, why = self.plan()
@@ -116,12 +116,21 @@ class PlanTests(TmpCase):
         self.assertFalse(self.plan()[0])
         self.assertTrue(os.path.exists(os.path.join(self.tmp, ls.SEEN_DIR, "abcdefghijk")))
 
-    def test_long_broadcast_falls_back(self):
-        use, why = self.plan({"video_id": "abcdefghijk", "release_timestamp": self.NOW - 13 * 3600})
+    def test_older_broadcast_records_live_only(self):
+        old = {"video_id": "abcdefghijk", "release_timestamp": self.NOW - 16 * 60}
+        use, why = self.plan(old)
         self.assertFalse(use)
-        self.assertIn("limit 12 h", why)
-        self.assertTrue(self.plan({"video_id": "abcdefghijk", "release_timestamp": self.NOW - 13 * 3600},
-                                  max_hours=0)[0], "0 = no limit")
+        self.assertIn("limit 15 min", why)
+        self.assertTrue(self.plan({"video_id": "abcdefghijk", "release_timestamp": self.NOW - 15 * 60})[0],
+                        "exactly at the limit still counts")
+        self.assertTrue(self.plan({"video_id": "abcdefghijk", "release_timestamp": self.NOW - 10 * 3600},
+                                  max_minutes=0)[0], "0 = no limit")
+
+    def test_limit_is_at_least_the_check_interval_plus_margin(self):
+        self.assertEqual(ls.effective_limit_minutes(15, 3, 20), 15)
+        self.assertAlmostEqual(ls.effective_limit_minutes(5, 30, 20), 38.0)   # 30 * 1.2 + 2
+        self.assertEqual(ls.effective_limit_minutes(1, 3, 0), 5.0)
+        self.assertEqual(ls.effective_limit_minutes(0, 30, 20), 0.0, "0 stays no limit")
 
     def test_unknown_start_or_id_or_off_or_other_site(self):
         self.assertFalse(self.plan({"video_id": "abcdefghijk"})[0])
@@ -140,14 +149,14 @@ class PlanTests(TmpCase):
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "evil")))
 
     def test_settings_defaults_and_bad_values(self):
-        self.assertEqual(ls.settings(cfg()), (True, 12.0))
+        self.assertEqual(ls.settings(cfg()), (True, 15.0))
         p = cfg()
         p.set("YouTube", "live_from_start", "maybe")
-        p.set("YouTube", "live_from_start_max_hours", "x")
-        self.assertEqual(ls.settings(p), (True, 12.0))
+        p.set("YouTube", "live_from_start_max_minutes", "x")
+        self.assertEqual(ls.settings(p), (True, 15.0))
         p.set("YouTube", "live_from_start", "false")
-        p.set("YouTube", "live_from_start_max_hours", "3")
-        self.assertEqual(ls.settings(p), (False, 3.0))
+        p.set("YouTube", "live_from_start_max_minutes", "30")
+        self.assertEqual(ls.settings(p), (False, 30.0))
 
 
 class CatchUpTests(unittest.TestCase):
@@ -340,7 +349,7 @@ class MonitorTests(TmpCase):
 class WorkerHarness:
     """record_worker for a YouTube channel with the check, capture, merge and remux faked."""
 
-    def __init__(self, test, root, from_start_files=True, release_age=300, enabled="true"):
+    def __init__(self, test, root, from_start_files=True, release_age=300, enabled="true", poll="3"):
         self.test = test
         self.stop = threading.Event()
         self.status = queue.Queue()
@@ -356,6 +365,7 @@ class WorkerHarness:
         self.config["Paths"].update(streams_dir=root, fallback_dir="off")
         self.config["Recording"].update(min_disk_space_gb="0", min_file_size_mb="0")
         self.config["YouTube"]["live_from_start"] = enabled
+        self.config["Timeouts"]["poll_interval_minutes"] = poll
         self.from_start_files = from_start_files
         self.release_age = release_age
         self.max_captures = 2
@@ -450,23 +460,32 @@ class WorkerTests(TmpCase):
         h.max_captures = 1
         h.run()
         self.assertNotIn("--live-from-start", h.cmds[0])
-        h = WorkerHarness(self, self.root, release_age=13 * 3600)
+        h = WorkerHarness(self, self.root, release_age=20 * 60)
         h.max_captures = 1
         h.run()
         self.assertNotIn("--live-from-start", h.cmds[0])
-        self.assertTrue(any("limit 12 h" in m for m in h.records), h.records)
+        self.assertTrue(any("limit 15 min" in m for m in h.records), h.records)
+
+    def test_slow_checks_raise_the_limit(self):
+        # 20 min old, but checks every 30 min (+20 % jitter): 38 min limit, caught from the start
+        h = WorkerHarness(self, self.root, release_age=20 * 60, poll="30")
+        h.max_captures = 1
+        h.run()
+        self.assertIn("--live-from-start", h.cmds[0])
 
 
 class SettingsTests(unittest.TestCase):
     def test_defaults_and_validation(self):
         self.assertEqual(Config.DEFAULT_CONFIG["YouTube"],
-                         {"live_from_start": "true", "live_from_start_max_hours": "12"})
+                         {"live_from_start": "true", "live_from_start_max_minutes": "15"})
         specs = {(s, k): kind for s, k, kind, *_ in _coerce_specs()}
         self.assertEqual(specs[("YouTube", "live_from_start")], "bool")
         self.assertEqual(control.validate_setting("YouTube", "live_from_start", "off"), "false")
-        self.assertEqual(control.validate_setting("YouTube", "live_from_start_max_hours", "6"), "6.0")
-        with self.assertRaises(control.ControlError):
-            control.validate_setting("YouTube", "live_from_start_max_hours", "-1")
+        self.assertEqual(control.validate_setting("YouTube", "live_from_start_max_minutes", "0"), "0.0")
+        self.assertEqual(control.validate_setting("YouTube", "live_from_start_max_minutes", "7200"), "7200.0")
+        for bad in ("-1", "7201", "x"):
+            with self.assertRaises(control.ControlError):
+                control.validate_setting("YouTube", "live_from_start_max_minutes", bad)
         with self.assertRaises(control.ControlError):
             control.validate_setting("YouTube", "live_from_start", "maybe")
 
@@ -480,12 +499,15 @@ class SettingsTests(unittest.TestCase):
                 r = ctl.handle("config_set", {"section": "YouTube", "key": "live_from_start", "value": "off"})
                 self.assertTrue(r["ok"], r)
                 self.assertEqual(r["result"]["value"], "false")
-                r = ctl.handle("config_set", {"section": "YouTube", "key": "live_from_start_max_hours",
-                                              "value": "4"})
+                r = ctl.handle("config_set", {"section": "YouTube", "key": "live_from_start_max_minutes",
+                                              "value": "600"})
                 self.assertTrue(r["ok"], r)
                 got = ctl.handle("config_get", {"section": "YouTube"})["result"]["settings"]["YouTube"]
-                self.assertEqual(got, {"live_from_start": "false", "live_from_start_max_hours": "4.0"})
-                self.assertEqual(ls.settings(Config(os.path.join(d, "config.ini")).config), (False, 4.0))
+                self.assertEqual(got, {"live_from_start": "false", "live_from_start_max_minutes": "600.0"})
+                self.assertEqual(ls.settings(Config(os.path.join(d, "config.ini")).config), (False, 600.0))
+                r = ctl.handle("config_set", {"section": "YouTube", "key": "live_from_start_max_minutes",
+                                              "value": "9000"})
+                self.assertFalse(r["ok"])
             finally:
                 os.chdir(cwd)
 
@@ -494,7 +516,32 @@ class SettingsTests(unittest.TestCase):
         r = rows[("YouTube", "live_from_start")]
         self.assertEqual(r["kind"], "bool")
         self.assertTrue(r["hint"])
-        self.assertEqual(rows[("YouTube", "live_from_start_max_hours")]["hint"], "0 = no limit")
+        hint = rows[("YouTube", "live_from_start_max_minutes")]["hint"]
+        self.assertIn("check interval + 2", hint)
+        self.assertIn("VOD", hint)
+
+    def migrated(self, text):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "config.ini")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            c = Config(path)
+            with open(path, encoding="utf-8") as f:
+                saved = f.read()
+            return c.config, saved
+
+    def test_old_hours_setting_is_migrated(self):
+        c, saved = self.migrated("[YouTube]\nlive_from_start = true\nlive_from_start_max_hours = 12\n")
+        self.assertEqual(c.get("YouTube", "live_from_start_max_minutes"), "15", "old default -> new default")
+        self.assertNotIn("max_hours", saved)
+        c, saved = self.migrated("[YouTube]\nlive_from_start_max_hours = 2\n")
+        self.assertEqual(c.get("YouTube", "live_from_start_max_minutes"), "120")
+        c, _ = self.migrated("[YouTube]\nlive_from_start_max_hours = 500\n")
+        self.assertEqual(c.get("YouTube", "live_from_start_max_minutes"), "7200")
+        c, _ = self.migrated("[YouTube]\nlive_from_start_max_hours = 0\n")
+        self.assertEqual(c.get("YouTube", "live_from_start_max_minutes"), "0")
+        c, _ = self.migrated("[YouTube]\nlive_from_start_max_hours = 2\nlive_from_start_max_minutes = 30\n")
+        self.assertEqual(c.get("YouTube", "live_from_start_max_minutes"), "30", "new key wins")
 
 
 class OptionsPanelTests(unittest.TestCase):

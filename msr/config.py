@@ -81,7 +81,7 @@ def _coerce_specs():
         ("Cleanup", "purge_on_startup", "bool", True, None, None),
         ("Twitch", "push_enabled", "bool", False, None, None),
         ("YouTube", "live_from_start", "bool", True, None, None),
-        ("YouTube", "live_from_start_max_hours", "float", 12.0, 0.0, None),
+        ("YouTube", "live_from_start_max_minutes", "float", 15.0, 0.0, 7200.0),
         ("Health", "check_minutes", "float", 10.0, 0.0, 1440.0),
         ("Sounds", "go_live", "bool", False, None, None),
         ("Sounds", "problems", "bool", False, None, None),
@@ -221,8 +221,10 @@ class Config:
             # aired before MSR noticed is kept. Only the first part of a broadcast; reconnects
             # and splits record live. Off, or no DVR on the stream = normal live recording.
             'live_from_start': 'true',
-            # Broadcasts live longer than this (hours) record from now instead (0 = no limit).
-            'live_from_start_max_hours': '12',
+            # Only for a start missed between checks: a broadcast live longer than this (minutes)
+            # records from now, with no backlog. Never below the check interval + 2 min.
+            # 0 = no limit (grabs up to yt-dlp's 120 h, more like a VOD download).
+            'live_from_start_max_minutes': '15',
         },
         'Advanced': {
             # Passes --verbose to yt-dlp/streamlink AND disables the stderr
@@ -420,11 +422,33 @@ class Config:
         self._unreadable = True
         self.config = new_parser()
 
+    def _migrate_from_start_hours(self):
+        """[YouTube] live_from_start_max_hours -> live_from_start_max_minutes.
+
+        The old default (12) is dropped so the new default (15 min) applies; any other value
+        is kept as minutes (hours x 60, at most 7200). Returns True if the file changed.
+        """
+        old = 'live_from_start_max_hours'
+        if not self.config.has_option('YouTube', old):
+            return False
+        raw = self.config.get('YouTube', old, fallback='')
+        self.config.remove_option('YouTube', old)
+        if self.config.has_option('YouTube', 'live_from_start_max_minutes'):
+            return True
+        try:
+            hours = float(raw)
+        except ValueError:
+            return True
+        if hours != 12.0:
+            minutes = min(7200.0, max(0.0, hours * 60))
+            self.config.set('YouTube', 'live_from_start_max_minutes', f"{minutes:g}")
+        return True
+
     def _load_or_create(self):
         defaults = self.DEFAULT_CONFIG
         if os.path.exists(self.config_file):
             self._read_existing()
-            updated = False
+            updated = self._migrate_from_start_hours()
             for section, options in defaults.items():
                 if not self.config.has_section(section):
                     self.config.add_section(section)

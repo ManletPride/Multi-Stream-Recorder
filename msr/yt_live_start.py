@@ -12,8 +12,10 @@ How it differs from the normal live capture:
   are merged here instead (finalize), or at the next start (merge_leftovers).
 - Only the first segment of a broadcast uses it. Reconnects, size/time splits
   and a second sighting of the same video id record live as before.
-- No start time, a broadcast older than the limit, or DVR turned off (yt-dlp
-  exits with no data) fall back to the normal live capture.
+- It only covers a start missed between checks: a broadcast live longer than
+  [YouTube] live_from_start_max_minutes (default 15, never below the check
+  interval + 2 min) records live only. No start time, or DVR turned off
+  (yt-dlp exits with no data) also fall back to the normal live capture.
 """
 import os
 import re
@@ -32,17 +34,29 @@ RATE_MIN_GAP = 20.0                # wall seconds between rate samples
 _VIDEO_ID = re.compile(r"^[\w-]{6,20}$")
 
 
+CHECK_MARGIN_MINUTES = 2.0         # the limit is never below the check interval + this
+
+
 def settings(config):
-    """(enabled, max_hours) from [YouTube]; bad values fall back to the defaults."""
+    """(enabled, max_minutes) from [YouTube]; bad values fall back to the defaults."""
     try:
         enabled = config.getboolean("YouTube", "live_from_start", fallback=True)
     except ValueError:
         enabled = True
     try:
-        max_hours = float(config.get("YouTube", "live_from_start_max_hours", fallback="12") or 12)
+        max_minutes = float(config.get("YouTube", "live_from_start_max_minutes", fallback="15") or 0)
     except ValueError:
-        max_hours = 12.0
-    return enabled, max(0.0, max_hours)
+        max_minutes = 15.0
+    return enabled, min(7200.0, max(0.0, max_minutes))
+
+
+def effective_limit_minutes(max_minutes, check_minutes, jitter_percent=0):
+    """The limit actually used: at least the longest gap between checks + a margin,
+    so a start between two slow checks is caught in full. 0 stays 0 (no limit)."""
+    if not max_minutes or max_minutes <= 0:
+        return 0.0
+    floor = max(0.0, check_minutes or 0) * (1 + max(0, jitter_percent or 0) / 100) + CHECK_MARGIN_MINUTES
+    return max(float(max_minutes), floor)
 
 
 def _seen_path(video_id, base_dir):
@@ -85,8 +99,12 @@ def mark_seen(video_id, base_dir=None, now=None):
         pass
 
 
-def plan(enabled, max_hours, platform, info, is_continuation, base_dir=None, now=None):
-    """Decide whether this capture starts from the beginning. Returns (use, reason)."""
+def plan(enabled, max_minutes, platform, info, is_continuation, base_dir=None, now=None):
+    """Decide whether this capture starts from the beginning. Returns (use, reason).
+
+    ``max_minutes`` is the effective limit (see effective_limit_minutes); older
+    broadcasts record live only, with no partial backlog.
+    """
     if platform != "youtube":
         return False, "not YouTube"
     if not enabled:
@@ -107,8 +125,8 @@ def plan(enabled, max_hours, platform, info, is_continuation, base_dir=None, now
     if not started:
         return False, "start time unknown"
     age = max(0.0, (time.time() if now is None else now) - started)
-    if max_hours > 0 and age > max_hours * 3600:
-        return False, f"live for {age / 3600:.1f} h (limit {max_hours:g} h)"
+    if max_minutes > 0 and age > max_minutes * 60:
+        return False, f"live for {format_hms(age)} (limit {max_minutes:g} min)"
     return True, f"live for {format_hms(age)}"
 
 

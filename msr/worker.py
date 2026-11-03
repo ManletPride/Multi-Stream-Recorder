@@ -2202,7 +2202,7 @@ def record_worker(args):
     reconnect_extended_minutes = parser_getint(config, 'Timeouts', 'reconnect_extended_minutes', 10)
     file_creation_timeout = parser_getint(config, 'Timeouts', 'file_creation_timeout', 60)
     filename_pattern = config.get('Recording', 'filename_pattern', fallback='{username}_{timestamp}') or '{username}_{timestamp}'
-    from_start_enabled, from_start_max_hours = yt_live_start.settings(config)
+    from_start_enabled, from_start_max_minutes = yt_live_start.settings(config)
 
     # Cookies file
     cookies_file = config.get('Paths', 'cookies_file', fallback='') or None
@@ -2709,8 +2709,12 @@ def record_worker(args):
             # (yt-dlp --live-from-start); see msr/yt_live_start.py.
             from_start = None
             if platform == "youtube":
+                # limit >= the current check interval (+jitter) + 2 min: a start
+                # between two slow checks is still caught in full
+                from_start_limit = yt_live_start.effective_limit_minutes(
+                    from_start_max_minutes, poll_interval_minutes, poll_jitter_percent)
                 use_fs, why = yt_live_start.plan(
-                    from_start_enabled, from_start_max_hours, platform, check_info, is_continuation)
+                    from_start_enabled, from_start_limit, platform, check_info, is_continuation)
                 if use_fs:
                     vid = check_info.get("video_id")
                     yt_live_start.mark_seen(vid)   # once per broadcast, also across restarts

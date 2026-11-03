@@ -66,8 +66,10 @@ GROUPS = (
             hint="keeps what aired before MSR noticed",
             tip="yt-dlp --live-from-start on the first part of a broadcast: it catches up\n"
                 "faster than real time, then follows live. No DVR = normal live recording."),
-        row("YouTube", "live_from_start_max_hours", "Only if live for less than (h)", hint="0 = no limit",
-            tip="Older broadcasts record from now, so a restart does not fetch hours of backlog."),
+        row("YouTube", "live_from_start_max_minutes", "Only if live for at most (min)",
+            hint="minutes, at least check interval + 2; raise it to grab older footage (more like a VOD download)", width=6,
+            tip="Covers a start missed between checks. Older broadcasts record from now, no backlog.\n"
+                "Never less than the check interval + 2 min. 0 = no limit."),
     )),
     ("Checking", False, (
         row("Timeouts", "poll_interval_minutes", "Check every (min)", hint="0.5\u2013120",
