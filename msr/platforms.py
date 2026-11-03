@@ -528,7 +528,14 @@ def check_tiktok_live_webcast(username, cookies_file, logger, timeout=30):
     return False, room_id, None, f"webcast did not confirm live ({detail})"
 
 
-def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
+def _fill_check_info(info, data):
+    if info is None or not isinstance(data, dict):
+        return
+    info.update(video_id=data.get("id"), release_timestamp=data.get("release_timestamp"),
+                timestamp=data.get("timestamp"), live_status=data.get("live_status"))
+
+
+def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None, info=None):
     """Check if a stream is live using yt-dlp (Kick, YouTube, custom URLs).
 
     Returns (is_live: bool, stream_title: str | None, error: str | None,
@@ -542,6 +549,8 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
     has separate video-only and audio-only HLS tracks (e.g. Chaturbate CMAF).
     When present, the caller should use build_recording_command_ffmpeg_merge
     instead of yt-dlp to avoid the live-stream buffering deadlock.
+    ``info`` (optional dict) receives video_id, release_timestamp, timestamp
+    and live_status (used by the YouTube from-start capture).
     """
     # ── Rumble channel/user pages: scan playlist for live entry ──────────
     # Unlike YouTube's @handle/live, Rumble has no "give me the live stream"
@@ -599,6 +608,7 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
         if check.returncode == 0 and check.stdout:
             try:
                 data = json.loads(check.stdout)
+                _fill_check_info(info, data)
                 is_live = data.get("is_live", False) or data.get("live_status") == "is_live"
                 title = data.get("title") or data.get("fulltitle")
 
@@ -704,6 +714,7 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None):
                                                text=True, timeout=timeout, **no_window_kwargs())
                         if retry.returncode == 0 and retry.stdout:
                             data = json.loads(retry.stdout)
+                            _fill_check_info(info, data)
                             is_live = data.get("is_live", False) or data.get("live_status") == "is_live"
                             title = data.get("title") or data.get("fulltitle")
                             if not is_live and data.get("formats"):
@@ -1951,6 +1962,36 @@ def build_recording_command_ytdlp(url, raw_file, config, verbose, streamlink_deb
     if verbose or streamlink_debug:
         cmd.append("--verbose")
 
+    return cmd
+
+
+def build_recording_command_ytdlp_from_start(url, out_stem, config, verbose, streamlink_debug,
+                                             cookies_file=None):
+    """yt-dlp --live-from-start for a YouTube broadcast (see msr/yt_live_start.py).
+
+    YouTube serves from-start only as separate DASH video/audio formats, which
+    yt-dlp fetches with its own fragment downloader (no --downloader ffmpeg,
+    no MPEG-TS) into <out_stem>.f<id>.<ext>, then merges them into
+    <out_stem>.mp4 with ffmpeg when the broadcast ends.
+    """
+    cmd = [
+        "yt-dlp", url,
+        "--live-from-start",
+        "-f", "bv*+ba/b",
+        "-o", out_stem.replace("%", "%%") + ".%(ext)s",   # -o is a template
+        "--merge-output-format", "mp4",
+        "--no-part",
+        "--no-mtime",
+        "--retries", "10",
+        "--fragment-retries", "10",
+    ]
+    if cookies_file:
+        cmd.extend(["--cookies", cookies_file])
+    player_client = (config.get('Advanced', 'youtube_player_client', fallback='') or '').strip()
+    if player_client:
+        cmd.extend(["--extractor-args", f"youtube:player_client={player_client}"])
+    if verbose or streamlink_debug:
+        cmd.append("--verbose")
     return cmd
 
 

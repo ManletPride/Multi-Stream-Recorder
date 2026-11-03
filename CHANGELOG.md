@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- YouTube: a broadcast found live within its first 15 minutes is recorded from its start (yt-dlp `--live-from-start`), then follows live. Older broadcasts record live only. `[YouTube] live_from_start` (on) and `live_from_start_max_minutes` (15, 0–7200, 0 = no limit, never below the check interval + 2 min), both in Options → YouTube.
+
 ## v3.0.0 (2026-10-30)
 
 The biggest release so far (over 60 commits since v2.1.0): a **Clip Editor** for cutting clips while a stream records, a **Library** tab that shows and safely cleans up what your recordings take, **agent and headless control** (`msr_ctl.py`) for scripts, bots and AI agents, MSR's **own Python environment** set up on first launch, an **Updates** dialog for yt-dlp/streamlink and the other packages, **sixteen themes**, an **app icon**, and a long list of safety fixes (drive loss, verified remuxes, redacted logs, hidden consoles, all-or-nothing updates, recording starts at once after a crash). No new Python packages; your `config.ini`, `channels.json`, cookies and recordings are used as before. Release notes: [docs/release_notes/RELEASE_NOTES_v3.0.0.md](docs/release_notes/RELEASE_NOTES_v3.0.0.md).

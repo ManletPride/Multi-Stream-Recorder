@@ -158,6 +158,8 @@ Use **+ Add channel**. Accepted forms:
 | Fishtank | `fishtank:director` or a raw stream id |
 | Custom | any URL yt-dlp supports, or an `.m3u8` |
 
+**YouTube from the start:** when a YouTube channel is found live within its first 15 minutes, MSR records it from the beginning (yt-dlp `--live-from-start`), so a start between two checks is not lost. It catches up faster than real time, then follows live. Later broadcasts record live only. The limit is **Options → YouTube → Only if live for at most (min)** (`[YouTube] live_from_start_max_minutes`, 0–7200, 0 = no limit). It is never below the check interval + 2 min. Raise it to grab older footage, which works more like a VOD download. Turn it off with `live_from_start = false`.
+
 **Other sources:** Fishtank.live support is built in, but the show is between seasons and has no live cameras right now. Its camera list changes every season, so it may need an update when a new one starts. Details: [docs/fishtank.md](docs/fishtank.md).
 
 Tick a channel to enable it (Watching), untick to put it in Off. Press **Start Recording** to begin the session; channels added while recording start at once.

@@ -8,6 +8,8 @@ Clips/
 # config.ini also holds the [Fishtank] email/password in plain text.
 config.ini
 window_state.json
+# YouTube video ids already recorded from the start (msr/yt_live_start.py)
+yt_from_start/
 channels.json
 kick_channel_ids.json
 
