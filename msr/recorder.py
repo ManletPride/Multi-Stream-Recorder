@@ -531,6 +531,32 @@ def _safe_int(v):
 PUSH_RESUBSCRIBE_CHECK = 60     # seconds between "anything unsubscribed?" sweeps
 PUSH_RETRY_MIN = 120            # first retry for a slug that failed to subscribe
 PUSH_RETRY_MAX = 1800
+PUSH_CATCHUP_MIN_GAP = 300     # at most one post-reconnect catch-up check per 5 min
+PUSH_RESUB_SUMMARY_DELAY = 10  # seconds after a reconnect before the one summary line
+CATCHUP_SPREAD_MAX = 60        # catch-up wakes are spread over at most this many seconds
+
+
+class _QuietGoodbye(logging.Filter):
+    """websocket-client logs an ordinary server drop as ERROR '... - goodbye';
+    the listeners log the drop themselves."""
+    def filter(self, record):
+        return not str(record.getMessage()).rstrip().endswith("goodbye")
+
+
+logging.getLogger("websocket").addFilter(_QuietGoodbye())
+
+
+class CatchUp:
+    """Debounce for the post-reconnect catch-up check (events missed while the socket was down)."""
+    def __init__(self, gap=PUSH_CATCHUP_MIN_GAP, clock=time.monotonic):
+        self.gap, self.clock, self.last = gap, clock, None
+
+    def due(self):
+        now = self.clock()
+        if self.last is not None and now - self.last < self.gap:
+            return False
+        self.last = now
+        return True
 
 
 def parse_kick_push_event(msg):
@@ -634,6 +660,11 @@ class KickPushListener:
         self._fail_logged = False
         self._last_fail_log = 0.0
         self._limit_logged = False
+        self._ever_connected = False
+        self._dropped_at = None        # monotonic time a healthy socket went away
+        self._reconnect = False        # current connection follows a drop
+        self._resub_count = 0
+        self._catchup = CatchUp()
         self._cache_path = os.path.join(
             os.path.dirname(os.path.abspath(
                 getattr(config, 'config_file', 'config.ini'))),
@@ -749,9 +780,8 @@ class KickPushListener:
                         header=[f"User-Agent: {BROWSER_HEADERS['user-agent']}"],
                         on_open=self._on_open,
                         on_message=self._on_message,
-                        on_error=lambda w, e: self._log_failure(f"socket error: {e}"),
-                        on_close=lambda w, c, r: self.logger.info(
-                            f"Kick push: socket closed ({c})") if self._healthy else None,
+                        on_error=self._on_socket_error,
+                        on_close=self._on_socket_close,
                     )
                     # ping keeps proxies from dropping the idle connection;
                     # Centrifugo's own app-level ping ({}) is answered too.
@@ -767,6 +797,8 @@ class KickPushListener:
                     for slug in list(self._subscribed) or list(self._wanted):
                         self._set_push_flag(slug, False)
                     self._subscribed.clear()
+                    if self._healthy and self._dropped_at is None:
+                        self._dropped_at = time.monotonic()
 
             if self._stop.is_set():
                 break
@@ -778,6 +810,16 @@ class KickPushListener:
             if self._stop.wait(backoff):
                 break
             backoff = min(backoff * 2, PUSH_RECONNECT_MAX)
+
+    def _on_socket_error(self, ws, e):
+        if self._healthy:
+            self.logger.debug(f"Kick push: socket error after connect: {e}")
+        else:
+            self._log_failure(f"socket error: {e}")
+
+    def _on_socket_close(self, ws, code, reason):
+        if self._healthy:
+            self.logger.debug(f"Kick push: socket closed ({code})")
 
     def _on_open(self, ws):
         if self._protocol == "centrifugo":
@@ -794,7 +836,17 @@ class KickPushListener:
         self._healthy = True
         with self._lock:
             wanted = sorted(self._wanted) + sorted(self._watch - self._wanted)
-        self.logger.info(
+        self._reconnect = self._ever_connected
+        self._ever_connected = True
+        self._resub_count = 0
+        if self._reconnect:
+            dropped, self._dropped_at = self._dropped_at, None
+            gap = time.monotonic() - dropped if dropped else None
+            t = threading.Timer(PUSH_RESUB_SUMMARY_DELAY, self._reconnect_summary, args=(gap,))
+            t.daemon = True
+            t.start()
+        else:
+            self.logger.info(
             f"Kick push: connected ({self._protocol}) — subscribing {len(wanted)} channel(s)")
         for slug in wanted:
             self._subscribe(slug)
@@ -920,9 +972,32 @@ class KickPushListener:
             recording = slug in self._wanted
         if recording:
             self._set_push_flag(slug, True)
+        msg = (f"Kick push: listening for {slug} (channel.{cid})"
+               + ("" if recording else " - presence only"))
+        if self._reconnect:
+            self._resub_count += 1
+            self.logger.debug(msg)
+        else:
+            self.logger.info(msg)
+
+    def _reconnect_summary(self, gap):
+        """One INFO line per ordinary drop + reconnect, then a catch-up check."""
+        if self._stop.is_set() or not self._connected:
+            return
+        queued = self._catchup.due()
+        took = f" in {gap:.0f} s" if gap is not None else ""
         self.logger.info(
-            f"Kick push: listening for {slug} (channel.{cid})"
-            + ("" if recording else " — presence only"))
+            f"Kick push: connection dropped by server, reconnected{took} - "
+            f"re-subscribed {self._resub_count} channel(s)"
+            + (" (catch-up check queued)" if queued else ""))
+        self._reconnect = False
+        if queued and self.recorder is not None:
+            with self._lock:
+                wanted = sorted(self._wanted)
+            try:
+                self.recorder.catch_up_check(wanted, "Kick push")
+            except Exception as e:
+                self.logger.debug(f"Kick push: catch-up check failed: {e}")
 
     def _handle_live_event(self, slug, kind, ev):
         """Presence for every slug; a recorder wake ONLY for recording slugs."""
@@ -1234,6 +1309,35 @@ class StreamRecorder:
 
         threading.Thread(target=_staggered_wake, args=(targets,),
                          daemon=True, name="check-all-now").start()
+
+    def catch_up_check(self, channels, source="push"):
+        """Wake idle workers once after a push socket came back (events sent while it
+        was down are not replayed). Skips stopped and already-recording channels;
+        wakes are shuffled and spread over up to CATCHUP_SPREAD_MAX seconds."""
+        if not self.is_running:
+            return []
+        busy = ("Recording", "Remuxing...", "Processing...")
+        targets = [ch for ch in channels
+                   if ch in self.wake_events and ch not in self.stopped_channels
+                   and (self.status_dict.get(ch) or {}).get("status") not in busy]
+        if not targets:
+            return []
+        random.shuffle(targets)
+        step = min(1.5, CATCHUP_SPREAD_MAX / max(1, len(targets)))
+        logging.info(f"{source}: catch-up check of {len(targets)} channel(s) "
+                     f"over ~{step * (len(targets) - 1):.0f} s")
+
+        def run():
+            for i, ch in enumerate(targets):
+                if not self.is_running:
+                    return
+                ev = self.wake_events.get(ch)
+                if ev is not None and ch not in self.stopped_channels:
+                    ev.set()
+                if i < len(targets) - 1:
+                    time.sleep(step * random.uniform(0.7, 1.3))
+        threading.Thread(target=run, daemon=True, name="push-catch-up").start()
+        return targets
 
     def set_poll_interval(self, minutes):
         """Update the poll interval live.  Sleeping workers pick up the new

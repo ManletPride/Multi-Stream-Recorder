@@ -52,6 +52,10 @@ class TwitchPushListener:
         self._limit_logged = False
         self._last_fail_log = -FAILURE_LOG_EVERY
         self._healthy = False
+        self._ever_connected = False
+        self._dropped_at = None
+        from msr.recorder import CatchUp
+        self._catchup = CatchUp()
 
     # -- public API (same shape as KickPushListener) --
 
@@ -170,7 +174,7 @@ class TwitchPushListener:
                 try:
                     self._ws = websocket.WebSocketApp(
                         url, on_message=self._on_message,
-                        on_error=lambda w, e: self._log_failure(f"socket error: {e}"))
+                        on_error=self._on_socket_error)
                     self._last_msg = self.clock()
                     watchdog = threading.Thread(target=self._watchdog, args=(self._ws,),
                                                 daemon=True)
@@ -181,6 +185,8 @@ class TwitchPushListener:
                 finally:
                     self._ws = None
                     if not self._reconnect_url:
+                        if self._healthy and self._dropped_at is None:
+                            self._dropped_at = self.clock()
                         self._session_id = None
                         self._clear_flags()
             if self._stop.is_set() or self._auth_failed:
@@ -192,6 +198,12 @@ class TwitchPushListener:
             if self._stop.wait(backoff):
                 break
             backoff = min(backoff * 2, RECONNECT_MAX)
+
+    def _on_socket_error(self, ws, e):
+        if self._healthy:
+            self.logger.debug(f"Twitch push: socket error after connect: {e}")
+        else:
+            self._log_failure(f"socket error: {e}")
 
     def _watchdog(self, ws):
         """No keepalive/notification for keepalive+10 s means the socket is dead."""
@@ -227,8 +239,13 @@ class TwitchPushListener:
                 for login in logins:
                     self._flag_login(login, True)
             else:
-                threading.Thread(target=self._subscribe_all, daemon=True,
-                                 name="twitch-push-subscribe").start()
+                reconnect = self._ever_connected
+                self._ever_connected = True
+                dropped, self._dropped_at = self._dropped_at, None
+                threading.Thread(target=self._subscribe_all, kwargs={
+                    "reconnect": reconnect,
+                    "gap": (self.clock() - dropped) if (reconnect and dropped) else None},
+                    daemon=True, name="twitch-push-subscribe").start()
         elif t == "reconnect":
             self._reconnect_url = m.get("reconnect_url")
             try:
@@ -264,7 +281,7 @@ class TwitchPushListener:
             watch = sorted(_login(k) for k in self._watch)
         return wanted + [l for l in watch if l not in wanted]
 
-    def _subscribe_all(self):
+    def _subscribe_all(self, reconnect=False, gap=None):
         session = self._session_id
         if not session:
             return
@@ -288,16 +305,32 @@ class TwitchPushListener:
                     with self._lock:
                         self._subs[login] = sub_id
                     self._flag_login(login, True)
-                    self.logger.info(f"Twitch push: listening for {login}")
+                    (self.logger.debug if reconnect else self.logger.info)(
+                        f"Twitch push: listening for {login}")
                 elif status == "limit":
                     self._log_limit()
                     return
             if todo and not self._subs:
                 self._log_failure("no subscription accepted")
+            elif reconnect:
+                self._reconnect_summary(gap)
         except te.TwitchAuthError as e:
             self._auth_off(str(e))
         except Exception as e:
             self._log_failure(f"subscribe failed ({e})")
+
+    def _reconnect_summary(self, gap):
+        queued = self._catchup.due()
+        took = f" in {gap:.0f} s" if gap is not None else ""
+        self.logger.info(f"Twitch push: connection dropped, reconnected{took} - re-subscribed "
+                         f"{len(self._subs)} channel(s)" + (" (catch-up check queued)" if queued else ""))
+        if queued and self.recorder is not None:
+            with self._lock:
+                wanted = sorted(self._wanted)
+            try:
+                self.recorder.catch_up_check(wanted, "Twitch push")
+            except Exception as e:
+                self.logger.debug(f"Twitch push: catch-up check failed: {e}")
 
     def _unsubscribe(self, login):
         with self._lock:
