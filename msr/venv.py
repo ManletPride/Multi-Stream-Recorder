@@ -19,6 +19,9 @@ import configparser
 import hashlib
 import json
 import os
+import queue
+import re
+import threading
 import shutil
 import subprocess
 import sys
@@ -29,6 +32,7 @@ from msr.nowindow import no_window_kwargs
 VENV_NAME = ".venv"
 MARKER = "msr_venv.json"
 ERROR_FILE = "msr_venv_error.txt"
+SETUP_LOG = "msr_venv_setup.log"   # full output of the last setup (git-ignored: *.log)
 OPT_OUT_ENV = "MSR_NO_VENV"
 NOTICE_ENV = "MSR_VENV_NOTICE"
 PIP_TIMEOUT = 1800
@@ -222,6 +226,103 @@ def _run(cmd, timeout, run=subprocess.run):
                stdin=subprocess.DEVNULL, **no_window_kwargs())
 
 
+def setup_log_path(root: str) -> str:
+    return os.path.join(root, SETUP_LOG)
+
+
+def count_requirements(path: str) -> int:
+    """Packages named in requirements.txt (comments, blanks and options skipped)."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return sum(1 for ln in fh if ln.split("#", 1)[0].strip() and not ln.lstrip().startswith("-"))
+    except OSError:
+        return 0
+
+
+_NAME = r"([A-Za-z0-9][A-Za-z0-9._\-]*)"
+_COLLECT = re.compile(r"^Collecting " + _NAME)
+_REQ_OK = re.compile(r"^Requirement already satisfied: " + _NAME)
+_DOWNLOAD = re.compile(r"^\s*Downloading (?:https?://\S*/)?([^\s/]+?)(?:-(\d[^-\s]*))?(?:-[^\s]*)?\.(?:whl|tar\.gz|zip)(?:\.metadata)?(?:\s*\(([^)]+)\))?")
+_CACHED = re.compile(r"^\s*Using cached (?:https?://\S*/)?([^\s/]+?)(?:-(\d[^-\s]*))?(?:-[^\s]*)?\.(?:whl|tar\.gz|zip)")
+_BUILDING = re.compile(r"^\s*Building wheel for " + _NAME)
+_INSTALLING = re.compile(r"^Installing collected packages: (.+)$")
+_DONE = re.compile(r"^Successfully installed (.+)$")
+
+
+class PipProgress:
+    """Turns pip's output lines into one friendly status line. Tk-free (tested on its own)."""
+
+    def __init__(self, top_level: int = 0):
+        self.top_level = top_level   # packages in requirements.txt
+        self.found = 0               # packages pip has looked up so far (dependencies included)
+        self.total = 0               # known once pip starts installing
+
+    def feed(self, line: str) -> str | None:
+        """New status text for this line, or None (status unchanged)."""
+        text = (line or "").rstrip()
+        m = _COLLECT.match(text) or _REQ_OK.match(text)
+        if m:
+            self.found += 1
+            if self.top_level and self.found <= self.top_level:
+                return f"Looking up package {self.found} of {self.top_level}: {m.group(1)}"
+            return f"Looking up {m.group(1)} (dependency, {self.found} packages so far)"
+        m = _DOWNLOAD.match(text)
+        if m:
+            name, ver, size = m.group(1).replace("_", "-"), m.group(2), m.group(3)
+            return f"Downloading {name}" + (f" {ver}" if ver else "") + (f" ({size})" if size else "")
+        m = _CACHED.match(text)
+        if m:
+            return f"Using the cached download of {m.group(1).replace('_', '-')}"
+        m = _BUILDING.match(text)
+        if m:
+            return f"Building {m.group(1)} (can take a moment)"
+        m = _INSTALLING.match(text)
+        if m:
+            names = [n.strip() for n in m.group(1).split(",") if n.strip()]
+            self.total = len(names)
+            return f"Installing {len(names)} packages (the longest step): " + ", ".join(names[:6]) + (", \u2026" if len(names) > 6 else "")
+        m = _DONE.match(text)
+        if m:
+            return f"Installed {len(m.group(1).split())} packages"
+        if text.startswith("ERROR:"):
+            return text[:200]
+        return None
+
+
+def _stream(cmd, timeout, on_line, popen=subprocess.Popen):
+    """Run cmd hidden with stdout+stderr merged; on_line(line) for each line as it arrives.
+    Returns a CompletedProcess (stdout = everything). Kills the process after `timeout` s."""
+    proc = popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True,
+                 encoding="utf-8", errors="replace", bufsize=1, **no_window_kwargs())
+    timed_out = []
+
+    def kill():
+        timed_out.append(True)
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    timer = threading.Timer(timeout, kill)
+    timer.daemon = True
+    timer.start()
+    lines = []
+    try:
+        for line in proc.stdout:
+            line = line.rstrip("\r\n")
+            lines.append(line)
+            on_line(line)
+        rc = proc.wait()
+    finally:
+        timer.cancel()
+        try:
+            proc.stdout.close()
+        except (OSError, AttributeError):
+            pass
+    if timed_out:
+        raise subprocess.TimeoutExpired(cmd, timeout)
+    return subprocess.CompletedProcess(cmd, rc, "\n".join(lines) + "\n", "")
+
+
 def _explain(text: str, step: str) -> str:
     low = (text or "").lower()
     if "no module named venv" in low or "ensurepip" in low:
@@ -237,14 +338,33 @@ def _explain(text: str, step: str) -> str:
     return f"{step} failed: " + (lines[-1][:300] if lines else "unknown error")
 
 
-def ensure(root: str, progress=None, run=subprocess.run, python: str | None = None) -> tuple[bool, str]:
-    """Make .venv ready. (ok, message). progress(text) gets short status lines."""
+def ensure(root: str, progress=None, run=subprocess.run, python: str | None = None, log=None,
+           popen=None) -> tuple[bool, str]:
+    """Make .venv ready. (ok, message). progress(text) gets short status lines; log(line), when
+    given, gets every output line live (pip is then streamed; popen is injectable for tests).
+    The full output also goes to msr_venv_setup.log in the MSR folder."""
     say = progress or (lambda text: None)
+    logfile = None
+
+    def out(line: str) -> None:
+        if logfile is not None:
+            try:
+                logfile.write(line + "\n")
+                logfile.flush()
+            except OSError:
+                pass
+        if log is not None:
+            log(line)
     state, reason = check(root)
     if state == "ready":
         return True, ""
     d = venv_dir(root)
     try:
+        try:
+            logfile = open(setup_log_path(root), "w", encoding="utf-8")
+            logfile.write(time.strftime("MSR first-time setup %Y-%m-%d %H:%M:%S\n"))
+        except OSError:
+            logfile = None
         if state in ("rebuild",) and os.path.isdir(d):
             if running_in(root):
                 return False, f".venv needs rebuilding ({reason}) but MSR was started from it"
@@ -253,20 +373,39 @@ def ensure(root: str, progress=None, run=subprocess.run, python: str | None = No
             say(f"Rebuilding MSR's environment ({reason})\u2026")
             shutil.rmtree(d)
         if not os.path.isdir(d):
-            say("Creating MSR's own Python environment\u2026")
+            say("Creating MSR's own Python environment (.venv)\u2026")
+            out(f"> python -m venv {d}")
             r = _run([python or base_python(), "-m", "venv", d], 300, run)
+            for line in ((r.stdout or "") + (r.stderr or "")).splitlines():
+                out(line)
             if r.returncode != 0 or not os.path.isfile(venv_python(root)):
                 return False, _explain((r.stderr or "") + (r.stdout or ""), "Creating .venv")
         say("Installing yt-dlp, streamlink and the other packages (first time only, about a minute)\u2026")
-        r = _run([venv_python(root), "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
-                  "--progress-bar", "off", "--retries", "1", "--timeout", "20",
-                  "-r", os.path.join(root, "requirements.txt")], PIP_TIMEOUT, run)
+        reqs = os.path.join(root, "requirements.txt")
+        cmd = [venv_python(root), "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
+               "--progress-bar", "off", "--retries", "1", "--timeout", "20", "-r", reqs]
+        out("> pip install -r requirements.txt")
+        if log is not None and (popen is not None or run is subprocess.run):
+            tracker = PipProgress(count_requirements(reqs))
+
+            def line_seen(line: str) -> None:
+                out(line)
+                status = tracker.feed(line)
+                if status:
+                    say(status)
+            r = _stream(cmd, PIP_TIMEOUT, line_seen, popen or subprocess.Popen)
+        else:
+            r = _run(cmd, PIP_TIMEOUT, run)
+            for line in ((r.stdout or "") + (r.stderr or "")).splitlines():
+                out(line)
         if r.returncode != 0:
             return False, _explain((r.stderr or "") + (r.stdout or ""), "Installing packages")
         with open(os.path.join(d, MARKER), "w", encoding="utf-8") as fh:
             json.dump({"complete": True, "root": os.path.abspath(root), "python": python or base_python(),
                        "version": "%d.%d" % sys.version_info[:2], "requirements": requirements_hash(root),
                        "created": time.strftime("%Y-%m-%d %H:%M:%S")}, fh, indent=1)
+        say("Done. Starting Multi-Stream Recorder\u2026")
+        out("Setup finished.")
         return True, ""
     except subprocess.TimeoutExpired:
         return False, "Setting up .venv took too long and was stopped."
@@ -274,6 +413,12 @@ def ensure(root: str, progress=None, run=subprocess.run, python: str | None = No
         return False, _explain(str(e), "Setting up .venv")
     except Exception as e:  # the launcher must always get an answer and start MSR
         return False, f"Setting up .venv failed: {type(e).__name__}: {e}"
+    finally:
+        if logfile is not None:
+            try:
+                logfile.close()
+            except OSError:
+                pass
 
 
 def write_error(root: str, message: str) -> None:
@@ -308,14 +453,38 @@ def describe() -> str:
 
 
 # ------------------------------------------------------------------ launcher
-def _progress_window():
-    """A small themed window for first-time setup; (say, pump, close) or None without a display."""
-    try:
-        import tkinter as tk
-        from tkinter import ttk
-        from msr import themes
-        theme = themes.current()
-        root = tk.Tk()
+LOG_LINES_KEPT = 500   # the window's log keeps the last N lines (the file has all)
+
+
+def drain(q, on_status, on_line, limit: int = 200) -> int:
+    """Hand queued ("status", text) / ("line", text) items to the window, at most `limit` per
+    tick so a burst of pip output cannot freeze it. Returns how many were handled."""
+    n = 0
+    while n < limit:
+        try:
+            kind, text = q.get_nowait()
+        except queue.Empty:
+            break
+        (on_status if kind == "status" else on_line)(text)
+        n += 1
+    return n
+
+
+def fmt_elapsed(seconds: float) -> str:
+    s = max(0, int(seconds))
+    return f"{s // 60}:{s % 60:02d}"
+
+
+class SetupWindow:
+    """First-time setup window: status line, elapsed time, a small live log, and on failure a
+    message naming the full log file plus a Continue button."""
+
+    def __init__(self, tk, ttk, theme, show: bool = True):
+        self.tk = tk
+        self.started = time.time()
+        root = self.root = tk.Tk()
+        if not show:
+            root.withdraw()
         try:
             from msr import appicon
             appicon.set_app_id()
@@ -324,20 +493,102 @@ def _progress_window():
             pass
         root.title("Multi-Stream Recorder \u2014 first-time setup")
         root.configure(bg=theme["bg"])
-        root.resizable(False, False)
-        label = tk.Label(root, text="Preparing\u2026", bg=theme["bg"], fg=theme["fg"], wraplength=420,
-                         justify="left", padx=16, pady=12)
-        label.pack(fill="x")
-        bar = ttk.Progressbar(root, mode="indeterminate", length=420)
-        bar.pack(padx=16, pady=(0, 16))
-        bar.start(12)
+        root.resizable(True, False)
+        bg, fg = theme["bg"], theme["fg"]
+        self.status = tk.Label(root, text="Preparing\u2026", bg=bg, fg=fg, wraplength=520, justify="left",
+                               anchor="w", padx=12, pady=8)
+        self.status.pack(fill="x")
+        self.detail = tk.Label(root, text="", bg=bg, fg=theme.get("muted", fg), anchor="w", padx=12)
+        self.detail.pack(fill="x")
+        self.bar = ttk.Progressbar(root, mode="indeterminate", length=520)
+        self.bar.pack(fill="x", padx=12, pady=(4, 6))
+        self.bar.start(12)
+        box = tk.Frame(root, bg=bg)
+        box.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+        self.log = tk.Text(box, height=6, width=80, wrap="none", bg=theme["log_bg"], fg=theme["log_fg"],
+                           insertbackground=theme["log_fg"], relief="flat", borderwidth=0,
+                           font=("Consolas", 9), state="disabled")
+        scroll = ttk.Scrollbar(box, orient="vertical", command=self.log.yview)
+        self.log.configure(yscrollcommand=scroll.set)
+        self.log.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.button = ttk.Button(root, text="Continue", command=root.destroy)
         root.update_idletasks()
         w, h = root.winfo_reqwidth(), root.winfo_reqheight()
         root.geometry(f"+{(root.winfo_screenwidth() - w) // 2}+{(root.winfo_screenheight() - h) // 3}")
         root.protocol("WM_DELETE_WINDOW", lambda: None)   # setup finishes on its own
-        return root, label
+        self.lines = 0
+
+    def set_status(self, text: str) -> None:
+        self.status.configure(text=text)
+
+    def add_line(self, text: str) -> None:
+        at_end = self.log.yview()[1] >= 0.999   # follow new lines only while at the bottom
+        self.log.configure(state="normal")
+        self.log.insert("end", text + "\n")
+        self.lines += 1
+        if self.lines > LOG_LINES_KEPT:
+            self.log.delete("1.0", "2.0")
+            self.lines -= 1
+        self.log.configure(state="disabled")
+        if at_end:
+            self.log.see("end")
+
+    def tick(self) -> None:
+        self.detail.configure(text=f"Elapsed {fmt_elapsed(time.time() - self.started)}  \u00b7  "
+                                   "only on the first start; later starts are instant")
+
+    def failed(self, message: str, log_path: str) -> None:
+        """Stop the bar, keep the log, say what failed and where the full log is; wait for Continue."""
+        self.bar.stop()
+        self.bar.pack_forget()
+        self.set_status(f"Setup did not finish: {message}\n\nFull log: {log_path}\n"
+                        "Multi-Stream Recorder will start on your normal Python and try again next time.")
+        self.button.pack(anchor="e", padx=12, pady=(0, 10))
+        self.root.protocol("WM_DELETE_WINDOW", self.root.destroy)
+        self.button.focus_set()
+        self.root.bind("<Return>", lambda _e: self.root.destroy())
+
+
+def _progress_window(show: bool = True):
+    """The themed setup window, or None without a display."""
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+        from msr import themes
+        return SetupWindow(tk, ttk, themes.current(), show=show)
     except Exception:
         return None
+
+
+def run_with_window(win, root: str, ensure_fn=None) -> tuple[bool, str]:
+    """ensure() on a worker thread; its status and log lines reach the window through a queue
+    drained by after() (the worker never touches Tk)."""
+    ensure_fn = ensure_fn or ensure
+    q: queue.Queue = queue.Queue()
+    result = {}
+
+    def work():
+        try:
+            result["r"] = ensure_fn(root, progress=lambda t: q.put(("status", t)), log=lambda t: q.put(("line", t)))
+        except BaseException as e:  # else the window waits forever (it cannot be closed)
+            result["r"] = (False, f"{type(e).__name__}: {e}")
+    threading.Thread(target=work, daemon=True).start()
+
+    def pump():
+        drain(q, win.set_status, win.add_line)
+        win.tick()
+        if "r" in result and q.empty():
+            ok, msg = result["r"]
+            if ok:
+                win.root.destroy()
+            else:
+                win.failed(msg, setup_log_path(root))   # stays until Continue
+            return
+        win.root.after(100, pump)
+    win.root.after(100, pump)
+    win.root.mainloop()
+    return result.get("r", (False, "setup window closed"))
 
 
 def prepare(root: str, data_dir: str | None = None, show_window: bool = True) -> tuple[str | None, str]:
@@ -361,30 +612,7 @@ def prepare(root: str, data_dir: str | None = None, show_window: bool = True) ->
     if win is None:
         ok, msg = ensure(root)
     else:
-        import queue
-        import threading
-        tkroot, label = win
-        q = queue.Queue()
-        def work():
-            try:
-                result["r"] = ensure(root, progress=q.put)
-            except BaseException as e:  # else the window waits forever (it cannot be closed)
-                result["r"] = (False, f"{type(e).__name__}: {e}")
-        threading.Thread(target=work, daemon=True).start()
-
-        def pump():
-            try:
-                while True:
-                    label.configure(text=q.get_nowait())
-            except queue.Empty:
-                pass
-            if "r" in result:
-                tkroot.destroy()
-            else:
-                tkroot.after(100, pump)
-        tkroot.after(100, pump)
-        tkroot.mainloop()
-        ok, msg = result.get("r", (False, "setup window closed"))
+        ok, msg = run_with_window(win, root)
     write_error(root, "" if ok else msg)
     if ok:
         return venv_python(root, gui=True), ""
