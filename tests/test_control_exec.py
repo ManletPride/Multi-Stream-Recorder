@@ -127,6 +127,8 @@ class TkBridgeTests(unittest.TestCase):
             "reload": self._hook(lambda: len(self.channels)),
             "reflect": self._hook(lambda s, k: self.var.set(f"{s}.{k}")),
             "update_tag": lambda: None,
+            "sound_test": self._hook(lambda event: event == "live"),
+            "health_report": self._hook(lambda: None),
         }
         self.app = control_exec.GuiBridge(Config(os.path.join(data, "config.ini")), self.jobs, hooks)
         self.addCleanup(self.app.close)
@@ -197,6 +199,19 @@ class TkBridgeTests(unittest.TestCase):
             self.root.update()
         self.assertEqual(self.quits, [None])
         self.assertEqual(self.var.get(), "Timeouts.poll_interval_minutes")
+        self.assertEqual(self.off_thread, [])
+
+    def test_sound_and_health_hooks_run_on_the_tk_thread(self):
+        out = []
+
+        def worker():
+            out.append(self.ctl.handle("sound_test", {"event": "live"}))
+            out.append(self.ctl.handle("health"))
+        t = threading.Thread(target=worker)
+        t.start()
+        self._pump_until([t])
+        self.assertTrue(out[0]["result"]["played"])
+        self.assertTrue(out[1]["ok"], out[1])
         self.assertEqual(self.off_thread, [])
 
     def test_a_blocked_window_gives_busy_naming_the_command(self):

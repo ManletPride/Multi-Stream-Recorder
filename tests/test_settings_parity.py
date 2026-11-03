@@ -100,3 +100,46 @@ class SettingsParityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FeatureCatalogTests(unittest.TestCase):
+    def test_gui_feature_map_names_real_cli_commands(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("msr_ctl_features", os.path.join(ROOT, "msr_ctl.py"))
+        ctl = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ctl)
+        cat = ctl.catalog()
+        names = {c["command"] for c in cat["commands"]}
+        for feature, cmds in cat["gui_features"].items():
+            self.assertTrue(cmds, feature)
+            self.assertEqual(set(cmds) - names, set(), feature)
+        text = " ".join(cat["gui_features"])
+        for word in ("Options", "Twitch", "Sounds", "Health"):
+            self.assertIn(word, text)
+
+
+class SoundAndHealthTests(unittest.TestCase):
+    def test_sound_test_uses_the_adapter_and_never_plays_here(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data, _ = make_data(tmp, [])
+            app = control.HeadlessApp(Config(os.path.join(data, "config.ini")), FakeRecorder)
+            self.addCleanup(app.close)
+            played = []
+            app.sound_test = lambda event: played.append(event) or True
+            ctl = control.Controller(app)
+            self.assertTrue(ctl.handle("sound_test", {"event": "live"})["result"]["played"])
+            self.assertEqual(ctl.handle("sound_test", {"event": "boom"})["code"], "bad_request")
+            self.assertEqual(played, ["live"])
+            off = control.Controller(control.OfflineApp(Config(os.path.join(data, "config.ini"))))
+            self.assertEqual(off.handle("sound_test", {"event": "live"})["code"], "not_running")
+
+    def test_health_includes_the_window_report(self):
+        from msr import health
+        with tempfile.TemporaryDirectory() as tmp:
+            data, _ = make_data(tmp, [])
+            app = control.HeadlessApp(Config(os.path.join(data, "config.ini")), FakeRecorder)
+            self.addCleanup(app.close)
+            app.health_report = lambda: health.Report([health.Issue(health.WARN, "disk", "low space")], 100.0)
+            out = control.Controller(app).handle("health")["result"]
+            self.assertEqual(out["monitor"]["level"], "warn")
+            self.assertEqual(out["monitor"]["issues"][0]["key"], "disk")

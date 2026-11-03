@@ -60,7 +60,8 @@ CATALOG = {
     "channels": ("read", ["channels"]),
     "ping": ("read", ["ping"]),
     "help": ("read", ["help --json"]),
-    "health": ("read", ["health"]),
+    "health": ("read", ["health", "health --check-now"]),
+    "sound-test": ("read", ["sound-test live"]),
     "start": ("session", ["start"]),
     "stop": ("session", ["stop"]),
     "quit": ("session", ["quit"]),
@@ -105,9 +106,29 @@ CATALOG = {
     "twitch disconnect": ("write", ["twitch disconnect"]),
     "call": ("depends on the command", ["call ping"]),
 }
+# Window feature -> CLI commands (help --json "gui_features"; a test checks every name exists).
+GUI_FEATURES = {
+    "Channels tab (roster, add/remove, tick, move, sort)": ["channels", "add", "remove", "enable", "disable",
+                                                             "move", "sort", "edit", "reload-channels"],
+    "Start / Stop Recording, per-channel start/stop, Check Now": ["start", "stop", "record-start", "record-stop",
+                                                                   "check"],
+    "Clip Now, Screenshot, Clip Editor cut": ["clip", "screenshot"],
+    "Options tab: settings (folders, clips, cleanup, timing, Fishtank login, ffmpeg)": ["config get", "config set",
+                                                                                         "config reload"],
+    "Options tab: Twitch connect / disconnect": ["twitch status", "twitch connect", "twitch disconnect"],
+    "Options tab: Sounds (checkboxes = config set Sounds.*, Test button)": ["config set", "sound-test"],
+    "Health line and details": ["health", "config set"],
+    "Library tab, PendingDeletion / Clean up": ["library summary", "library files", "library plan", "library run",
+                                                "library pending", "library batches", "library restore",
+                                                "library suggest", "library log"],
+    "Logs tab": ["logs"],
+    "Updates window": ["update check", "update install", "deps"],
+    "Restore previous channel list / settings": ["history list", "history restore"],
+    "Quit": ["quit"],
+}
 SAFETY_NOTES = {"deps": "deps list / check only read; deps update pip-installs (old version restored on failure)",
                 "recordings": "recordings retry runs the cleanup remux (write; originals kept until verified)"}
-LIVE_ONLY = {"start", "stop", "quit", "record_start", "record_stop", "check", "clip", "screenshot",
+LIVE_ONLY = {"sound_test", "start", "stop", "quit", "record_start", "record_stop", "check", "clip", "screenshot",
              "update_install", "wait", "events"}
 CODE_EXIT = {"auth": EXIT_AUTH, "confirm_required": EXIT_CONFIRM, "not_running": EXIT_NOT_RUNNING,
              "timeout": EXIT_TIMEOUT}
@@ -157,8 +178,12 @@ def build_parser():
                        ("ping", "is a copy running?"),
                        ("start", "Start Recording"), ("stop", "Stop Recording"), ("quit", "quit the app cleanly"),
                        ("reload-channels", "re-read channels.json"),
-                       ("health", "tools, disk space, cookies, Fishtank login, problems")):
+                       ):
         sub.add_parser(name, help=text)
+    sub.add_parser("health", help="tools, disk space, cookies, Fishtank login, problems; the window's Health line") \
+        .add_argument("--check-now", action="store_true", help="window: run the full Health check again")
+    sub.add_parser("sound-test", help="Options > Sounds: play one sound (ignores its checkbox)") \
+        .add_argument("event", choices=["live", "problem", "clip"])
 
     sub.add_parser("help", help="every command: arguments, safety, examples (local; --json for agents)") \
         .add_argument("--json", dest="help_json", action="store_true", help="machine-readable catalog")
@@ -299,7 +324,9 @@ def to_request(a):
     if c == "remove":
         return "channel_" + c, {"channels": a.channels}
     if c == "health":
-        return "health", {}
+        return "health", {"check_now": True} if a.check_now else {}
+    if c == "sound-test":
+        return "sound_test", {"event": a.event}
     if c == "recordings":
         if a.action == "list":
             return "recordings", {k: v for k, v in {"since": a.since, "channel": a.channel,
@@ -451,6 +478,7 @@ def catalog():
                           "session": "starts or stops recording, or the app",
                           "destructive": "removes or replaces something; needs --yes or --confirm WORD"},
         "commands": commands,
+        "gui_features": GUI_FEATURES,
     }
 
 

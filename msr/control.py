@@ -438,6 +438,17 @@ class AppAdapter:
     def watch_changed(self) -> None:
         """The roster changed: tell a running recorder which (disabled) channels to watch."""
 
+    def health_report(self):
+        """The window's Health monitor report (msr.health.Report), or None (headless)."""
+        return None
+
+    def health_check_now(self) -> bool:
+        return False
+
+    def sound_test(self, event) -> bool:
+        from msr.sounds import Sounds
+        return Sounds(self.config).test(event)
+
     def twitch_changed(self) -> None:
         """Twitch sign-in changed: a running session reconnects its push listener."""
         rec = self.recorder
@@ -1556,9 +1567,27 @@ class Controller:
     def cmd_health(self, args):
         from msr.agent_status import health
         out = health(self.app.config, update=self.app.update_info())
+        if _truthy(args.get("check_now")):
+            out["check_started"] = bool(self.app.health_check_now())
+        report = self.app.health_report()
+        if report is not None:  # the window's Health line (startup + periodic checks)
+            out["monitor"] = {"level": report.level, "checked_at": round(report.checked_at, 1),
+                              "issues": [{"level": i.level, "key": i.key, "text": redact_for_log(i.text),
+                                          "action": i.action} for i in report.issues]}
         if self.app.mode == "offline":
             out["note"] = "MSR is not running; this is the state of the files and drives."
         return out
+
+    def cmd_sound_test(self, args):
+        """Options > Sounds Test button: play one event's sound (ignores its checkbox)."""
+        from msr.sounds import EVENTS, Sounds
+        self._need_live()
+        event = str(args.get("event") or "")
+        if event not in EVENTS:
+            raise ControlError(f"event must be one of {', '.join(EVENTS)}.", "bad_request")
+        played = bool(self.app.sound_test(event))
+        return {"event": event, "played": played, "enabled": Sounds(self.app.config).enabled(event),
+                "note": "" if played else "No sound player here (Windows only)."}
 
     def _channel_key(self, ref):
         recs = self.app.records()

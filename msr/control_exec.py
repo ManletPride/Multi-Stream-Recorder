@@ -216,7 +216,8 @@ class GuiBridge(AppAdapter):
 
     ``hooks``: get_recorder, get_presence, channels (the live list), after_edit (redraw + save),
     start, stop, schedule_quit(after_children), reload (count), reflect(section, key),
-    apply_setting(section, key, value) (checks + save + reflect), twitch_changed, update_tag."""
+    apply_setting(section, key, value) (checks + save + reflect), twitch_changed, update_tag,
+    health_report, health_check_now, sound_test(event)."""
 
     mode = "gui"
 
@@ -226,7 +227,10 @@ class GuiBridge(AppAdapter):
         self.hooks = hooks
 
     def _h(self, name):
-        return self.hooks[name]
+        hook = self.hooks.get(name)
+        if hook is None:
+            raise ControlError(f"The window has no '{name}' hook.", "unsupported")
+        return hook
 
     @property
     def recorder(self):
@@ -269,6 +273,18 @@ class GuiBridge(AppAdapter):
 
     def apply_setting(self, section, key, value):
         return self.jobs.call(lambda: self._h("apply_setting")(section, key, value))
+
+    def health_report(self):
+        return self.jobs.call(self._h("health_report")) if "health_report" in self.hooks else None
+
+    def health_check_now(self):
+        if "health_check_now" not in self.hooks:
+            return False
+        self.jobs.call(self._h("health_check_now"))
+        return True
+
+    def sound_test(self, event):
+        return self.jobs.call(lambda: self._h("sound_test")(event))
 
     def twitch_changed(self):
         self.jobs.post(self._h("twitch_changed"))

@@ -3478,6 +3478,9 @@ def main_gui(config):
         "reflect": _reflect_setting,
         "twitch_changed": _control_twitch_changed,
         "apply_setting": _control_apply_setting,
+        "health_report": lambda: health_ctl.report,
+        "health_check_now": health_ctl.check_now,
+        "sound_test": sounds.test,
         "update_tag": lambda: _update_tag[0],
     }))
 
