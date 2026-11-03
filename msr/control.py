@@ -3,8 +3,8 @@
 Three pieces, no tkinter here:
 
 * ``Controller`` runs the commands (status, roster edits, start/stop, check, clip, settings,
-  library, history, logs, update, quit) against an *app adapter*: the GUI (``msr/gui.py``
-  marshals roster edits onto the Tk thread), the headless loop (``HeadlessApp``) or no running
+  library, history, logs, update, quit) against an *app adapter*: the GUI
+  (``control_exec.GuiBridge``: window work is queued to the Tk thread), the headless loop (``HeadlessApp``) or no running
   copy at all (``OfflineApp``, used by ``msr_ctl.py`` to edit the files atomically).
 * ``ControlServer``: newline-delimited JSON over TCP on 127.0.0.1 only, one request per
   connection, every request must carry the random token written to ``msr_control.json`` in the
@@ -398,6 +398,28 @@ class AppAdapter:
     def watch_changed(self) -> None:
         """The roster changed: tell a running recorder which (disabled) channels to watch."""
 
+    _lanes_lock = threading.Lock()
+
+    def lane(self, label):
+        """A SerialExecutor of this adapter, made on first use (closed by ``close``)."""
+        from msr.control_exec import SerialExecutor
+        with self._lanes_lock:
+            lanes = self.__dict__.setdefault("_lanes", {})
+            ex = lanes.get(label)
+            if ex is None or ex.closed:
+                ex = lanes[label] = SerialExecutor(label)
+            return ex
+
+    def run_recorder(self, fn, what=None):
+        """Recorder calls from control (start/stop/check a channel, poll interval) run here,
+        one at a time in arrival order."""
+        return self.lane("recorder lane").call(fn, what)
+
+    def close(self) -> None:
+        with self._lanes_lock:
+            for ex in self.__dict__.pop("_lanes", {}).values():
+                ex.close()
+
 
 class FileRoster:
     """channels.json as the roster (headless and offline): every edit is load, change, save."""
@@ -468,14 +490,18 @@ class HeadlessApp(AppAdapter):
         return self.roster.records()
 
     def mutate(self, fn):
-        result = self.roster.mutate(fn)
-        self.watch_changed()
-        return result
+        def work():
+            result = self.roster.mutate(fn)
+            self.watch_changed()
+            return result
+        return self.lane("headless loop").call(work)
 
     def reload_channels(self):
-        count = self.roster.reload()
-        self.watch_changed()
-        return count
+        def work():
+            count = self.roster.reload()
+            self.watch_changed()
+            return count
+        return self.lane("headless loop").call(work)
 
     def enabled_keys(self):
         return [r["name"] for r in self.records() if r.get("enabled", True)]
@@ -799,8 +825,10 @@ class Controller:
         if fn is None:
             return {"ok": False, "code": "unknown_command", "error": f"Unknown command '{cmd}'.",
                     "commands": self.commands()}
+        from msr.control_exec import command_name
         try:
-            result = fn(args)
+            with command_name(cmd):
+                result = fn(args)
         except ControlError as e:
             return {"ok": False, "code": e.code, "error": str(e)}
         except Exception as e:
@@ -819,6 +847,14 @@ class Controller:
             if job in self._media_jobs:
                 raise ControlError(busy_text, "busy")
             self._media_jobs.add(job)
+
+    def _rec_call(self, rec, method, *a):
+        """One recorder call, through the adapter's ordered recorder lane."""
+        fn = lambda: getattr(rec, method)(*a)  # noqa: E731
+        if not isinstance(self.app, AppAdapter):
+            return fn()
+        from msr.control_exec import current_command
+        return self.app.run_recorder(fn, f"{current_command()} ({method})")
 
     def _recorder(self, need=True):
         rec = self.app.recorder
@@ -874,7 +910,7 @@ class Controller:
             return {"monitoring": is_running_session(rec)}
         if is_running_session(rec):
             for key in keys:
-                rec.start_channel(key)
+                self._rec_call(rec, "start_channel", key)
             return {"monitoring": True, "session": "running"}
         if getattr(self.app, "auto_session", False) and not getattr(self.app, "paused", False):
             try:
@@ -890,7 +926,7 @@ class Controller:
             if is_running_session(rec):
                 for key in keys:
                     if key not in getattr(rec, "channels", []) and key not in getattr(rec, "processes", {}):
-                        rec.start_channel(key)
+                        self._rec_call(rec, "start_channel", key)
             return {"monitoring": True, "session": "running" if is_running_session(rec) else "starting"}
         return {"monitoring": False,
                 "hint": "Recording is stopped; run start to watch and record the enabled channels."}
@@ -909,7 +945,7 @@ class Controller:
         for key in keys:
             if rec is not None:
                 recording = str((before.get(key) or {}).get("status", "")).lower().startswith("recording")
-                rec.remove_channel(key)
+                self._rec_call(rec, "remove_channel", key)
                 if tracker is not None and key in before:
                     tracker.stopping(key, recording)
         drop = set(keys)
@@ -978,7 +1014,7 @@ class Controller:
 
         key = self.app.mutate(edit)
         if rec is not None and old != key:
-            rec.remove_channel(old)
+            self._rec_call(rec, "remove_channel", old)
         return {"old": display_name(old), "new": display_name(key)}
 
     def cmd_channels_reload(self, args):
@@ -1022,7 +1058,7 @@ class Controller:
         for key in keys:
             if self.app.tracker is not None:
                 self.app.tracker.started(key)
-            rec.start_channel(key)
+            self._rec_call(rec, "start_channel", key)
         return {"started": [display_name(k) for k in keys]}
 
     def cmd_record_stop(self, args):
@@ -1034,7 +1070,7 @@ class Controller:
         for key in keys:
             status = str((before.get(key) or {}).get("status", "") or "")
             recording = status.lower().startswith("recording")
-            rec.stop_channel(key)
+            self._rec_call(rec, "stop_channel", key)
             row = {"name": display_name(key), "result": "stopped_recording" if recording else "was_idle",
                    "status_before": status}
             if self.app.tracker is not None:
@@ -1052,9 +1088,9 @@ class Controller:
             recs = self.app.records()
             keys = [recs[resolve_channel(recs, r)]["name"] for r in _refs(args)]
             for key in keys:
-                rec.check_now(key)
+                self._rec_call(rec, "check_now", key)
             return {"checking": [display_name(k) for k in keys]}
-        rec.check_all_now()
+        self._rec_call(rec, "check_all_now")
         return {"checking": "all"}
 
     def cmd_clip(self, args):
@@ -1237,7 +1273,7 @@ class Controller:
         if (section, key) in LIVE_SETTINGS:
             applies = "now"
             if is_running_session(rec):
-                rec.set_poll_interval(float(value))
+                self._rec_call(rec, "set_poll_interval", float(value))
         elif (section, key) in NOW_SETTINGS:
             applies = "now"
         elif section == "Control":
@@ -1849,4 +1885,8 @@ class Service:
     def stop(self):
         if self.server is not None:
             self.server.stop()
+        try:  # queued requests fail at once instead of waiting on a closing window
+            self.app.close()
+        except Exception:
+            pass
         self.status.stop()
