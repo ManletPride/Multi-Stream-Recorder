@@ -4,7 +4,7 @@ A Windows-first desktop app (Python + Tkinter) that watches a list of live chann
 
 Supported: **Kick**, **Twitch**, **YouTube**, **Rumble**, **TikTok**, and custom URLs (any site yt-dlp supports, or a direct `.m3u8`).
 
-This README describes **v3.0.0**. Full history: [CHANGELOG.md](CHANGELOG.md).
+This README describes **v3.1.0**. Full history: [CHANGELOG.md](CHANGELOG.md).
 
 ![Status tab: five channels recording at once](screenshots/main.png)
 
@@ -28,7 +28,7 @@ This README describes **v3.0.0**. Full history: [CHANGELOG.md](CHANGELOG.md).
 
 </details>
 
-## Coming in 3.1 (not released yet)
+## What's new in 3.1
 
 - **YouTube from the start** (experimental): a broadcast MSR finds in its first 15 minutes is recorded from the beginning. See [Adding channels](#adding-channels).
 - **Options tab**: every common setting in one place, grouped, with a hint for what 0 or blank means, plus Fishtank **Test login** and an ffmpeg **Check**.

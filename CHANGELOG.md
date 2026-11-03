@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## v3.1.0 (2026-11-03)
 
-Toward v3.1.0.
+Release notes: [docs/release_notes/RELEASE_NOTES_v3.1.0.md](docs/release_notes/RELEASE_NOTES_v3.1.0.md).
 
 ### Added
 
