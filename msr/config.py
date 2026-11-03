@@ -6,7 +6,7 @@ import os
 import shutil
 import configparser
 
-from msr import history, storage
+from msr import dpapi, history, storage
 
 # Values are literal: a ``%`` in a password or a filename pattern must not be read as
 # interpolation (the default parser raises on ``100%`` and on ``P@ss%word``).
@@ -96,6 +96,45 @@ def _coerce_specs():
 FISHTANK_PASSWORD_ENV = "MSR_FISHTANK_PASSWORD"
 
 
+# Credentials kept DPAPI-encrypted on Windows as ``<key>_dpapi`` with ``<key>`` left blank,
+# so older MSR versions just see no password. Elsewhere they stay plaintext.
+SECRET_KEYS = (("Fishtank", "password"),)
+_noted = set()
+
+
+def _note_once(msg):
+    if msg not in _noted:
+        _noted.add(msg)
+        logging.getLogger().warning(msg)
+
+
+def read_secret(config, section, key):
+    """Plaintext value if set, else the decrypted ``<key>_dpapi`` ('' if missing or unreadable)."""
+    plain = str(config.get(section, key, fallback='') or '')
+    if plain.strip():
+        return plain
+    enc = str(config.get(section, key + '_dpapi', fallback='') or '').strip()
+    if not enc:
+        return ''
+    if dpapi.available():
+        try:
+            return dpapi.decrypt_text(enc)
+        except Exception:
+            pass
+    _note_once(f"{section} {key} in config.ini can't be decrypted on this PC/user - "
+               "please enter it again in Options")
+    return ''
+
+
+def secret_is_saved(config, section, key):
+    """'' (none), 'saved', or 'unreadable' - for hints; never returns the value."""
+    if str(config.get(section, key, fallback='') or '').strip():
+        return 'saved'
+    if not str(config.get(section, key + '_dpapi', fallback='') or '').strip():
+        return ''
+    return 'saved' if read_secret(config, section, key) else 'unreadable'
+
+
 def fishtank_password(config):
     """The Fishtank password: ``MSR_FISHTANK_PASSWORD`` if set, else ``[Fishtank] password``.
 
@@ -105,7 +144,7 @@ def fishtank_password(config):
     from_env = os.environ.get(FISHTANK_PASSWORD_ENV, "")
     if from_env.strip():
         return from_env
-    return str(config.get('Fishtank', 'password', fallback='') or '')
+    return read_secret(config, 'Fishtank', 'password')
 
 
 class Config:
@@ -272,6 +311,7 @@ class Config:
         # Keep the file as it is now in the history (Restore previous...) before overwriting it.
         self._backup_broken_file()
         history.snapshot(self.config_file)
+        self._protect_secrets()
         buffer = io.StringIO()
         self.config.write(buffer)
         data = buffer.getvalue().replace('\n', os.linesep).encode('utf-8')
@@ -282,6 +322,23 @@ class Config:
             return False
         storage.write_ok("config.ini", self.config_file)
         return True
+
+    def _plain_secrets(self):
+        return [(s, k) for s, k in SECRET_KEYS
+                if str(self.get(s, k, fallback='') or '').strip()]
+
+    def _protect_secrets(self):
+        """On Windows, move plaintext credentials to ``<key>_dpapi`` (in memory)."""
+        if not dpapi.available():
+            return
+        for section, key in self._plain_secrets():
+            try:
+                enc = dpapi.encrypt_text(self.get(section, key))
+            except Exception:
+                logging.warning(f"Could not encrypt {section} {key}; left as it was")
+                continue
+            self.config.set(section, key + '_dpapi', enc)
+            self.config.set(section, key, '')
 
     def _write_startup(self):
         """Write needed by loading itself (missing defaults, coerced values).
@@ -368,6 +425,8 @@ class Config:
                             value = default_streams_dir()
                         self.config.set(section, key, value)
                         updated = True
+            if dpapi.available() and self._plain_secrets():
+                updated = True  # migrate plaintext credentials
             if updated:
                 self._write_startup()
         else:

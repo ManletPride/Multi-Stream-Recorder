@@ -296,6 +296,9 @@ def known_setting(config, section, key):
         return False
 
 
+from msr.config import SECRET_KEYS, read_secret  # noqa: E402
+
+
 def masked(key, value):
     from msr import history
     if history.is_sensitive(key) and key not in ("auto_purge_days",):
@@ -1205,7 +1208,11 @@ class Controller:
         for s in cfg.sections():
             if section and s.lower() != str(section).lower():
                 continue
-            values = {k: masked(k, v) for k, v in cfg.items(s) if not key or k == key}
+            values = {k: masked(k, v) for k, v in cfg.items(s)
+                      if (not key or k == key) and not k.endswith("_dpapi")}
+            for sec, k in SECRET_KEYS:  # encrypted credentials count as set
+                if sec.lower() == s.lower() and k in values:
+                    values[k] = masked(k, read_secret(cfg, s, k))
             if values:
                 out[s] = values
         if (section or key) and not out:

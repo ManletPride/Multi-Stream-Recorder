@@ -82,28 +82,7 @@ def token_path(data_dir):
 
 # DPAPI (current user) on Windows; plaintext elsewhere. File: {"v": 2, "dpapi": "<base64>"}.
 
-def _dpapi(data, protect):
-    import ctypes
-    from ctypes import wintypes
-
-    class BLOB(ctypes.Structure):
-        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
-    crypt32, kernel32 = ctypes.windll.crypt32, ctypes.windll.kernel32
-    buf = ctypes.create_string_buffer(data, len(data))
-    src = BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
-    dst = BLOB()
-    fn = crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData
-    # 0x1 = CRYPTPROTECT_UI_FORBIDDEN (never prompt)
-    if not fn(ctypes.byref(src), None, None, None, None, 0x1, ctypes.byref(dst)):
-        raise OSError("DPAPI call failed")
-    try:
-        return ctypes.string_at(dst.pbData, dst.cbData)
-    finally:
-        kernel32.LocalFree(dst.pbData)
-
-
-def dpapi_available():
-    return sys.platform == "win32"
+from msr.dpapi import available as dpapi_available, crypt as _dpapi  # noqa: E402
 
 
 def _encode(tok):

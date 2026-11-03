@@ -106,7 +106,7 @@ GROUPS = (
     ("Fishtank login", False, (
         row("Fishtank", "email", "Email", "text", "", width=28),
         row("Fishtank", "password", "Password", "password", "", width=20,
-            tip="Stored in config.ini like before (never logged; history copies leave it out).\n"
+            tip="Encrypted in config.ini on Windows (DPAPI), plain elsewhere; never logged.\n"
                 "MSR_FISHTANK_PASSWORD, if set, wins and keeps it out of the file."),
     )),
     ("Other", False, (
@@ -382,10 +382,11 @@ class OptionsPanel:
         from msr.config import FISHTANK_PASSWORD_ENV
         if (self.environ.get(FISHTANK_PASSWORD_ENV) or "").strip():
             text = f"set by {FISHTANK_PASSWORD_ENV} (wins)"
-        elif str(self.config.get("Fishtank", "password", "") or "").strip():
-            text = "saved - type to replace"
         else:
-            text = "not set"
+            from msr.config import secret_is_saved
+            text = {"saved": "saved - type to replace",
+                    "unreadable": "saved on another PC/user - type it again"}.get(
+                secret_is_saved(self.config, "Fishtank", "password"), "not set")
         h.configure(text=text)
 
     def _commit_field(self, spec, v):

@@ -301,7 +301,8 @@ class ConfigWriteTests(unittest.TestCase):
         self.assertTrue(self.cfg.save())
         text = Path(self.path).read_text(encoding="utf-8")
         self.assertIn("quality = 1080p", text)
-        self.assertIn("password = P@ss%word", text)
+        from msr.config import fishtank_password
+        self.assertEqual(fishtank_password(Config(self.path)), "P@ss%word")
         self.assertEqual([n for n in os.listdir(self.tmp.name) if n.endswith(".tmp")], [])
 
     def test_a_failing_disk_is_a_warning_not_a_crash_and_the_file_is_untouched(self):

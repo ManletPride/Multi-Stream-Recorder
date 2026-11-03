@@ -504,7 +504,8 @@ class CliTests(unittest.TestCase):
             code, reply = self.run_cli("config", "set", "Fishtank.password", "--stdin")
         self.assertEqual(code, 0)
         self.assertNotIn("s3cret", json.dumps(reply))
-        self.assertIn("s3cret-from-stdin", open(os.path.join(self.data, "config.ini")).read())
+        from msr.config import Config, fishtank_password
+        self.assertEqual(fishtank_password(Config(os.path.join(self.data, "config.ini"))), "s3cret-from-stdin")
 
     def test_offline_edit_refused_while_a_copy_holds_the_lock(self):
         before = roster(self.data)

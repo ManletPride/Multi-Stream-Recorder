@@ -103,7 +103,7 @@ if __name__ == "__main__":
 
 # ---- values with a percent sign, and a config.ini that cannot be parsed --------------------
 
-from msr.config import new_parser  # noqa: E402
+from msr.config import fishtank_password, new_parser  # noqa: E402
 
 SECRET = "hunter2-SECRET"
 
@@ -133,7 +133,7 @@ class PercentValueTests(unittest.TestCase):
     def test_values_are_read_literally(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Config(self.make(tmp))
-            self.assertEqual(cfg.get("Fishtank", "password"), self.PASSWORD)
+            self.assertEqual(fishtank_password(cfg), self.PASSWORD)
             self.assertEqual(cfg.get("Recording", "filename_pattern"), self.PATTERN)
 
     def test_items_and_worker_read_dict_path(self):
@@ -143,7 +143,7 @@ class PercentValueTests(unittest.TestCase):
             as_dict = {s: dict(cfg.config.items(s)) for s in cfg.config.sections()}
             worker_side = new_parser()
             worker_side.read_dict(as_dict)
-            self.assertEqual(worker_side.get("Fishtank", "password"), self.PASSWORD)
+            self.assertEqual(fishtank_password(worker_side), self.PASSWORD)
             self.assertEqual(worker_side.get("Recording", "filename_pattern"), self.PATTERN)
 
     def test_percent_survives_save_and_reload(self):
@@ -153,7 +153,7 @@ class PercentValueTests(unittest.TestCase):
             cfg.config.set("GUI", "theme", "dark")
             cfg.save()
             again = Config(path)
-            self.assertEqual(again.get("Fishtank", "password"), self.PASSWORD)
+            self.assertEqual(fishtank_password(again), self.PASSWORD)
             self.assertEqual(again.get("Recording", "filename_pattern"), self.PATTERN)
 
     def test_status_reader_accepts_percent(self):
@@ -197,7 +197,7 @@ class MalformedConfigTests(unittest.TestCase):
             text = "[Fishtank]\npassword = first\npassword = second\n[GUI]\ntheme = dark\n"
             path = _ini(tmp, text)
             cfg = Config(path)
-            self.assertEqual(cfg.get("Fishtank", "password"), "second")
+            self.assertEqual(fishtank_password(cfg), "second")
             self.assertEqual(cfg.get("GUI", "theme"), "dark")
             self.assertFalse(cfg._unreadable)
             self.assertIn("password", cfg.load_problem)
