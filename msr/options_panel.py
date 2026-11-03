@@ -208,6 +208,7 @@ class OptionsPanel:
         self.open_updates = open_updates
         self.tip = tooltip or _Tip
         self.job = None
+        self._foreign = None   # a sign-in started elsewhere (control); shown, not driven
         self._uri = ""
         self._code = ""
         self.vars = {}
@@ -543,7 +544,11 @@ class OptionsPanel:
             state, login = tc.status_of(self.data_dir, self.client_id(), self.api)
         t = _themes.current()
         busy = bool(self.job and self.job.running())
-        if busy:
+        foreign = bool(self._foreign and self._foreign.running())
+        if foreign:
+            text, color = "Sign-in already in progress (started by an agent)\u2026", t["info"]
+            busy = True
+        elif busy:
             text, color = "Waiting for approval on twitch.tv\u2026", t["info"]
         elif state == "connected":
             text, color = f"Connected as {login or '?'}", t["ok"]
@@ -562,14 +567,44 @@ class OptionsPanel:
     def connect(self):
         if self.job and self.job.running():
             return
+        other = tc.active()
+        if other is not None and other is not self.job:
+            return self._show_foreign(other)
         self._say("")
-        self.job = self.connect_job(self.client_id(), self.data_dir, api=self.api).start()
+        job = self.connect_job(self.client_id(), self.data_dir, api=self.api)
+        job.owner = "options"
+        try:
+            self.job = job.start()
+        except tc.SignInBusy as e:
+            return self._show_foreign(e.job)
         self.refresh_status()
         self.frame.after(100, self._poll)
 
     def cancel(self):
-        if self.job:
-            self.job.cancel()
+        job = self.job or self._foreign or tc.active()
+        if job:
+            job.cancel()
+
+    def _show_foreign(self, job):
+        """Another sign-in runs: show its code and state; poll until it ends."""
+        first = self._foreign is not job
+        self._foreign = job
+        info = getattr(job, "info", {}) or {}
+        if info.get("user_code") and info.get("user_code") != self._code:
+            self._code = info["user_code"]
+            self._uri = te.safe_verification_uri(info.get("verification_url"), self._code)
+            self.code_lbl.configure(text=f"Code {self._code} \u2013 open")
+            self.link.configure(text=self._uri)
+            self.code_row.pack(fill=tk.X, pady=(4, 0))
+        if first:
+            self._say("A Twitch sign-in is already in progress; approve it or Cancel.")
+        if job.running():
+            self.refresh_status()
+            self.frame.after(250, lambda: self._foreign is job and self._show_foreign(job))
+        else:
+            self._foreign = None
+            self._say("")
+            self.refresh_status()
 
     def disconnect(self):
         """Revoke + delete on a thread so a slow network never freezes the GUI."""
@@ -643,8 +678,11 @@ class OptionsPanel:
         cid = self.client_id()
 
         def done(res):
-            if res[0] == "ok" and not (self.job and self.job.running()):
+            if res[0] == "ok" and not (self.job and self.job.running()) and not self._foreign:
                 self.refresh_status(*res[1])
+        other = tc.active()
+        if other is not None and other is not self.job:
+            self._show_foreign(other)
         self._background(lambda: tc.check_online(self.data_dir, cid, self.api), done)
 
     def apply_theme(self):

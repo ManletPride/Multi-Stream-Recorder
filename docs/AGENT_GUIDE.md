@@ -92,6 +92,7 @@ python msr_ctl.py --json twitch status       # connected, login, push channels
 python msr_ctl.py twitch connect             # prints a code + twitch.tv/activate link; give both to the user
 python msr_ctl.py twitch disconnect          # revokes and deletes the token (ask first)
 ```
+Only one sign-in runs at a time. If one is already running (also from the Options tab), connect fails with code `busy` plus its `user_code` and `verification_url`; `twitch connect --cancel` or Options > Cancel stops it.
 
 **Change a setting** (same checks as the Options tab)
 ```

@@ -56,9 +56,10 @@ NOW_SETTINGS = {("Clipping", "clip_length_seconds"), ("Clipping", "screenshot_fo
 class ControlError(Exception):
     """A command that could not be done. ``code`` is stable and machine-readable."""
 
-    def __init__(self, message, code="error"):
+    def __init__(self, message, code="error", data=None):
         super().__init__(message)
         self.code = code
+        self.data = data or {}
 
 
 # ------------------------------------------------------------------ small helpers
@@ -898,7 +899,7 @@ class Controller:
             with command_name(cmd):
                 result = fn(args)
         except ControlError as e:
-            return {"ok": False, "code": e.code, "error": str(e)}
+            return dict(e.data, ok=False, code=e.code, error=str(e))
         except Exception as e:
             from msr.util import redact_for_log
             logging.exception(f"Control command {cmd} failed")
@@ -1433,6 +1434,18 @@ class Controller:
             raise ControlError(f"Twitch sign-in failed: {t.get('error')}", "failed")
         raise ControlError(f"Twitch sign-in {t.get('result')}; run twitch_connect again.", t.get("result") or "failed")
 
+    @staticmethod
+    def _sign_in_busy(job):
+        from msr import twitch_eventsub as te
+        info = dict(getattr(job, "info", {}) or {})
+        data = {k: info[k] for k in ("user_code", "verification_url", "expires_at") if info.get(k)}
+        if data.get("verification_url"):
+            data["verification_url"] = te.safe_verification_uri(data["verification_url"], data.get("user_code") or "")
+        data["started_by"] = getattr(job, "owner", "") or "unknown"
+        where = "the Options tab" if data["started_by"] == "options" else "another request"
+        raise ControlError(f"A Twitch sign-in is already in progress (started from {where}). Approve it with "
+                           "the code shown, or cancel it (twitch_connect cancel=true).", "busy", data)
+
     def cmd_twitch_connect(self, args):
         """Start the device-code sign-in; the reply has user_code + verification_url to approve.
         wait=true (or a later twitch_connect wait=true) blocks until approved. cancel=true stops it."""
@@ -1440,7 +1453,7 @@ class Controller:
         timeout = max(1.0, min(float(args.get("timeout", 600) or 600), 1800.0))
         if _truthy(args.get("cancel")):
             with self._twitch_cv:
-                job = self._twitch.get("job")
+                job = self._twitch.get("job") or tc.active()  # also cancels one started in Options
             if job is None:
                 raise ControlError("No Twitch sign-in is running.", "nothing")
             job.cancel()
@@ -1451,11 +1464,18 @@ class Controller:
         with self._twitch_cv:
             running = self._twitch.get("job") is not None
             if not running:
+                other = tc.active()
+                if other is not None:
+                    self._sign_in_busy(other)
                 factory = self.twitch_job or tc.ConnectJob
                 job = factory(tc.client_id_for(self.app.config, self._tw()), self.app.data_dir, api=self._tw())
+                job.owner = "control"
+                try:
+                    job.start()
+                except tc.SignInBusy as e:
+                    self._sign_in_busy(e.job)
                 self._twitch = {"job": job, "state": "starting"}
         if not running:
-            job.start()
             threading.Thread(target=self._twitch_follow, args=(job,), daemon=True,
                              name="control-twitch-connect").start()
             logging.info("Twitch sign-in started (control)")
