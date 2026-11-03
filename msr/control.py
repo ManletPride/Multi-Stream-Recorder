@@ -1765,8 +1765,8 @@ class Controller:
         return {"events": tracker.events(int(args.get("after", 0) or 0)), "seq": tracker.seq}
 
     def cmd_wait(self, args):
-        """Block until a live / stopped / remux_started / finished / error / offline / ended event (for one channel),
-        or time out. A "finished" wait for a channel that was stopped starts at that stop, so a
+        """Block until an event (agent_status.EVENT_KINDS; for one channel: app-wide events such as
+        health_problem have channel null and only match a wait without channel), or time out. A "finished" wait for a channel that was stopped starts at that stop, so a
         finish that happened between the stop and the wait is returned at once."""
         from msr.agent_status import EVENT_KINDS
         tracker = self.app.tracker
@@ -2190,7 +2190,9 @@ class Service:
         except Exception:
             pass
         from msr.agent_status import Tracker
+        from msr import library_actions
         app.tracker = Tracker(app.config)
+        library_actions.add_listener(app.tracker.on_library)
         self.status = StatusWriter(app, interval)
         self.controller.on_change = self.status.poke
         self.server = ControlServer(self.controller, app.data_dir, app.mode)
@@ -2212,6 +2214,8 @@ class Service:
     def stop(self):
         if self.server is not None:
             self.server.stop()
+        from msr import library_actions
+        library_actions.remove_listener(self.app.tracker.on_library)
         try:  # queued requests fail at once instead of waiting on a closing window
             self.app.close()
         except Exception:

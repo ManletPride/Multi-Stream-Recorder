@@ -735,6 +735,20 @@ class Result:
         return text + "."
 
 
+_listeners: list = []
+
+
+def add_listener(fn) -> None:
+    """fn(result) after every execute (the control Tracker's library_action event)."""
+    if fn not in _listeners:
+        _listeners.append(fn)
+
+
+def remove_listener(fn) -> None:
+    if fn in _listeners:
+        _listeners.remove(fn)
+
+
 def execute(plan: Plan, guard: Guard, deleter: Callable[[PlanItem], dict] | None, *,
             progress: Callable[[int, int, int], None] | None = None,
             cancel: threading.Event | None = None, log: ActionLog | None = None,
@@ -801,6 +815,11 @@ def execute(plan: Plan, guard: Guard, deleter: Callable[[PlanItem], dict] | None
                 logger.info(f"Library: {result.summary}")
                 for path, why in result.failed[:20]:
                     logger.warning(f"Library: {os.path.basename(path)}: {why}")
+            except Exception:
+                pass
+        for fn in list(_listeners):
+            try:
+                fn(result)
             except Exception:
                 pass
     return result

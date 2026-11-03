@@ -14,7 +14,9 @@ from collections import deque
 FINISHED_KEEP = 50        # finished recordings remembered this run
 FINISHED_IN_STATUS = 20   # of those, how many go into msr_status.json
 EVENTS_KEEP = 500
-EVENT_KINDS = ("live", "stopped", "remux_started", "finished", "error", "offline", "ended")
+EVENT_KINDS = ("live", "stopped", "remux_started", "finished", "error", "offline", "ended",
+               # app-wide (channel null):
+               "health_problem", "disk_low", "update_available", "library_action")
 HEALTH_EVERY = 30.0       # seconds between health checks for the status file
 QUEUE_EVERY = 15.0        # seconds between scans of Recorded/ for the cleanup queue
 
@@ -74,6 +76,9 @@ class Tracker:
         self.finishing = {}       # key -> {"state": waiting_for_cleanup|remuxing, "since", "seq"}
         self.stop_seq = {}        # key -> seq of its last "stopped" event (until it records again)
         self.stop_finished = set()  # keys whose recording finished after that stop
+        self._problems = set()      # health problems / monitor issue keys already announced
+        self._disk_low = {}
+        self._update_tag = None
 
     def info(self, key):
         return self.channels.setdefault(key, {"last_error": "", "last_error_at": None, "errors": 0,
@@ -330,14 +335,58 @@ class Tracker:
     def forget(self, name):
         self._cache.pop(name, None)
 
+    # -------------------------------------------------- app-wide events
+    def seen_health(self, h, report=None):
+        """health_problem for each new problem (agent health and the window's Health monitor),
+        disk_low when a drive drops below min_disk_space_gb."""
+        from msr.util import redact_for_log
+        h = h or {}
+        now = {("health", p): (p, None) for p in h.get("problems") or []}
+        for issue in getattr(report, "issues", None) or ():
+            now[("monitor", issue.key)] = (issue.text, issue.level)
+        for (source, key), (text, level) in now.items():
+            if (source, key) not in self._problems:
+                data = {"problem": redact_for_log(str(text)), "source": source}
+                if source == "monitor":
+                    data.update(issue=key, level=level)
+                self.emit("health_problem", None, **data)
+        self._problems = set(now)
+        for side, d in (h.get("disk") or {}).items():
+            low = bool(d and d.get("low"))
+            if low and not self._disk_low.get(side):
+                self.emit("disk_low", None, drive=side, path=d.get("path"), free_gb=d.get("free_gb"),
+                          min_gb=d.get("min_gb"))
+            self._disk_low[side] = low
+
+    def seen_update(self, info):
+        tag = (info or {}).get("latest") if (info or {}).get("available") else None
+        if tag and tag != self._update_tag:
+            self.emit("update_available", None, latest=tag)
+        self._update_tag = tag or self._update_tag
+
+    def on_library(self, result):
+        """msr.library_actions listener: one event per finished library action (window or control)."""
+        self.emit("library_action", None, action=result.action, batch=result.batch, done=result.done,
+                  bytes=result.bytes, failed=len(result.failed), cancelled=result.cancelled,
+                  summary=result.summary)
+
     def refresh(self, app, force=False):
         cache = self._cache
         now = time.monotonic()
+        try:
+            self.seen_update(app.update_info())
+        except Exception:
+            pass
         if force or now - cache.get("health", (-1e9, None))[0] >= HEALTH_EVERY:
             try:
                 cache["health"] = (now, health(app.config, update=app.update_info()))
             except Exception as e:
                 cache["health"] = (now, {"ok": None, "problems": [f"health check failed: {e}"]})
+            try:
+                report = app.health_report() if hasattr(app, "health_report") else None
+            except Exception:
+                report = None
+            self.seen_health(cache["health"][1], report)
         if force or now - cache.get("queue", (-1e9, None))[0] >= QUEUE_EVERY:
             busy = busy_channels(app.recorder)
             try:
