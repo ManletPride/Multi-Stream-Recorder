@@ -191,8 +191,30 @@ class TestPanel(unittest.TestCase):
         self.assertTrue(self.changed)
         self.assertFalse(p.code_row.winfo_ismapped())
         p.disconnect()
+        self.pump(lambda: p.status.cget("text") == "Not connected")
         self.assertEqual(p.status.cget("text"), "Not connected")
         self.assertEqual(self.api.revoked, ["at"])
+
+    def test_manage_opens_connections_page(self):
+        p = self.make()
+        self.assertEqual(p.manage_btn.cget("text"), "Manage on Twitch")
+        p.manage_btn.invoke()
+        self.assertEqual(self.opened, ["https://www.twitch.tv/settings/connections"])
+
+    def test_disconnect_failure_still_clears_and_notes(self):
+        def boom(tok):
+            raise OSError("offline")
+        self.api.revoke = boom
+        self.api.tok = {"client_id": te.DEFAULT_CLIENT_ID, "access_token": "SECRETTOK", "refresh_token": "rt"}
+        p = self.make()
+        with self.assertLogs("msr.options", "WARNING") as logs:
+            p.disconnect()
+            self.pump(lambda: p.status.cget("text") == "Not connected")
+        self.assertIsNone(self.api.tok)
+        self.assertIn("Manage on Twitch", logs.output[0])
+        self.assertNotIn("SECRETTOK", "".join(logs.output))
+        self.assertIn("Manage on Twitch", p.message.cget("text"))
+
 
     def test_generic_setting_validates(self):
         p = self.make()
@@ -221,6 +243,45 @@ class TestPanel(unittest.TestCase):
         p.activate()
         self.pump(lambda: p.status.cget("text").startswith("Expired"))
         self.assertTrue(p.status.cget("text").startswith("Expired"))
+
+
+class TestDisconnectRealFile(unittest.TestCase):
+    """Real eventsub token file in a temp MSR_DATA; only the HTTP call is faked."""
+
+    def test_revoke_params_then_file_removed(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        old = os.environ.get("MSR_DATA")
+        os.environ["MSR_DATA"] = d
+        self.addCleanup(lambda: os.environ.pop("MSR_DATA") if old is None else os.environ.__setitem__("MSR_DATA", old))
+        te.save_token(d, {"client_id": "cid", "access_token": "at1", "refresh_token": "rt"})
+        path = te.token_path(d)
+        self.assertTrue(os.path.exists(path))
+        calls = []
+
+        def fake_request(method, url, headers=None, form=None, body=None, timeout=15):
+            calls.append((method, url, form, os.path.exists(path)))
+            return 200, {}
+        from unittest import mock
+        with mock.patch.object(te, "http_request", fake_request), \
+                mock.patch.object(te.revoke, "__defaults__", (fake_request,)):
+            self.assertTrue(tc.disconnect(d))
+        self.assertEqual(calls, [("POST", "https://id.twitch.tv/oauth2/revoke",
+                                  {"client_id": "cid", "token": "at1"}, True)])
+        self.assertFalse(os.path.exists(path))
+
+    def test_revoke_failure_still_removes_file(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        te.save_token(d, {"client_id": "cid", "access_token": "at1"})
+        from unittest import mock
+
+        def offline(*a, **k):
+            raise OSError("offline")
+        with mock.patch.object(te.revoke, "__defaults__", (offline,)):
+            self.assertFalse(tc.disconnect(d))
+        self.assertFalse(os.path.exists(te.token_path(d)))
+
 
 
 if __name__ == "__main__":

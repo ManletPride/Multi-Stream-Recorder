@@ -46,14 +46,16 @@ def check_online(data_dir, client_id, api=te):
 
 
 def disconnect(data_dir, api=te):
-    """Revoke at Twitch (best effort) and delete the token file."""
+    """Revoke at Twitch (best effort), then delete the token file. False if revoking failed."""
     tok = api.load_token(data_dir)
+    ok = True
     if tok:
         try:
             api.revoke(tok)
         except Exception:
-            pass
+            ok = False
     api.clear_token(data_dir)
+    return ok
 
 
 class ConnectJob:

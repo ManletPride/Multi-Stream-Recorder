@@ -17,6 +17,8 @@ from msr import themes as _themes
 from msr import twitch_connect as tc
 from msr import twitch_eventsub as te
 
+MANAGE_URL = "https://www.twitch.tv/settings/connections"
+MANAGE_TIP = "See or remove apps that can access your Twitch account"
 TWITCH_TIP = ("Sign in to Twitch once so MSR gets instant go-live alerts (about 10 channels).\n"
               "No permissions requested; timed checks keep running as backup.")
 
@@ -242,6 +244,9 @@ class OptionsPanel:
         self.connect_btn.pack(side=tk.LEFT, padx=(10, 4))
         self.disconnect_btn = ttk.Button(r, text="Disconnect", command=self.disconnect)
         self.disconnect_btn.pack(side=tk.LEFT)
+        self.manage_btn = ttk.Button(r, text="Manage on Twitch", command=self.manage)
+        self.manage_btn.pack(side=tk.LEFT, padx=(4, 0))
+        self.tip(self.manage_btn, MANAGE_TIP)
         self.status = ttk.Label(r, text="")
         self.status.pack(side=tk.LEFT, padx=(10, 0))
         for w in (self.push_cb, self.connect_btn):
@@ -526,10 +531,24 @@ class OptionsPanel:
             self.job.cancel()
 
     def disconnect(self):
-        tc.disconnect(self.data_dir, self.api)
-        self._say("Twitch disconnected; timed checks continue.")
-        self.refresh_status()
-        self.on_twitch_changed()
+        """Revoke + delete on a thread so a slow network never freezes the GUI."""
+        self.disconnect_btn.configure(state=tk.DISABLED)
+        self._say("Disconnecting\u2026")
+
+        def done(res):
+            if res != ("ok", True):
+                logging.getLogger("msr.options").warning(
+                    "Twitch: could not revoke the token online; deleted it locally. "
+                    "Use Manage on Twitch to remove MSR's access.")
+                self._say("Disconnected locally (Twitch unreachable) \u2013 use Manage on Twitch to remove access.")
+            else:
+                self._say("Twitch disconnected; timed checks continue.")
+            self.refresh_status()
+            self.on_twitch_changed()
+        self._background(lambda: tc.disconnect(self.data_dir, self.api), done)
+
+    def manage(self):
+        self.opener(MANAGE_URL)
 
     def open_link(self):
         if self._uri:
