@@ -35,6 +35,22 @@ class Case(unittest.TestCase):
         p.frame.pack()
         return p
 
+    def test_updates_shortcut_and_health_row(self):
+        opened = []
+        p = self.make(open_updates=lambda: opened.append(1))
+
+        def buttons(w):
+            for c in w.winfo_children():
+                if c.winfo_class() == "TButton":
+                    yield c
+                yield from buttons(c)
+        btn = next(b for b in buttons(p.body) if b.cget("text") == "Updates\u2026")
+        btn.invoke()
+        self.assertEqual(opened, [1])
+        self.assertIn(("Health", "check_minutes"), p.vars)
+        self.assertEqual(control.validate_setting("Health", "check_minutes", "0"), "0.0")
+        self.assertFalse(any(b.cget("text") == "Updates\u2026" for b in buttons(self.make().body)))
+
     def pump(self, until, timeout=5):
         end = time.monotonic() + timeout
         while time.monotonic() < end and not until():

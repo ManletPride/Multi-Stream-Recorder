@@ -2077,7 +2077,8 @@ def main_gui(config):
 
     options_panel = _options_panel.OptionsPanel(
         notebook, config, library_data_dir, _options_apply_setting,
-        on_twitch_changed=_options_twitch_changed, tooltip=_Tooltip, sound_test=sounds.test)
+        on_twitch_changed=_options_twitch_changed, tooltip=_Tooltip, sound_test=sounds.test,
+        open_updates=lambda: _open_updates())
     notebook.add(options_panel.frame, text="  Options  ")
 
     def _options_tab_opened(_event=None):
@@ -2319,6 +2320,29 @@ def main_gui(config):
     _Tooltip(updates_btn, "Versions of MSR, yt-dlp, streamlink, ffmpeg and Python packages;\n"
                           "check and install updates. A dot means updates are available.")
     _set_updates_badge(_depsupdate.remembered_updates(win_state))
+
+    # Health: startup + periodic checks, one line in the bottom bar (msr/health.py, msr/health_ui.py)
+    from msr import health as _health
+    from msr import health_ui as _health_ui
+    from msr.status import _free_gb as _health_free_gb
+
+    def _health_twitch():
+        from msr import twitch_eventsub as _te
+        return _health.twitch_issue(_te.load_token(library_data_dir),
+                                    config.getboolean('Twitch', 'push_enabled', fallback=False),
+                                    _te.validate, _te.TwitchAuthError)
+
+    health_ctl = _health_ui.HealthController(
+        bottom_bar, config=config,
+        get_status=lambda: dict(getattr(recorder, 'status_dict', None) or {}),
+        get_folder=lambda: config.get('Paths', 'streams_dir', fallback='') or '',
+        free_gb=_health_free_gb,
+        get_versions=lambda: _health.check_tools(config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg') or 'ffmpeg'),
+        get_state=lambda: load_window_state(state_file),
+        twitch_check=_health_twitch,
+        push_failed=lambda: bool(getattr(getattr(recorder, 'twitch_push', None), '_auth_failed', False)),
+        open_updates=_open_updates, logger=logging.getLogger("msr.health"), tooltip=_Tooltip)
+    health_ctl.label.pack(side=tk.LEFT, padx=(6, 0))
     more_btn = ttk.Menubutton(toggle_frame, text="\u22ef", width=3)
     more_menu = tk.Menu(more_btn, tearoff=0)
     more_menu.add_command(label="Library summary\u2026", command=lambda: notebook.select(library_panel.frame))

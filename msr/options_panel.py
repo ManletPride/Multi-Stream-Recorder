@@ -98,6 +98,9 @@ GROUPS = (
     ("Other", False, (
         row("Library", "extra_dirs", "Extra Library folders", "dirlist", "scan only, ; separated",
             "Shown in the Library tab as Other folder N. Never cleaned up.", applies=NOW, width=34),
+        row("Health", "check_minutes", "Health check every (min)", hint="0 = off",
+            tip="Free space, recordings that stopped growing, sites whose checks all keep failing.\n"
+                "Reads the status table only: no extra network, check rates unchanged.", applies=NOW),
         row("Control", "enabled", "Agent control (msr_ctl)", "bool", applies=RESTART,
             tip="Local control server + status file used by msr_ctl and agents."),
         row("Advanced", "ffmpeg_path", "ffmpeg", "ffmpeg", "", "Program name on PATH or a full path.",
@@ -174,7 +177,7 @@ class OptionsPanel:
     def __init__(self, container, config, data_dir, apply_setting, on_twitch_changed=None,
                  tooltip=None, api=te, connect_job=tc.ConnectJob, opener=webbrowser.open,
                  ask_dir=None, ask_file=None, fishtank_test=_fishtank_test, ffmpeg_check=_ffmpeg_check,
-                 environ=os.environ, sound_test=None):
+                 environ=os.environ, sound_test=None, open_updates=None):
         self.config = config
         self.data_dir = data_dir
         self.apply_setting = apply_setting
@@ -188,6 +191,7 @@ class OptionsPanel:
         self.ffmpeg_check = ffmpeg_check
         self.environ = environ
         self.sound_test = sound_test
+        self.open_updates = open_updates
         self.tip = tooltip or _Tip
         self.job = None
         self._uri = ""
@@ -212,6 +216,8 @@ class OptionsPanel:
         self.frame.bind("<Leave>", lambda _e: self.canvas.unbind_all("<MouseWheel>"), add="+")
 
         self._build_twitch(t)
+        if open_updates is not None:
+            self._build_updates()
         for title, collapsed, rows in GROUPS:
             self._build_group(title, collapsed, rows, t)
         self.message = ttk.Label(self.body, text="", foreground=t["muted"])
@@ -249,6 +255,17 @@ class OptionsPanel:
         self.link.bind("<Button-1>", lambda _e: self.open_link())
         ttk.Button(self.code_row, text="Copy code", command=self.copy_code).pack(side=tk.LEFT)
         ttk.Button(self.code_row, text="Cancel", command=self.cancel).pack(side=tk.LEFT, padx=(4, 0))
+
+    def _build_updates(self):
+        """Shortcut to the Updates window (versions, one-click pip update with rollback)."""
+        box = ttk.LabelFrame(self.body, text=" Updates ", padding=(8, 4))
+        box.pack(fill=tk.X, pady=(8, 0))
+        btn = ttk.Button(box, text="Updates\u2026", command=self.open_updates)
+        btn.pack(side=tk.LEFT)
+        ttk.Label(box, text="yt-dlp, streamlink, ffmpeg and packages; nothing updates on its own",
+                  style="Muted.TLabel").pack(side=tk.LEFT, padx=(10, 0))
+        self.tip(btn, "When a site stops recording, an old yt-dlp / streamlink is the usual cause.\n"
+                      "Updates are one click and the previous version is put back if it fails.")
 
     def _build_group(self, title, collapsed, rows, t):
         holder = ttk.Frame(self.body)

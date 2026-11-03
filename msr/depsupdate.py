@@ -82,7 +82,20 @@ def _get_json(url: str, timeout: float = 10.0, opener=None):
 
 
 def latest_pypi(dist: str, opener=None) -> str:
-    return str(_get_json(f"https://pypi.org/pypi/{dist}/json", opener=opener)["info"]["version"])
+    return pypi_info(dist, opener)[0]
+
+
+def pypi_info(dist: str, opener=None, installed: str | None = None) -> tuple[str, str | None]:
+    """(latest version, upload date of `installed` or None) from ONE PyPI request; the date lets
+    the health check say how old the installed yt-dlp / streamlink is."""
+    data = _get_json(f"https://pypi.org/pypi/{dist}/json", opener=opener)
+    released = None
+    try:
+        files = (data.get("releases") or {}).get(installed or "") or []
+        released = min(str(f.get("upload_time_iso_8601") or f.get("upload_time")) for f in files) if files else None
+    except (AttributeError, TypeError, ValueError):
+        released = None
+    return str(data["info"]["version"]), released
 
 
 def latest_msr(opener=None) -> tuple[str, str]:
@@ -147,8 +160,10 @@ def rows(check: bool = False, *, ffmpeg_path: str = "ffmpeg", opener=None, versi
                "source": python_label(), "updatable": False, "note": ""}
         if check:
             try:
-                latest = latest_pypi(dist, opener)
+                latest, released = pypi_info(dist, opener, ver)
                 row.update(latest=latest, status=_status(ver, latest))
+                if released:
+                    row["installed_released"] = released
             except Exception as e:
                 row.update(status="unknown" if ver else "not_installed", note=_why(e))
             row["updatable"] = row["status"] in ("update_available",) or (row["status"] == "not_installed"
@@ -275,7 +290,10 @@ def due(state: dict, now: float | None = None) -> bool:
 
 def remember(state_file: str, rs: list[dict], now: float | None = None) -> None:
     from msr import winstate
-    winstate.merge(state_file, {STATE_KEY: {"time": now or time.time(), "updates": updates_available(rs)}})
+    released = {r["name"]: {"version": r.get("installed"), "date": r["installed_released"]}
+                for r in rs if r.get("installed_released")}
+    winstate.merge(state_file, {STATE_KEY: {"time": now or time.time(), "updates": updates_available(rs),
+                                            "released": released}})
 
 
 def remembered_updates(state: dict) -> list[str]:

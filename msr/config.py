@@ -80,6 +80,7 @@ def _coerce_specs():
         ("Recording", "split_on_resolution_change", "bool", True, None, None),
         ("Cleanup", "purge_on_startup", "bool", True, None, None),
         ("Twitch", "push_enabled", "bool", False, None, None),
+        ("Health", "check_minutes", "float", 10.0, 0.0, 1440.0),
         ("Sounds", "go_live", "bool", False, None, None),
         ("Sounds", "problems", "bool", False, None, None),
         ("Sounds", "clip_saved", "bool", False, None, None),
@@ -161,6 +162,11 @@ class Config:
             'problems': 'false',     # recording error, low disk, drive gone, cookies expired
             'clip_saved': 'false',   # Clip Now / screenshot finished
             'quiet_while_locked': 'true',
+        },
+        'Health': {
+            # Periodic health check (msr/health.py): free space, stalled recordings, sites whose
+            # go-live checks all fail. Minutes; 0 = off. No network, check rates unchanged.
+            'check_minutes': '10',
         },
         'Twitch': {
             # Instant go-live via Twitch EventSub (opt-in). Authorize once with
