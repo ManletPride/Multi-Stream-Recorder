@@ -9,6 +9,8 @@ Read-only: Open folder (Explorer with the file selected), Play, Open in Clip Edi
 Clips: each recording row expands to the clips cut from it in the Clip Editor. The link comes
 from the clip's .meta.json (msr.clip_core.write_clip_meta), else from the editor's clip name
 pattern; a clip is matched to a recording by file name (stem), so moved recordings still match.
+Clip files sitting next to the recordings (cut/trim/vertical/burned, a clip sidecar, or the
+editor's name pattern) are folded under their source row; with no source they stay, marked.
 """
 
 from __future__ import annotations
@@ -33,6 +35,8 @@ from msr import library as lib
 POLL_MS = 100
 LIST_CATEGORIES = ("processed", "recorded")  # finished files, then raw .ts still waiting
 CLIP_EXT = (".mp4", ".ts", ".mkv", ".mov", ".m4v", ".flv", ".webm")
+# <recording stem with a date stamp>_cut|trim|vertical|burned|clip[_...]
+_DERIVED_RE = re.compile(r"^(?P<stem>.+?\d{8}_\d{4,6})_(?P<kind>cut|trim|vertical|burned|clip)(?:_.*)?$", re.I)
 _STAMP_RE = re.compile(r"(?<!\d)(20\d\d)(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])[_\-T ]?([01]\d|2[0-3])([0-5]\d)(?:[0-5]\d)?(?!\d)")
 
 
@@ -46,6 +50,8 @@ class Recording:
     size: int
     raw: bool            # still a raw .ts in Recorded/
     clips: list = field(default_factory=list)   # ClipRef cut from this recording
+    related: list = field(default_factory=list)  # clip files in the same folders, folded under this row
+    orphan: bool = False  # a clip file whose source recording is not listed
 
 
 @dataclass
@@ -59,6 +65,7 @@ class ClipRef:
     t_in: float
     t_out: float
     guessed: bool        # times from the file name (older clip, no sidecar)
+    label: str = ""      # set for folded clip files without times (e.g. "trim file")
 
 
 # ------------------------------------------------------------------ Tk-free helpers
@@ -212,11 +219,53 @@ def link_clips(recs: list[Recording], clips: list[ClipRef]) -> list[ClipRef]:
     return loose
 
 
+def _clip_source(r: Recording):
+    """(source name, source stem, link or None) when this listed file is a clip, else None."""
+    link = core.read_clip_link(r.path)
+    if link is not None:
+        return link["source_name"], link["stem"], link
+    m = _DERIVED_RE.match(os.path.splitext(r.name)[0])
+    return ("", m.group("stem"), m.group("kind").lower()) if m else None
+
+
+def fold_clip_files(recs: list[Recording]) -> list[Recording]:
+    """Move clip files found among the recordings under their source's row (Recording.related).
+    Returns the top-level rows; clips whose source is not listed stay there with orphan=True."""
+    found = [(r, _clip_source(r)) for r in recs]
+    sources = [r for r, src in found if src is None]
+    by_name = {r.name.lower(): r for r in sources}
+    by_stem: dict[str, Recording] = {}
+    for r in sorted(sources, key=lambda r: r.raw):
+        by_stem.setdefault(core.safe_stem(r.name).lower(), r)
+        by_stem.setdefault(os.path.splitext(r.name)[0].lower(), r)
+    top = []
+    for r, src in found:
+        if src is None:
+            top.append(r)
+            continue
+        source_name, stem, link = src
+        parent = (by_name.get(source_name.lower()) if source_name else None) or by_stem.get(stem.lower())
+        if parent is None:
+            r.orphan = True
+            top.append(r)
+            continue
+        if any(os.path.normcase(c.path) == os.path.normcase(r.path) for c in parent.clips):
+            continue  # already linked from the clips folder
+        if isinstance(link, dict):
+            ref = ClipRef(r.path, r.name, r.size, r.when, stem, source_name, link["in"], link["out"], link["guessed"])
+        else:
+            ref = ClipRef(r.path, r.name, r.size, r.when, stem, "", 0.0, 0.0, False, label=f"{link} file")
+        parent.related.append(ref)
+    for r in sources:
+        r.related.sort(key=lambda c: c.name.lower())
+    return top
+
+
 # (id, heading, width, anchor, sort key, cell text)
 COLUMNS = (
     ("date", "Date", 120, "w", lambda r: r.when, lambda r: fmt_when(r.when)),
     ("length", "Length", 70, "e", lambda r: -1 if r.seconds is None else r.seconds, lambda r: fmt_length(r.seconds)),
-    ("title", "Stream title", 330, "w", lambda r: r.title.lower(), lambda r: r.title or "-"),
+    ("title", "Stream title", 330, "w", lambda r: r.title.lower(), lambda r: r.title or ("\u26a0 clip, source missing" if r.orphan else "-")),
     ("clips", "Clips", 45, "e", lambda r: len(r.clips), lambda r: len(r.clips) or ""),
     ("file", "File", 250, "w", lambda r: r.name.lower(), lambda r: r.name + ("  (raw)" if r.raw else "")),
     ("size", "Size", 80, "e", lambda r: r.size, lambda r: lib.fmt_size(r.size)),
@@ -225,6 +274,8 @@ COLUMNS = (
 
 def clip_cells(c: ClipRef) -> list:
     """A clip's child row, in COLUMNS order."""
+    if c.label:
+        return [fmt_when(c.mtime), "", c.label, "", c.name, lib.fmt_size(c.size)]
     span = f"clip {fmt_length(c.t_in)} – {fmt_length(c.t_out)}" + ("  (times from name)" if c.guessed else "")
     return [fmt_when(c.mtime), fmt_length(max(0.0, c.t_out - c.t_in)), span, "", c.name, lib.fmt_size(c.size)]
 _COLUMN = {c[0]: c for c in COLUMNS}
@@ -363,7 +414,7 @@ class RecordingsTab:
 
         def work():  # worker: no Tk here, only the queue
             try:
-                recs = list_recordings(folders, cancel)
+                recs = fold_clip_files(list_recordings(folders, cancel))
                 loose = link_clips(recs, list_clips(clips_dir, cancel))
                 out.put((gen, recs, len(loose), None))
             except Exception as exc:  # pragma: no cover - reported in the tab
@@ -418,7 +469,7 @@ class RecordingsTab:
             iid = f"r{i}"
             self.rows[iid] = r
             self.tree.insert("", "end", iid=iid, values=[c[5](r) for c in COLUMNS], open=r.path in self._open)
-            for j, clip in enumerate(r.clips):
+            for j, clip in enumerate(r.clips + r.related):
                 cid = f"{iid}c{j}"
                 self.rows[cid], self.parent_of[cid] = clip, r
                 self.tree.insert(iid, "end", iid=cid, values=clip_cells(clip))
@@ -554,8 +605,8 @@ class RecordingsTab:
             if self.clip_editor is not None:
                 m.add_command(label="Open in Clip Editor", command=self.open_clip_editor)
             rec = self.selected()
-            if rec is not None and rec.clips:
-                m.add_command(label=f"Show / hide clips ({len(rec.clips)})", command=self.toggle_clips)
+            if rec is not None and (rec.clips or rec.related):
+                m.add_command(label=f"Show / hide clips ({len(rec.clips) + len(rec.related)})", command=self.toggle_clips)
             m.add_separator()
             m.add_command(label="Copy title", command=lambda: self._copy("title"))
         m.add_command(label="Copy path", command=lambda: self._copy("path"))

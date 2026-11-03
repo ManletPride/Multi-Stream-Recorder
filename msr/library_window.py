@@ -335,7 +335,7 @@ class LibraryPanel:
         """A month column was clicked: list that month's files."""
         if self.mgr is not None:
             self.mgr.files.set_month(month)
-            self.tabs.select(self.mgr.files.frame)
+            self.tabs.select(self.mgr.cleanup.frame)
 
     def _channel_menu(self, event) -> None:
         iid = self.tree.identify_row(event.y)
@@ -349,7 +349,7 @@ class LibraryPanel:
         if channel is None or self.mgr is None:
             return
         self.mgr.files.set_channel(channel.platform, channel.name)
-        self.tabs.select(self.mgr.files.frame)
+        self.tabs.select(self.mgr.cleanup.frame)
 
     def show_selected_recordings(self) -> None:
         """Channels tab -> Recordings tab for the selected channel."""

@@ -40,7 +40,7 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 | `msr/library_window.py` | `LibraryPanel`: the **Library** tab of the main notebook (headline, clickable charts, multi-select channel table, Count hours, Copy summary, Open folder, Delete...) |
 | `msr/library_actions.py` | File management logic, **no tkinter**: `Guard` (what may ever be touched), `build_plan` (dry run), `execute`/`ActionJob` (background, cancellable), movers (PendingDeletion, Recycle Bin via `SHFileOperationW`, permanent), `Manifest` (undo), `ActionLog`, `pending_info`, `build_suggestions` |
 | `msr/library_dialog.py` | `ActionDialog`: the review window every delete goes through (scope filters, ticks, method, typed confirmation) |
-| `msr/library_manage.py` | `Manager` + the **Files**, **PendingDeletion** and **Clean up** tabs; `ManageContext` is what `gui.py` hands over (busy callback, log paths, openers) |
+| `msr/library_manage.py` | `Manager` + the **PendingDeletion** and **Clean up** tabs (Clean up = suggestions + the tickable file list, `Manager.files`; Channels > Files... jumps there); `ManageContext` is what `gui.py` hands over (busy callback, log paths, openers) |
 | `msr/preview_state.py` | Preview strip memory, **no tkinter**: per-channel `last_ok`, the working seek `LADDER` rung (retry a shorter one every 10 good grabs), back-off after failed grabs (4, 8, 16, 32, 60 s), the age / `ended` text and the tile / pane colours (theme tokens only). Tested in `tests/test_preview_state.py` |
 | `msr/iometer.py` | Status-header disk write / NIC download rates (`IoSampler`) |
 | `msr/__init__.py` | `__version__` (currently `3.0.0`; the only version string, read by the updater, `--version`, About and `msr_ctl ping`) |
@@ -114,7 +114,7 @@ Everything the GUI does must stay reachable without it. One `Controller` (no tki
 | Update banner / install | `update_check`, `update_install` (GUI restarts the window; headless restarts headless with the same data folder) |
 | (no GUI equivalent) | `health`, `recordings` (`--since`, `--channel`), `recordings_pending`, `recordings_retry`, `events`, `wait` |
 | Library tab numbers | `library_summary` |
-| Files / PendingDeletion / Clean up tabs, Delete... dialog | `library_files`, `library_plan` (dry run), `library_execute`, `library_pending`, `library_batches`, `library_restore` (Undo; `last=true` for the newest batch), `library_suggest` (read only), `library_log` |
+| PendingDeletion / Clean up tabs, Delete... dialog | `library_files`, `library_plan` (dry run), `library_execute`, `library_pending`, `library_batches`, `library_restore` (Undo; `last=true` for the newest batch), `library_suggest` (read only), `library_log` |
 | Tick all / untick all | `channel_enable` / `channel_disable` with `all=true` (`--all`) |
 | Restore previous channel list / settings | `history_list`, `history_restore`, `channels_reload` |
 | Quit (window X, tray, Ctrl+Q) | `quit` |

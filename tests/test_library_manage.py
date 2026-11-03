@@ -224,15 +224,45 @@ class TabsAndClicks(ManageCase):
         self.assertFalse(self.exists("Processed/kick/alice/alice_20260101_120000.mp4"))
         self.assertTrue(self.exists("Processed/kick/alice/alice_20260215_120000.mp4"))
 
-    def test_play_and_reveal_use_the_injected_helpers(self):
+    def test_file_list_lives_in_clean_up_without_browsing_buttons(self):
+        win = self.managed()
+        texts = [win.tabs.tab(t, "text").strip() for t in win.tabs.tabs()]
+        self.assertEqual(texts, ["Overview", "Channels", "Recordings", "PendingDeletion", "Clean up"])
+        files = win.mgr.files
+        self.assertIs(files.frame.master, win.mgr.cleanup.frame)
+        self.assertFalse(hasattr(files, "play_btn") or hasattr(files, "reveal_btn"))
+        labels = [files.menu.entrycget(i, "label") for i in range(files.menu.index("end") + 1)
+                  if files.menu.type(i) == "command"]
+        self.assertNotIn("Play", labels)
+        self.assertNotIn("Show in Explorer", labels)
+        self.assertTrue(win.mgr.cleanup.tree.get_children())  # the suggestions are still there
+
+    def test_files_button_jumps_to_clean_up_with_the_channel(self):
+        win = self.managed()
+        iid = next(i for i, c in win.rows.items() if c.name == "alice")
+        win.tree.selection_set(iid)
+        self.root.update()
+        win.show_selected_files()
+        self.assertEqual(win.tabs.select(), str(win.mgr.cleanup.frame))
+        files = win.mgr.files
+        self.assertIn("alice", files.channel_box.get())
+        names = [files.tree.set(i, "name") for i in files.tree.get_children()]
+        self.assertTrue(names and all(n.startswith("alice") for n in names))
+
+    def test_tick_older_then_delete_from_clean_up(self):
         win = self.managed()
         files = win.mgr.files
-        files.search_var.set("dave")
-        files.tree.selection_set(files.tree.get_children()[0])
-        files.play()
-        files.reveal()
-        self.assertTrue(self.opened[0].endswith("dave_20260320_101010.mp4"))
-        self.assertTrue(self.revealed[0].endswith("dave_20260320_101010.mp4"))
+        files.search_var.set("alice_20260101")
+        files.days_var.set("30")
+        files.check_older()  # every test file is 40 days old
+        self.assertEqual(len(files.checked), 1)
+        files.check_none()
+        self.assertEqual(files.checked, set())
+        files.check_older()
+        files.delete()
+        self.settle(win)
+        self.assertFalse(self.exists("Processed/kick/alice/alice_20260101_120000.mp4"))
+        self.assertTrue(self.exists("PendingDeletion/kick/alice/alice_20260101_120000.mp4"))
 
     def test_channels_table_multi_select_and_buttons(self):
         win = self.managed()
@@ -275,6 +305,7 @@ class TabsAndClicks(ManageCase):
         names = [win.mgr.files.tree.set(i, "name") for i in win.mgr.files.tree.get_children()]
         self.assertTrue(names and all("2026" in n for n in names))
         self.assertEqual(win.mgr.files.month, "2026-03")
+        self.assertEqual(win.tabs.select(), str(win.mgr.cleanup.frame))
 
     def test_the_tab_without_a_manager_is_read_only(self):
         win = self.scanned()

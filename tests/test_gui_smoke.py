@@ -214,6 +214,12 @@ def fake_mainloop(self, n=0):
             panel.tabs.select(t); self.update_idletasks()
             out["tab_req"][panel.tabs.tab(t, "text").strip()] = self.nametowidget(t).winfo_reqwidth()
         panel.tabs.select(panel.tabs.tabs()[1])
+        # Channels > Files... opens Clean up with that channel's files
+        panel.tree.selection_set(panel.tree.get_children()[0]); self.update()
+        panel.show_selected_files(); self.update()
+        out["files_jump"] = [panel.tabs.tab(panel.tabs.select(), "text").strip(), panel.mgr.files.channel_box.get(),
+                             len(panel.mgr.files.tree.get_children())]
+        panel.tabs.select(panel.tabs.tabs()[1])
         # nothing may really be deleted: a fake mover records what it was asked to move
         def fake(item):
             out["deleted"].append(os.path.basename(item.path))
@@ -282,7 +288,10 @@ class LibraryManageSmokeTests(unittest.TestCase):
         self.assertNotIn("Traceback", done.stderr)
         out = json.loads(done.stdout)
         self.assertTrue(out["scanned"], out)
-        self.assertEqual(out["tabs"], ["Overview", "Channels", "Recordings", "Files", "PendingDeletion", "Clean up"])
+        self.assertEqual(out["tabs"], ["Overview", "Channels", "Recordings", "PendingDeletion", "Clean up"])
+        self.assertEqual(out["files_jump"][0], "Clean up")
+        self.assertIn("alice", out["files_jump"][1])
+        self.assertEqual(out["files_jump"][2], 2)
         self.assertLessEqual(out["panel_req"], 1060 - (40 if os.name == "nt" else 20), out)  # fits the minimum window; Linux fonts run wider
         self.assertTrue(out["delete_enabled"])
         self.assertEqual(out["dark"], dark)

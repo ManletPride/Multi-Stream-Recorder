@@ -312,3 +312,68 @@ class EditorStartAtTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def put_clip_files(streams: Path):
+    """Clip files saved next to alice's recordings, plus one whose source is gone."""
+    here = streams / "Processed/kick/alice"
+    put(here / "alice_20260101_120000_cut_0h01m00s-0h01m10s.mp4", 7)
+    put(here / "alice_20260101_120000_cut_0h01m00s-0h01m10s_01.mp4", 7)
+    put(here / "alice_20260101_120000_trim_vertical.mp4", 7)
+    put(here / "alice_20260215_083000_burned.mp4", 7)
+    clip_for(streams, "alice_20260215_083000.mp4", 5, 9, folder="Processed/kick/alice")  # editor name + sidecar
+    linked = put(here / "highlight.mp4", 7)  # any name, linked only by its sidecar
+    core.write_clip_meta(core.CutResult(str(linked), 1, 4, 1, 4, 3, False), str(here / "alice_20251231_235900.mp4"))
+    put(here / "gone_20250101_000000_trim.mp4", 7)
+
+
+class FoldClipFilesTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.streams = Path(self.tmp.name) / "streams"
+        build(self.streams)
+        put_clip_files(self.streams)
+        self.recs = lb.list_recordings({"processed": str(self.streams / "Processed/kick/alice"),
+                                        "recorded": str(self.streams / "Recorded/kick/alice")})
+
+    def test_clip_files_fold_under_their_source(self):
+        top = {r.name: r for r in lb.fold_clip_files(self.recs)}
+        self.assertEqual(set(top), {"alice_20260101_120000.mp4", "alice_20260215_083000.mp4",
+                                    "alice_20251231_235900.mp4", "alice_20260302_100000.ts",
+                                    "gone_20250101_000000_trim.mp4"})
+        self.assertEqual(len(top["alice_20260101_120000.mp4"].related), 3)
+        self.assertEqual(len(top["alice_20260215_083000.mp4"].related), 2)
+        self.assertEqual([c.name for c in top["alice_20251231_235900.mp4"].related], ["highlight.mp4"])
+        self.assertTrue(all(not r.clips for r in top.values()))  # the Clips count is not changed
+
+    def test_orphan_stays_marked_and_plain_names_are_left_alone(self):
+        put(self.streams / "Processed/kick/alice/alice_cutting_board_20260105_100000.mp4", 7)
+        recs = lb.list_recordings({"processed": str(self.streams / "Processed/kick/alice")})
+        top = {r.name: r for r in lb.fold_clip_files(recs)}
+        self.assertTrue(top["gone_20250101_000000_trim.mp4"].orphan)
+        self.assertFalse(top["alice_cutting_board_20260105_100000.mp4"].orphan)
+        self.assertFalse(top["alice_20260101_120000.mp4"].orphan)
+        cell = lb._COLUMN["title"][5](top["gone_20250101_000000_trim.mp4"])
+        self.assertIn("source missing", cell)
+
+
+class FoldClipTabTests(ClipTabTests):
+    locals().update({n: None for n in dir(ClipTabTests) if n.startswith("test_")})  # run only the test below
+
+    def test_recordings_tab_shows_clip_files_only_as_children(self):
+        put_clip_files(self.streams)
+        clip_for(self.streams, "alice_20260101_120000.mp4", 61.5, 91.25)  # one Clips-folder clip
+        self.show_alice(n=5)
+        top = {self.tab.rows[i].name: i for i in self.tab.tree.get_children()}
+        self.assertEqual(len(top), 5)
+        self.assertFalse(any("_cut_" in n or "_burned" in n for n in top))
+        rid = top["alice_20260101_120000.mp4"]
+        self.assertEqual(str(self.tab.tree.set(rid, "clips")), "1")  # Clips column: Clips-folder links only
+        self.assertEqual(len(self.tab.tree.get_children(rid)), 4)
+        self.assertIn("source missing", self.tab.tree.set(top["gone_20250101_000000_trim.mp4"], "title"))
+        kid = self.tab.tree.get_children(rid)[-1]
+        self.tab.tree.selection_set(kid)
+        self.root.update()
+        self.tab.select_source()
+        self.assertEqual(self.tab.tree.selection(), (rid,))

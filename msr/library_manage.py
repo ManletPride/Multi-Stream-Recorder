@@ -1,5 +1,5 @@
-"""File management in the Library tab: the Files list, the PendingDeletion card, the Clean up
-suggestions, and the Manager that every delete button and menu entry goes through.
+"""File management in the Library tab: the PendingDeletion card, the Clean up tab (suggestions
+plus the tickable file list), and the Manager that every delete button and menu entry goes through.
 
 Nothing here removes a file by itself. Every path leads to a review window (library_dialog)
 that shows a dry run, then to library_actions.ActionJob running in a background thread, with
@@ -64,10 +64,10 @@ class Manager:
         self.log = act.ActionLog(ctx.log_path or None)
         self.ask = ldialog.ask_action          # tests replace this with a function returning a Plan
         self.last_batch: str | None = None
-        self.files = FilesTab(self, panel.tabs)
         self.pending = PendingTab(self, panel.tabs)
         self.cleanup = CleanupTab(self, panel.tabs)
-        panel.tabs.add(self.files.frame, text="  Files  ")
+        self.files = FilesTab(self, self.cleanup.frame)  # the bulk list lives under the suggestions
+        self.files.frame.pack(fill="both", expand=True)
         panel.tabs.add(self.pending.frame, text="  PendingDeletion  ")
         panel.tabs.add(self.cleanup.frame, text="  Clean up  ")
 
@@ -133,7 +133,7 @@ class Manager:
             return self._refuse(reason)
         if not recs:
             return self._refuse("Tick or select some files first.")
-        plan = self.ask(self.panel.toplevel, title, f"{len(recs):,} file(s) chosen in the Files list.", recs,
+        plan = self.ask(self.panel.toplevel, title, f"{len(recs):,} file(s) chosen in the Clean up list.", recs,
                         filters=False, preselect=True, methods=self.methods(),
                         default_method=method or act.ACTION_PENDING)
         if plan is not None:
@@ -236,17 +236,17 @@ class Manager:
         pass  # the tabs use ttk widgets, which follow the theme by themselves
 
 
-# ====================================================================== Files tab
+# ====================================================================== file list (in Clean up)
 class FilesTab:
-    """Every file of a channel (or of the whole library), with ticks, search, month filter,
-    Play, Show in Explorer and Delete."""
+    """Every file of a channel (or of the whole library), with ticks, search, month filter and
+    Delete. Browsing (Play, Explorer) is in Recordings."""
 
     COLUMNS = (("check", "", 30, "center"), ("name", "File", 300, "w"), ("channel", "Channel", 150, "w"),
                ("size", "Size", 85, "e"), ("date", "Date", 90, "w"), ("kind", "Type", 100, "w"))
 
     def __init__(self, mgr: Manager, parent):
         self.mgr = mgr
-        self.frame = f = ttk.Frame(parent, padding=8)
+        self.frame = f = ttk.Frame(parent)
         self.recs: list = []
         self.checked: set[str] = set()
         self.rows: dict[str, object] = {}
@@ -254,6 +254,7 @@ class FilesTab:
         self.month: str | None = None
         self.channel_map: dict[str, tuple] = {}
 
+        ttk.Separator(f).pack(fill="x", pady=(6, 6))
         top = ttk.Frame(f)
         top.pack(fill="x")
         ttk.Label(top, text="Channel:").pack(side="left")
@@ -283,17 +284,13 @@ class FilesTab:
         ttk.Button(bar, text="Tick", command=self.check_older).pack(side="left", padx=(4, 0))
         self.delete_btn = ttk.Button(bar, text="Delete\u2026", command=lambda: self.delete())
         self.delete_btn.pack(side="right")
-        self.reveal_btn = ttk.Button(bar, text="Show in Explorer", command=self.reveal)
-        self.reveal_btn.pack(side="right", padx=(0, 6))
-        self.play_btn = ttk.Button(bar, text="Play", command=self.play)
-        self.play_btn.pack(side="right", padx=(0, 6))
-        self.count = ttk.Label(f, text="Scan the library to list files.")
-        self.count.pack(anchor="w")
+        self.count = ttk.Label(bar, text="Scan the library to list files.", style="Muted.TLabel")
+        self.count.pack(side="right", padx=(0, 10))
 
         box = ttk.Frame(f)
         box.pack(fill="both", expand=True, pady=(4, 0))
         self.tree = ttk.Treeview(box, columns=[c[0] for c in self.COLUMNS], show="headings", selectmode="extended",
-                                 height=12)
+                                 height=10)
         for cid, text, width, anchor in self.COLUMNS:
             self.tree.heading(cid, text=text, command=(lambda c=cid: self.sort_by(c)) if cid != "check" else "")
             self.tree.column(cid, width=width, anchor=anchor, stretch=(cid == "name"))
@@ -309,11 +306,6 @@ class FilesTab:
         self.tree.bind("<Button-3>", self._menu)
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._sync())
         self.menu = tk.Menu(self.tree, tearoff=0)
-        self.menu.add_command(label="Play", command=self.play)
-        if self.mgr.ctx.clip_editor is not None:
-            self.menu.add_command(label="Clip Editor\u2026", command=self.clip_editor)
-        self.menu.add_command(label="Show in Explorer", command=self.reveal)
-        self.menu.add_separator()
         self.menu.add_command(label="Tick / untick selected", command=self.toggle_selected)
         self.menu.add_command(label="Move to PendingDeletion\u2026", command=lambda: self.delete(act.ACTION_PENDING))
         self.menu.add_command(label="Delete\u2026", command=lambda: self.delete())
@@ -400,8 +392,6 @@ class FilesTab:
         self.count.configure(text=f"{getattr(self, 'shown_count', 0):,} shown{month}; {len(ticked):,} ticked "
                                   f"({lib.fmt_size(size)}){more}")
         have_sel = bool(self.tree.selection())
-        for button in (self.play_btn, self.reveal_btn):
-            button.state(["!disabled"] if have_sel else ["disabled"])
         self.delete_btn.state(["!disabled"] if (ticked or have_sel) else ["disabled"])
 
     # -- ticks
@@ -451,38 +441,9 @@ class FilesTab:
     def delete(self, method: str | None = None) -> None:
         self.mgr.delete_files(self.target_recs(), method, "Delete files")
 
-    def play(self) -> None:
-        rec = next(iter(self.selected_recs()), None)
-        opener = self.mgr.ctx.opener
-        if rec is None or opener is None:
-            return
-        try:
-            opener(rec.path)
-        except Exception as exc:
-            dialogs.show_error(self.mgr.panel.toplevel, "Play", f"Could not open the file: {exc}")
-
-    def clip_editor(self) -> None:
-        rec = next(iter(self.selected_recs()), None)
-        if rec is None or self.mgr.ctx.clip_editor is None:
-            return
-        if not rec.path.lower().endswith((".mp4", ".ts", ".mkv", ".mov", ".m4v", ".flv", ".webm")):
-            dialogs.show_info(self.mgr.panel.toplevel, "Clip Editor", "Pick a video file.")
-            return
-        self.mgr.ctx.clip_editor(rec.path)
-
-    def reveal(self) -> None:
-        rec = next(iter(self.selected_recs()), None)
-        reveal = self.mgr.ctx.revealer
-        if rec is None or reveal is None:
-            return
-        try:
-            reveal(rec.path)
-        except Exception as exc:
-            dialogs.show_error(self.mgr.panel.toplevel, "Show in Explorer", f"Could not open it: {exc}")
-
     def _double(self, event):
         if self.tree.identify_column(event.x) != "#1":
-            self.play()
+            self._toggle(self.tree.identify_row(event.y))
 
     def _menu(self, event) -> None:
         iid = self.tree.identify_row(event.y)
@@ -579,10 +540,10 @@ class CleanupTab:
         self.suggestions: dict[str, act.Suggestion] = {}
         self.stats: lib.LibraryStats | None = None
         ttk.Label(f, style="Muted.TLabel", wraplength=820, justify="left",
-                  text="Ideas for freeing space. Pick one and press Review: you get the list with nothing ticked "
-                       "and decide yourself. Nothing here deletes anything by itself.").pack(anchor="w")
+                  text="Suggestions open a review with nothing ticked; below, tick files yourself. Every delete "
+                       "is previewed first and moves to PendingDeletion by default.").pack(anchor="w")
         opts = ttk.Frame(f)
-        opts.pack(fill="x", pady=(8, 4))
+        opts.pack(fill="x", pady=(6, 4))
         ttk.Label(opts, text="Old means older than").pack(side="left")
         self.days_var = tk.StringVar(value="90")
         ttk.Entry(opts, textvariable=self.days_var, width=5).pack(side="left", padx=4)
@@ -594,17 +555,20 @@ class CleanupTab:
         ttk.Label(opts, text="GB").pack(side="left")
         self.free_btn = ttk.Button(opts, text="Suggest oldest first\u2026", command=self.free_up)
         self.free_btn.pack(side="left", padx=(6, 0))
+        self.review_btn = ttk.Button(opts, text="Review\u2026", command=self.review)
+        self.review_btn.pack(side="right")
         box = ttk.Frame(f)
-        box.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(box, columns=("what", "count", "size"), show="headings", selectmode="browse", height=9)
+        box.pack(fill="x")
+        self.tree = ttk.Treeview(box, columns=("what", "count", "size"), show="headings", selectmode="browse", height=5)
         for cid, text, width, anchor in (("what", "Suggestion", 330, "w"), ("count", "Items", 80, "e"), ("size", "Size", 100, "e")):
             self.tree.heading(cid, text=text)
             self.tree.column(cid, width=width, anchor=anchor, stretch=(cid == "what"))
-        self.tree.pack(fill="both", expand=True)
-        self.detail = ttk.Label(f, text="", wraplength=820, justify="left")
-        self.detail.pack(anchor="w", pady=(6, 0))
-        self.review_btn = ttk.Button(f, text="Review\u2026", command=self.review)
-        self.review_btn.pack(anchor="e", pady=(6, 0))
+        scroll = ttk.Scrollbar(box, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="x", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.detail = ttk.Label(f, text="", style="Muted.TLabel", wraplength=820, justify="left")
+        self.detail.pack(anchor="w", pady=(4, 0))
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._sync())
         self.tree.bind("<Double-1>", lambda _e: self.review())
 
