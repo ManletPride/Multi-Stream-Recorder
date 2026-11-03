@@ -193,6 +193,11 @@ class BackgroundCleaner:
                 continue
 
             restore_stranded_probe_files(username_path)
+            try:   # parts of a stopped YouTube from-start capture -> one .ts, handled below
+                from msr.yt_live_start import merge_leftovers
+                merge_leftovers(username_path, ffmpeg_path, logging.getLogger())
+            except Exception as e:
+                logging.warning(f"Cleanup: could not merge from-start parts in {username_path}: {e}")
             for filename in os.listdir(username_path):
                 if not filename.endswith('.ts'):
                     continue

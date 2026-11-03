@@ -61,6 +61,14 @@ GROUPS = (
         row("Recording", "min_disk_space_gb", "Min free space (GB)", hint="0 = no free-space check",
             tip="New recordings wait while the recordings drive has less free space than this."),
     )),
+    ("YouTube", False, (
+        row("YouTube", "live_from_start", "Record from the start of the broadcast", "bool",
+            hint="keeps what aired before MSR noticed",
+            tip="yt-dlp --live-from-start on the first part of a broadcast: it catches up\n"
+                "faster than real time, then follows live. No DVR = normal live recording."),
+        row("YouTube", "live_from_start_max_hours", "Only if live for less than (h)", hint="0 = no limit",
+            tip="Older broadcasts record from now, so a restart does not fetch hours of backlog."),
+    )),
     ("Checking", False, (
         row("Timeouts", "poll_interval_minutes", "Check every (min)", hint="0.5\u2013120",
             tip="How often offline channels are checked. Kick and Twitch instant alerts\n"
@@ -319,7 +327,12 @@ class OptionsPanel:
             v = tk.BooleanVar(value=str(cur).strip().lower() in ("1", "true", "yes", "on"))
             w = ttk.Checkbutton(box, text=spec["label"], variable=v,
                                 command=lambda: self._commit(s, k, "true" if v.get() else "false"))
-            w.grid(row=i, column=0, columnspan=1 if kind == "sound" else 3, sticky="w", pady=1)
+            w.grid(row=i, column=0, columnspan=1 if kind == "sound" else 2 if spec["hint"] else 3,
+                   sticky="w", pady=1)
+            if kind == "bool" and spec["hint"]:
+                hint = ttk.Label(box, text=spec["hint"], foreground=t["muted"])
+                hint.grid(row=i, column=2, sticky="w")
+                self.hints[(s, k)] = hint
             if kind == "sound":
                 ttk.Button(box, text="Test", width=6,
                            command=lambda ev=spec["choices"][0]: self.sound_test and self.sound_test(ev)

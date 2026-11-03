@@ -14,6 +14,7 @@ import threading
 import time
 
 from msr import __version__
+from msr import yt_live_start
 from msr.config import (
     default_streams_dir,
     fishtank_password,
@@ -33,6 +34,7 @@ from msr.platforms import (
     build_recording_command_streamlink,
     build_recording_command_streamlink_kick,
     build_recording_command_ytdlp,
+    build_recording_command_ytdlp_from_start,
     check_stream_fishtank,
     check_stream_kick_api,
     check_stream_rumble_html,
@@ -1122,7 +1124,7 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                               ffmpeg_path="ffmpeg", watch_resolution_changes=False,
                               resolution_check_interval=20,
                               bg_remux_state=None, remux_lock=None,
-                              on_size_limit=None):
+                              on_size_limit=None, from_start=None):
     """Monitor a recording subprocess and update status via queue.
 
     Spawns a background thread to read stderr for real-time logging.
@@ -1142,6 +1144,11 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
     the next capture and return True once that new file has data, so the two
     files overlap instead of dropping live seconds. If it returns False or
     raises, the current process is still stopped (gap fallback).
+
+    ``from_start`` (a yt_live_start.LiveFromStart) watches a YouTube
+    --live-from-start capture: its part files instead of ``raw_file``, a
+    "catching up from start" detail, and no size/time split until it has
+    reached the live edge (a split then would drop the rest of the backlog).
 
     Returns (last_status, split_requested) where split_requested=True means
     the caller should immediately start a new segment rather than entering
@@ -1179,7 +1186,9 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
     # enough data (~1.5 MB).  Populates stream_info_ref[0] with a
     # "WxH · Xfps · Y.YMbps" string for all platforms.  Skipped when
     # stream_info was pre-populated (Chaturbate/Fishtank format-data path).
-    if stream_info_ref[0] is None:
+    if from_start is not None:
+        _start_catchup_thread(from_start, ffmpeg_path, channel_key)
+    elif stream_info_ref[0] is None:
         probe_thread = threading.Thread(
             target=_probe_stream_info_thread,
             args=(raw_file, stream_info_ref, ffmpeg_path, logger),
@@ -1193,7 +1202,9 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
     # the next one.
     resolution_change_ref = [False]
     res_watch_stop_event = threading.Event()
-    if watch_resolution_changes:
+    if from_start is not None:
+        from_start.stop_event = res_watch_stop_event
+    if watch_resolution_changes and from_start is None:
         res_watch_thread = threading.Thread(
             target=_watch_resolution_change_thread,
             args=(raw_file, resolution_change_ref, ffmpeg_path, logger, res_watch_stop_event),
@@ -1202,14 +1213,22 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
         )
         res_watch_thread.start()
 
+    split_deferred_logged = False
     while proc.poll() is None and not stop_event.is_set():
         elapsed = time.monotonic() - start_time
 
         try:
-            if os.path.exists(raw_file):
+            if from_start is not None:
+                exists = from_start.present()
+                status_file = from_start.active_file() or raw_file
+            else:
+                exists = os.path.exists(raw_file)
+                status_file = raw_file
+            if exists:
                 file_appeared = True
                 file_gone_since = None
-                size = os.path.getsize(raw_file)
+                # from-start: all part files (and yt-dlp's merge output) count as growth
+                size = from_start.total_size() if from_start is not None else os.path.getsize(raw_file)
 
                 # Track file growth for stall detection
                 if size > last_size:
@@ -1253,6 +1272,12 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                 # parts of at most this length instead of running until 8 GB.
                 over_size = max_file_size_bytes > 0 and size >= max_file_size_bytes
                 over_time = max_record_hours > 0 and elapsed >= max_record_hours * 3600
+                if (over_size or over_time) and from_start is not None and not from_start.caught_up:
+                    if not split_deferred_logged:
+                        logger.info("Split limit reached while catching up from the start - "
+                                    "splitting once the capture reaches the live edge")
+                        split_deferred_logged = True
+                    over_size = over_time = False
                 if over_size or over_time:
                     if over_size:
                         logger.info(
@@ -1289,6 +1314,8 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                 # A background remux of a previous size-split segment is appended
                 # so the status row shows recording AND remux progress.
                 detail = stream_info_ref[0] if stream_info_ref[0] else "starting"
+                if from_start is not None:
+                    detail = from_start.detail()
                 if bg_remux_state:
                     detail = _with_remux_suffix(
                         detail, _snapshot_remux_state(bg_remux_state, remux_lock)
@@ -1301,7 +1328,7 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                     "size_bytes": int(size),
                     "time": format_elapsed(elapsed),
                     "progress": progress_pct,
-                    "raw_file": raw_file,
+                    "raw_file": status_file,
                 }
                 if new_status != last_status:
                     status_queue.put((channel_key, new_status))
@@ -1324,7 +1351,7 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
                     file_gone_since = time.monotonic()
                 elif time.monotonic() - file_gone_since > 30:
                     logger.error(
-                        f"The recording file vanished 30s ago ({os.path.basename(raw_file)}) - the "
+                        f"The recording file vanished 30s ago ({os.path.basename(status_file)}) - the "
                         f"drive may have been unplugged. Stopping {tool_name} (PID {proc.pid})"
                     )
                     kill_process_tree(proc.pid, logger)
@@ -1343,6 +1370,22 @@ def monitor_recording_process(proc, raw_file, start_time, max_record_hours,
     stderr_thread.join(timeout=5)
 
     return last_status, split_requested
+
+
+def _start_catchup_thread(from_start, ffmpeg_path, channel_key, interval=30.0):
+    """Probe a from-start capture's media length every ``interval`` s until it is live."""
+    def _run():
+        stop = getattr(from_start, "stop_event", None)
+        while not from_start.caught_up and not (stop is not None and stop.is_set()):
+            from_start.sample(lambda path: _probe_duration(ffmpeg_path, path))
+            if stop is not None:
+                if stop.wait(interval):
+                    break
+            else:
+                time.sleep(interval)
+    t = threading.Thread(target=_run, daemon=True, name=f"catchup-{channel_key}")
+    t.start()
+    return t
 
 
 def _probe_duration(ffmpeg_path, raw_file):
@@ -2159,6 +2202,7 @@ def record_worker(args):
     reconnect_extended_minutes = parser_getint(config, 'Timeouts', 'reconnect_extended_minutes', 10)
     file_creation_timeout = parser_getint(config, 'Timeouts', 'file_creation_timeout', 60)
     filename_pattern = config.get('Recording', 'filename_pattern', fallback='{username}_{timestamp}') or '{username}_{timestamp}'
+    from_start_enabled, from_start_max_hours = yt_live_start.settings(config)
 
     # Cookies file
     cookies_file = config.get('Paths', 'cookies_file', fallback='') or None
@@ -2317,6 +2361,7 @@ def record_worker(args):
     bg_remux_state = {"active": 0, "pct": None}
     bg_remux_threads = []     # (thread, join_timeout)
     skip_checking_status = False  # after a split, keep status as Recording
+    check_info = {}               # YouTube check extras (video id, start time) for from-start
 
     def _join_background_remuxes():
         still = [(t, timeout) for t, timeout in bg_remux_threads if t.is_alive()]
@@ -2513,7 +2558,9 @@ def record_worker(args):
                     else:
                         logger.info(f"TikTok live API fallback: {wc_err or 'not live'}")
             elif platform in ["youtube", "custom"]:
-                is_live, stream_title, error, need_impersonate, resolved_url, format_urls = check_stream_ytdlp(url, logger, stream_check_timeout, cookies_file)
+                check_info.clear()
+                is_live, stream_title, error, need_impersonate, resolved_url, format_urls = check_stream_ytdlp(
+                    url, logger, stream_check_timeout, cookies_file, info=check_info)
                 # If yt-dlp resolved to a different URL (e.g. Rumble channel -> video),
                 # use the resolved URL for recording so yt-dlp can actually download it
                 if resolved_url:
@@ -2658,13 +2705,33 @@ def record_worker(args):
             start_wall = datetime.datetime.now()
             start_time = time.monotonic()
 
+            # YouTube: first segment of a broadcast records from its start
+            # (yt-dlp --live-from-start); see msr/yt_live_start.py.
+            from_start = None
+            if platform == "youtube":
+                use_fs, why = yt_live_start.plan(
+                    from_start_enabled, from_start_max_hours, platform, check_info, is_continuation)
+                if use_fs:
+                    vid = check_info.get("video_id")
+                    yt_live_start.mark_seen(vid)   # once per broadcast, also across restarts
+                    from_start = yt_live_start.LiveFromStart(
+                        os.path.join(recorded_path, base_name), vid,
+                        check_info.get("release_timestamp") or check_info.get("timestamp"))
+                    raw_file = from_start.merged_file
+                    logger.info(f"Recording from the start of the broadcast ({why})")
+                elif from_start_enabled:
+                    logger.info(f"Recording live, not from the start: {why}")
+
             new_status = {"status": "Recording", "detail": "starting", "size": "0 B", "time": "0:00", "progress": 0}
             if new_status != last_status:
                 status_queue.put((channel_key, new_status))
                 last_status = new_status.copy()
 
-            def _build_record_cmd(out_file):
+            def _build_record_cmd(out_file, fs=None):
                 nonlocal stream_info
+                if fs is not None:
+                    return build_recording_command_ytdlp_from_start(
+                        recording_url, fs.stem, config, verbose, streamlink_debug, cookies_file)
                 if platform == "kick":
                     # Use streamlink for Kick — it has a JS challenge solver for
                     # Cloudflare that yt-dlp lacks.  Same approach as Twitch.
@@ -2712,8 +2779,8 @@ def record_worker(args):
                 return build_recording_command_streamlink(
                     url, out_file, quality, platform, config, verbose, streamlink_debug)
 
-            def _spawn_capture(out_file):
-                record_cmd = _build_record_cmd(out_file)
+            def _spawn_capture(out_file, fs=None):
+                record_cmd = _build_record_cmd(out_file, fs)
                 logger.info(f"Starting recording: {redact_cmd_for_log(record_cmd)}")
                 return subprocess.Popen(
                     record_cmd,
@@ -2736,7 +2803,8 @@ def record_worker(args):
                     )
 
             def _spawn_background_remux(closed_raw, closed_base, closed_size,
-                                        closed_wall, closed_elapsed, closed_title):
+                                        closed_wall, closed_elapsed, closed_title,
+                                        closed_from_start=None):
                 nonlocal group_parts, group_base_name, last_status
                 nonlocal consecutive_small_remux_fails, _small_remux_backoff
                 nonlocal _crash_backoff, _consecutive_micro_frags, _micro_frag_backoff
@@ -2782,6 +2850,12 @@ def record_worker(args):
                 ):
                     try:
                         time.sleep(2)
+                        if closed_from_start is not None:
+                            raw_file = yt_live_start.finalize(
+                                closed_from_start.stem, ffmpeg_path, logger, timeout)
+                            if not raw_file:
+                                logger.error("From-start parts could not be merged - kept for the next start")
+                                return
                         success, mp4_size, error = process_finished_raw(
                             raw_file, mp4_file, pending_dir, ffmpeg_path, logger,
                             timeout, username, platform, start_wall, elapsed,
@@ -2845,7 +2919,7 @@ def record_worker(args):
                 status_queue.put((channel_key, new_status))
                 last_status = new_status.copy()
 
-            proc = _spawn_capture(raw_file)
+            proc = _spawn_capture(raw_file, from_start)
 
             # Size splits start the next capture *before* this process is
             # killed (on_size_limit), then we remux the closed file and
@@ -2902,7 +2976,9 @@ def record_worker(args):
                 last_status, split_requested = monitor_recording_process(
                     proc, raw_file, start_time, max_record_hours,
                     platform, logger, status_queue, channel_key,
-                    stop_event, last_status, file_creation_timeout,
+                    stop_event, last_status,
+                    # from-start: yt-dlp reads the DASH manifest before any file appears
+                    max(file_creation_timeout, 120) if from_start else file_creation_timeout,
                     verbose=verbose,
                     max_file_size_gb=max_file_size_gb,
                     stream_info=stream_info,
@@ -2912,6 +2988,7 @@ def record_worker(args):
                     bg_remux_state=bg_remux_state,
                     remux_lock=remux_lock,
                     on_size_limit=_on_size_limit,
+                    from_start=from_start,
                 )
 
                 next_cap = overlap_handoff.get("proc")
@@ -2927,9 +3004,12 @@ def record_worker(args):
                     else:
                         elapsed = time.monotonic() - start_time
                         try:
-                            closed_size = (
-                                os.path.getsize(raw_file) if os.path.exists(raw_file) else 0
-                            )
+                            if from_start is not None:
+                                closed_size = from_start.total_size()
+                            else:
+                                closed_size = (
+                                    os.path.getsize(raw_file) if os.path.exists(raw_file) else 0
+                                )
                         except OSError:
                             closed_size = 0
                         logger.info(
@@ -2938,7 +3018,9 @@ def record_worker(args):
                         _spawn_background_remux(
                             raw_file, base_name, closed_size,
                             start_wall, elapsed, stream_title,
+                            closed_from_start=from_start,
                         )
+                        from_start = None   # the next part records live
                         proc = next_cap
                         raw_file = overlap_handoff["raw_file"]
                         base_name = overlap_handoff["base_name"]
@@ -2965,6 +3047,32 @@ def record_worker(args):
 
             exit_code = proc.returncode
             elapsed = time.monotonic() - start_time
+
+            if from_start is not None:
+                if from_start.total_size() < yt_live_start.MIN_DATA_BYTES:
+                    # No data: usually DVR off ("no formats that can be downloaded
+                    # from the start") or a yt-dlp too old. Record live right away.
+                    for p in yt_live_start.media_parts(from_start.stem):
+                        _remove_quietly(p)
+                    yt_live_start.finalize(from_start.stem, ffmpeg_path, logger)
+                    if not stop_event.is_set():
+                        # the video id is marked, so the next check records live
+                        logger.warning(f"yt-dlp --live-from-start got no data (exit {exit_code}) - "
+                                       "recording live instead")
+                        reconnect_mode = False
+                        time.sleep(2)
+                    continue
+                else:
+                    new_status = {"status": "Processing...", "detail": "joining video + audio",
+                                  "size": "", "time": "", "progress": 0}
+                    status_queue.put((channel_key, new_status))
+                    last_status = new_status.copy()
+                    merged = yt_live_start.finalize(
+                        from_start.stem, ffmpeg_path, logger, max(ffmpeg_timeout, 3600))
+                    if merged:
+                        raw_file = merged
+                    else:
+                        logger.error("From-start parts could not be merged - kept for the next start")
             if platform == "fishtank" or format_urls or rumble_hls_url:
                 tool_name = "ffmpeg"
             elif platform in ("kick", "twitch", "tiktok"):

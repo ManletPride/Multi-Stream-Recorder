@@ -80,6 +80,8 @@ def _coerce_specs():
         ("Recording", "split_on_resolution_change", "bool", True, None, None),
         ("Cleanup", "purge_on_startup", "bool", True, None, None),
         ("Twitch", "push_enabled", "bool", False, None, None),
+        ("YouTube", "live_from_start", "bool", True, None, None),
+        ("YouTube", "live_from_start_max_hours", "float", 12.0, 0.0, None),
         ("Health", "check_minutes", "float", 10.0, 0.0, 1440.0),
         ("Sounds", "go_live", "bool", False, None, None),
         ("Sounds", "problems", "bool", False, None, None),
@@ -213,6 +215,14 @@ class Config:
             'push_enabled': 'false',
             # MSR's registered public Twitch app (Device Code Flow, no secret)
             'client_id': 'cpdfs62hlro5hyzyzlfogd8gshbnu4',
+        },
+        'YouTube': {
+            # Record a newly found broadcast from its start (yt-dlp --live-from-start), so what
+            # aired before MSR noticed is kept. Only the first part of a broadcast; reconnects
+            # and splits record live. Off, or no DVR on the stream = normal live recording.
+            'live_from_start': 'true',
+            # Broadcasts live longer than this (hours) record from now instead (0 = no limit).
+            'live_from_start_max_hours': '12',
         },
         'Advanced': {
             # Passes --verbose to yt-dlp/streamlink AND disables the stderr
