@@ -1,5 +1,19 @@
 # Changelog
 
+## v3.1.1 (2026-11-03)
+
+Release notes: [docs/release_notes/RELEASE_NOTES_v3.1.1.md](docs/release_notes/RELEASE_NOTES_v3.1.1.md).
+
+**Upgrading:** on PCs missing the Sectigo Root E46 certificate, 3.0.0 and 3.1.0 may not show the update notice; download 3.1.1 from the release page.
+
+### Fixed
+- Update check and in-app update download: HTTPS uses the Windows store plus certifi's roots (`msr/tls.py`), so api.github.com (Sectigo E46 root) verifies on PCs whose store lacks that root. Before, Updates showed "Could not check" and the banner never appeared.
+- Updates notes name the real failure (untrusted certificate, or offline with the reason) instead of always "offline?".
+- Updates footer says "Could not check X; other items are up to date" instead of "Everything is up to date" when a check failed.
+- Agent control: `*_dpapi` keys are refused as `invalid` before the known-key check, the same on every OS (was `not_found` on Linux).
+- Library > Recordings: narrower channel/search boxes, so the Library fits the minimum window with Linux fonts.
+- Tests: the Windows ACL test accepts the SDDL alias `LA` (built-in Administrator, as on CI runners).
+
 ## v3.1.0 (2026-11-03)
 
 Release notes: [docs/release_notes/RELEASE_NOTES_v3.1.0.md](docs/release_notes/RELEASE_NOTES_v3.1.0.md).
