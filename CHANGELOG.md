@@ -14,6 +14,25 @@ Toward v3.1.0.
 - Once caught up, MSR ends the from-start part and continues with a normal live recording (an overlap split, no gap), so clips work again. yt-dlp writes video and audio as separate parts; MSR merges them when the recording ends, or at the next start if MSR was stopped.
 - yt-dlp calls `--live-from-start` experimental. Downloading a finished broadcast (VOD) is a separate, future feature.
 
+**Twitch go-live push (opt-in)**
+- Options > Twitch > **Connect** signs in once with a device code (twitch.tv/activate) and turns on EventSub push: a go-live is seen within seconds. Up to 10 channels (Twitch's limit), recording ones first; polling always keeps running. MSR's own public client id is built in.
+- After a push connection (Kick or Twitch) drops and reconnects, one catch-up check runs (at most every 5 min, spread over up to 60 s); ordinary drops log one INFO line.
+
+**Options tab (new)**
+- Grouped, scrollable settings with a hint for what 0/blank means and when each applies; Fishtank Test login, ffmpeg Check, Updates shortcut. The recordings folder can't change while recording; the poll and clip-length selectors stay in sync.
+
+**Sounds (off by default)**
+- Go-live chime, problem alert and clip tick, each with a Test button; quiet while Windows is locked (`[Sounds]`).
+
+**Health checks**
+- At start (tools, recordings folder writable + free space, Twitch sign-in) and every `[Health] check_minutes` (10, 0 = off): free space, stalled recordings, sites whose checks all fail. One-line status in the bottom bar with details and Updates; a note when yt-dlp/streamlink are over 14 days behind a newer release.
+
+**Library > Recordings**
+- Per-channel list (date, length, stream title) with search, sort, Open folder, Play and Clip Editor. Clips made in the Clip Editor record their source in a `.meta.json`; clips are listed under the recording they came from (older ones matched by name).
+
+**First-time setup window**
+- Live status for each step (environment, each package, install), elapsed time and a small pip log; on failure the log stays open with the path to `msr_venv_setup.log` and a Continue button. Themed from the first frame (no white flash), resizable.
+
 **Agent control v2** (`msr_ctl.py`, `api_version` stays 1)
 - `twitch status | connect | disconnect` (same as Options > Twitch); only one Twitch sign-in can run at a time, from the window or control.
 - `config set` uses the same checks and save as the Options tab (types, ranges, recordings-folder guards, secrets encrypted, `--stdin` for secrets).

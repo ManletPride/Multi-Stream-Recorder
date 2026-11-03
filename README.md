@@ -30,7 +30,13 @@ This README describes **v3.0.0**. Full history: [CHANGELOG.md](CHANGELOG.md).
 
 ## Coming in 3.1 (not released yet)
 
-- **YouTube from the start** (experimental): a broadcast MSR finds in its first 15 minutes is recorded from the beginning. See *Channels* below.
+- **YouTube from the start** (experimental): a broadcast MSR finds in its first 15 minutes is recorded from the beginning. See [Adding channels](#adding-channels).
+- **Options tab**: every common setting in one place, grouped, with a hint for what 0 or blank means, plus Fishtank **Test login** and an ffmpeg **Check**.
+- **Twitch push** (opt-in): connect Twitch in Options and MSR hears about go-live within seconds, like Kick. Polling keeps running.
+- **Health line** in the bottom bar: tools, free space, stalled recordings and sites whose checks all fail, checked at start and every 10 minutes.
+- **Sounds** (off by default): a chime on go-live, an alert on problems, a tick when a clip is saved.
+- **Library > Recordings**: each channel's recordings with title and length, and the clips cut from each one.
+- **First-time setup window** shows each step and a live log.
 - **More agent control**: Twitch sign-in, every Options setting, sound tests, Health check, Recordings browsing and a live event stream (`subscribe`). See [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md).
 - **Safer secrets**: the Twitch token and Fishtank password are encrypted on Windows; the control file is readable only by you.
 - **Options**: Manage on Twitch button, and a warning when `cookies.txt` sits in a synced folder.
@@ -58,6 +64,7 @@ This README describes **v3.0.0**. Full history: [CHANGELOG.md](CHANGELOG.md).
 **Recording**
 - Automatic live detection with jittered polling (default 3 min) and back-off on errors only. The first check runs as soon as you start.
 - **Kick realtime push**: one WebSocket to Kick's realtime service wakes a recorder within seconds of go-live; polling keeps running underneath.
+- **Twitch push** (opt-in): **Options > Twitch > Connect** signs in once with a code at twitch.tv/activate and turns it on. Twitch allows push for up to 10 channels (recording ones first); the rest, and everything else, keep polling. **Manage on Twitch** opens your Twitch connections; **Disconnect** removes MSR's access. After a push connection drops and comes back, MSR runs one catch-up check so a go-live in between isn't missed.
 - **Presence for Off channels**: Off channels are never recorded, but MSR still learns whether they are live, so the Live filter is accurate.
 - **Reconnect grace**: after a stream drops MSR polls every 15 s for 3 minutes, then every 30 s for 10 more, so a short disconnect becomes a new file instead of a missed stream.
 - Splits by size (default 8 GB) and length (`max_record_hours`, default 12) with a few seconds of overlap, and on mid-stream resolution changes.
@@ -84,6 +91,14 @@ This README describes **v3.0.0**. Full history: [CHANGELOG.md](CHANGELOG.md).
   - The default is **Move to PendingDeletion**: reversible (**Undo**, or **Restore** in the PendingDeletion tab). MSR deletes those files after `auto_purge_days`. **Delete permanently** needs you to type a confirmation; the Recycle Bin is offered when it is large enough.
   - **Recordings** lists one channel's recordings (title, length, Play, Open folder, Clip Editor); clip files fold under the recording they came from. **PendingDeletion** shows size, age and the next purge. **Clean up** suggests large, old, duplicate and leftover files, with nothing ticked until you choose, and below that lists single files to tick (channel, type, search, older than N days) and delete.
   - MSR never touches a channel that is recording, files changed in the last 10 minutes, or anything outside the Processed / Recorded / PendingDeletion / Clips folders. Every action is logged to `library_actions.log`.
+
+**Options tab**
+- Grouped settings (Recording, YouTube, Checking, Folders, Clips, Cleanup, Sounds, Fishtank login, Other, Advanced timing) with a hint for each and whether it applies now, at the next start or after a restart. The recordings folder can't be changed while recording.
+- Fishtank **Test login** (the password is never shown; blank = keep), ffmpeg **Check**, **Updates** shortcut, and a warning when `cookies.txt` is in a synced folder.
+- **Sounds** (all off by default): go-live chime, problem alert, clip tick, each with a Test button; quiet while Windows is locked.
+
+**Health**
+- A one-line status in the bottom bar, with details and an Updates button. Checked at start (tools, recordings folder writable and free space, Twitch sign-in) and every `[Health] check_minutes` (10, 0 = off): free space, stalled recordings, sites whose checks all fail. It also notes when yt-dlp or streamlink is more than 14 days behind a newer release.
 
 **Logs tab**
 - Follows new lines only while you are at the bottom (a **New lines** button appears when you scroll back), filter box, level drop-down, highlighting, coloured warnings and errors, Ctrl+F, **Open log file**.
@@ -203,6 +218,10 @@ Or leave the password out and set the `MSR_FISHTANK_PASSWORD` environment variab
 | `Recording/max_record_hours` | 12 | Length split (0 = off) |
 | `Recording/min_disk_space_gb` | 5 | Low-space threshold for the recordings and fallback drives (status, health) |
 | `Recording/filename_pattern` | `{username}_{timestamp}` | Tokens: `{username} {platform} {date} {time} {timestamp} {title}` |
+| `YouTube/live_from_start`, `live_from_start_max_minutes` | true, 15 | Record a new broadcast from its start; only if live for at most this long (0-7200, 0 = no limit) |
+| `Twitch/push_enabled` | false | Twitch go-live push (set by Options > Twitch > Connect) |
+| `Health/check_minutes` | 10 | Health check interval (0 = off) |
+| `Sounds/go_live`, `problems`, `clip_saved` | false | Optional sounds; `quiet_while_locked` true |
 | `Timeouts/poll_interval_minutes` | 3 | Offline check interval (also in the Polling menu) |
 | `Timeouts/reconnect_grace_minutes`, `reconnect_extended_minutes` | 3, 10 | 15 s polling after a drop, then 30 s polling |
 | `Cleanup/auto_purge_days` | 7 | Days before PendingDeletion is emptied |
@@ -291,6 +310,7 @@ Click the version text at the bottom left, or **Updates…** next to About. The 
 - **YouTube drops every ~15 s**: install Deno. **"No video formats found!"**: leave `youtube_player_client` blank and update yt-dlp in **Updates…**.
 - **Kick 403 / not recording**: update streamlink in **Updates…**, and delete any old third-party `kick.py` in `%APPDATA%\streamlink\plugins\`.
 - **Kick push not listening** (no `push: listening` in the status column): check that websocket-client and curl_cffi are installed (Updates…). Recording still works through polling.
+- **Twitch push not working**: Options > Twitch shows the state. Connect again if the sign-in expired; recording still works through polling.
 - **TikTok live but shown offline**: MSR cross-checks TikTok's own API; if neither detects it, re-export TikTok cookies (`msToken`, `ttwid`).
 - **Rumble 403**: update yt-dlp and curl_cffi. Public channels need no login.
 - **Fishtank "could not obtain JWT"**: add `[Fishtank]` email/password or fresh fishtank cookies.
