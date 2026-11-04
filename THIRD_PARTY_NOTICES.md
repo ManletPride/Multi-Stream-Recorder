@@ -27,6 +27,10 @@ Omarchy theme system and palettes: MIT, Copyright (c) David Heinemeier Hansson (
 
 **Rose Pine:** Rose Pine has no green: its ANSI green is the teal 'pine' (#31748f), which made the Start button and the OK colour look blue. MSR uses pine turned to a green hue (#318f50, same saturation and lightness) instead, lightened until it reads on the background.
 
+## Textual
+
+The optional terminal viewer `msr_tui.py` uses [Textual](https://github.com/Textualize/textual) (and its dependency [Rich](https://github.com/Textualize/rich)) by Textualize, Inc., MIT licence. They are not bundled; `requirements-tui.txt` installs them from PyPI.
+
 ## Notes and caveats
 
 - **Arc Blueberry** is Bearded Theme's Arc Blueberry variation by BeardedBear (<https://github.com/BeardedBear/bearded-theme>, `src/variations/arc.ts`), read through Vale's Omarchy theme (<https://github.com/vale-c/omarchy-arc-blueberry>, MIT, Copyright (c) 2025 Vale). The Bearded Theme repository was MIT as of 2021 (Copyright (c) 2021 BeardedBear) and has been GPL-3.0 since 2023-04-14 (checked in its LICENSE history on GitHub). Only colour values are used; no code or images. The background `#111422`, the accent `#8eb0e6` and the blue, green, yellow, red, turquoise and pink colours match `arcBlueBerry` / `arcColors` in `arc.ts`.

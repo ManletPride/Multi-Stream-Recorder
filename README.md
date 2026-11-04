@@ -296,6 +296,17 @@ python msr_ctl.py --data-dir "$t\data" status
 python msr_ctl.py --data-dir "$t\data" quit
 ```
 
+## Terminal status viewer (optional)
+
+`msr_tui.py` is a read-only, one-screen status view for a terminal (also over SSH): one row per channel with a coloured status dot (theme colours), recording time, file size and last time live, the last log lines, and a header with the MSR version, free space on the recordings drive and whether MSR is running. It refreshes every 2 seconds; `r` refreshes now, `q` quits. It only reads `msr_status.json` and asks a running copy for log lines (the read-only `logs` command), so it never changes anything and needs agent control on (the default).
+
+```powershell
+python -m pip install -r requirements-tui.txt      # once; Textual, not needed by the GUI
+python msr_tui.py --data-dir "C:\path\to\MSR data"  # or set MSR_HOME / MSR_DATA
+```
+
+Options: `--interval SECONDS`, `--theme "Theme Name"`. Built with [Textual](https://github.com/Textualize/textual) by Textualize (MIT).
+
 ## Updating yt-dlp, streamlink and packages
 
 Click the version text at the bottom left, or **Updates…** next to About. The dialog lists MSR, yt-dlp, streamlink, ffmpeg and the Python packages with the installed version, the latest version and a status. **Check now** asks PyPI and GitHub; **Update selected** / **Update all** update in the background.

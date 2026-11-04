@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- `msr_tui.py`: optional read-only terminal status viewer (Textual): channel table with status colours, last log lines, version, disk free and running state; refreshes every 2 s. Install with `requirements-tui.txt`.
+
 ## v3.1.2 (2026-11-03)
 
 Release notes: [docs/release_notes/RELEASE_NOTES_v3.1.2.md](docs/release_notes/RELEASE_NOTES_v3.1.2.md).

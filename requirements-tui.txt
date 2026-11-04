@@ -1,0 +1,3 @@
+# Optional: the terminal status viewer (msr_tui.py). The GUI and --headless do not need it.
+# Install with: python -m pip install -r requirements-tui.txt
+textual>=0.80.0   # Textual by Textualize, MIT licence (https://github.com/Textualize/textual)
