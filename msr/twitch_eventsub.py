@@ -24,7 +24,11 @@ import json
 import logging
 import os
 import sys
+import tempfile
+import threading
 import time
+from contextlib import contextmanager
+from hashlib import sha1
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -234,6 +238,90 @@ def validate(tok, request=http_request):
 
 def revoke(tok, request=http_request):
     request("POST", f"{OAUTH}/revoke", form={"client_id": tok["client_id"], "token": tok["access_token"]})
+
+
+# -- one refresh at a time (refresh tokens are single-use) --
+
+_proc_lock = threading.RLock()
+
+
+def _lock_path(data_dir):
+    key = os.path.normcase(os.path.abspath(data_dir or "."))
+    return os.path.join(tempfile.gettempdir(), f"msr-twitch-{sha1(key.encode()).hexdigest()[:12]}.lock")
+
+
+@contextmanager
+def token_lock(data_dir, timeout=30.0):
+    """Thread + cross-process lock around read-refresh-save of the token file."""
+    with _proc_lock:
+        fh = open(_lock_path(data_dir), "a+b")
+        locked = False
+        try:
+            end = time.monotonic() + timeout
+            while True:
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+                        fh.seek(0)
+                        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
+                except OSError:
+                    if time.monotonic() >= end:
+                        raise TimeoutError("Twitch token lock busy") from None
+                    time.sleep(0.05)
+            yield
+        finally:
+            if locked:
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+                        fh.seek(0)
+                        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            fh.close()
+
+
+class TokenStore:
+    """The only place that refreshes: always re-reads the file under the lock, so a
+    refresh token another thread/process already used is never sent again."""
+
+    def __init__(self, data_dir, api=None):
+        self.data_dir = data_dir
+        self.api = api if api is not None else sys.modules[__name__]
+
+    def get_fresh(self, force=False, used=None):
+        """Saved token, refreshed if near expiry (or force). `used` = the refresh token the
+        caller saw rejected: if the file already holds a different one, return that."""
+        api = self.api
+        with token_lock(self.data_dir):
+            tok = api.load_token(self.data_dir)
+            if not tok:
+                raise TwitchAuthError("not signed in - authorize again")
+            if used is not None and tok.get("refresh_token") != used:
+                return tok
+            if not force and not api.needs_refresh(tok):
+                return tok
+            try:
+                new = api.refresh(tok)
+            except TwitchAuthError:
+                again = api.load_token(self.data_dir)  # rotated by a writer outside the lock?
+                if not again or not again.get("refresh_token") \
+                        or again.get("refresh_token") == tok.get("refresh_token"):
+                    raise
+                new = api.refresh(again)
+            api.save_token(self.data_dir, new)
+        exp = new.get("expires_at")
+        until = time.strftime("%H:%M", time.localtime(float(exp))) if exp else "?"
+        logging.getLogger().info(f"Twitch: sign-in refreshed (valid until {until})")
+        return new
 
 
 def needs_refresh(tok, now=None):

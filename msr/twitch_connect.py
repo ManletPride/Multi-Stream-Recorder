@@ -54,20 +54,17 @@ def check_online(data_dir, client_id, api=te):
     state, login = status_of(data_dir, client_id, api)
     if state != "connected":
         return state, login
-    tok = api.load_token(data_dir)
+    store = te.TokenStore(data_dir, api)
     try:
-        if api.needs_refresh(tok):
-            tok = api.refresh(tok)
-            api.save_token(data_dir, tok)
-        api.validate(tok)
-        return "connected", tok.get("login")
-    except te.TwitchAuthError:
+        tok = store.get_fresh()
         try:
-            tok = api.refresh(tok)
-            api.save_token(data_dir, tok)
-            return "connected", tok.get("login")
-        except Exception:
-            return "expired", login
+            api.validate(tok)
+        except te.TwitchAuthError:
+            tok = store.get_fresh(force=True, used=tok.get("refresh_token"))
+            api.validate(tok)
+        return "connected", tok.get("login") or login
+    except te.TwitchAuthError:
+        return "expired", login
     except Exception:
         return "connected", login  # offline: trust the file
 

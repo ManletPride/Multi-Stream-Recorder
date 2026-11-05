@@ -123,13 +123,21 @@ def folder_issues(folder: str, free_gb: float | None, min_gb: float,
 
 
 def twitch_issue(token: dict | None, push_enabled: bool, validate: Callable[[dict], object],
-                 auth_error: type = Exception) -> Issue | None:
-    """One validate call at startup when instant alerts are on. Network trouble is not reported
-    (timed checks keep working); only a rejected sign-in is."""
+                 auth_error: type = Exception,
+                 fresh: Callable[..., dict] | None = None) -> Issue | None:
+    """One validate call at startup when instant alerts are on, after a refresh if due (fresh).
+    Network trouble is not reported; only a refused refresh is."""
     if not push_enabled or not token:
         return None
     try:
-        validate(token)
+        if fresh is None:
+            validate(token)
+        else:
+            token = fresh()
+            try:
+                validate(token)
+            except auth_error:
+                validate(fresh(force=True, used=token.get("refresh_token")))
     except auth_error:
         return Issue(WARN, "twitch", "Twitch sign-in is no longer valid: reconnect it in Options "
                                      "(timed checks still run)")

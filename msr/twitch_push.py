@@ -140,16 +140,34 @@ class TwitchPushListener:
         else:
             self.logger.debug(f"Twitch push: {what}")
 
+    def _store(self):
+        return te.TokenStore(self.data_dir, self.api)
+
     def _ensure_token(self):
-        tok = self._tok
-        if self.api.needs_refresh(tok, time.time()):
-            tok = self.api.refresh(tok)
-            self.api.save_token(self.data_dir, tok)
-            self._tok = tok
+        tok = self._store().get_fresh()
         if self.clock() - self._last_validate >= VALIDATE_EVERY:
-            self.api.validate(tok)
+            try:
+                self.api.validate(tok)
+            except te.TwitchAuthError:
+                tok = self._force_refresh(tok)
+                self.api.validate(tok)
             self._last_validate = self.clock()
+        self._tok = tok
         return tok
+
+    def _force_refresh(self, tok):
+        """After a 401: one forced refresh (skipped if someone already rotated it)."""
+        tok = self._store().get_fresh(force=True, used=(tok or {}).get("refresh_token"))
+        self._tok = tok
+        return tok
+
+    def _with_auth_retry(self, tok, call):
+        """call(tok); on a 401 refresh once and retry. Returns (result, tok)."""
+        try:
+            return call(tok), tok
+        except te.TwitchAuthError:
+            tok = self._force_refresh(tok)
+            return call(tok), tok
 
     def _run(self):
         import websocket
@@ -293,7 +311,8 @@ class TwitchPushListener:
             todo = [l for l in self._priority() if l not in self._subs]
             missing = [l for l in todo if l not in self._ids]
             if missing:
-                self._ids.update(self.api.lookup_user_ids(tok, missing))
+                ids, tok = self._with_auth_retry(tok, lambda t: self.api.lookup_user_ids(t, missing))
+                self._ids.update(ids)
             for login in todo:
                 if self._stop.is_set() or session != self._session_id:
                     return
@@ -303,7 +322,8 @@ class TwitchPushListener:
                 bid = self._ids.get(login)
                 if not bid:
                     continue
-                status, sub_id, _, _ = self.api.create_subscription(tok, session, bid)
+                (status, sub_id, _, _), tok = self._with_auth_retry(
+                    tok, lambda t, b=bid: self.api.create_subscription(t, session, b))
                 if status == "ok":
                     with self._lock:
                         self._subs[login] = sub_id

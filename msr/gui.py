@@ -2342,7 +2342,8 @@ def main_gui(config):
         from msr import twitch_eventsub as _te
         return _health.twitch_issue(_te.load_token(library_data_dir),
                                     config.getboolean('Twitch', 'push_enabled', fallback=False),
-                                    _te.validate, _te.TwitchAuthError)
+                                    _te.validate, _te.TwitchAuthError,
+                                    fresh=_te.TokenStore(library_data_dir).get_fresh)
 
     health_ctl = _health_ui.HealthController(
         bottom_bar, config=config,

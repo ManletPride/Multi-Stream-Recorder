@@ -153,6 +153,9 @@ class FakeApi:
     def needs_refresh(self, tok, now=None):
         return False
 
+    def refresh(self, tok):
+        return dict(tok, refresh_token=tok["refresh_token"] + "+")
+
     def validate(self, tok):
         return {}
 
