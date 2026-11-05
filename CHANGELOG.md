@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## v3.1.3 (2026-11-05)
+
+Release notes: [docs/release_notes/RELEASE_NOTES_v3.1.3.md](docs/release_notes/RELEASE_NOTES_v3.1.3.md).
 
 ### Fixed
 - Twitch instant alerts no longer turn off after a few hours with "Twitch sign-in is no longer valid". Refreshes now go through one locked token store (shared by the listener, Options, control and the health check), so a single-use refresh token is never sent twice; a refused refresh reloads and retries once with a newer saved token; a 401 from validate or Helix forces one refresh and retries; the startup health check refreshes before validating. Successful refreshes are logged (no token values).

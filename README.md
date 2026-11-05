@@ -4,7 +4,7 @@ A Windows-first desktop app (Python + Tkinter) that watches a list of live chann
 
 Supported: **Kick**, **Twitch**, **YouTube**, **Rumble**, **TikTok**, and custom URLs (any site yt-dlp supports, or a direct `.m3u8`).
 
-This README describes **v3.1.2**. Full history: [CHANGELOG.md](CHANGELOG.md).
+This README describes **v3.1.3**. Full history: [CHANGELOG.md](CHANGELOG.md).
 
 ![Status tab: five channels recording at once](screenshots/main.png)
 
@@ -29,6 +29,8 @@ This README describes **v3.1.2**. Full history: [CHANGELOG.md](CHANGELOG.md).
 </details>
 
 ## What's new in 3.1
+
+- **3.1.3 Twitch sign-in stays valid**: instant alerts no longer drop off after a few hours with "sign-in is no longer valid".
 
 - **3.1.2 Clip Editor zoom and waveform**: zoom into the timeline (Alt+wheel or +/-) for precise In/Out marks, and an optional audio waveform under it.
 
