@@ -3,7 +3,11 @@
 ## Unreleased
 
 ### Fixed
+- Status live preview: after minimize/restore (or leaving the tray), the strip refreshes at once again. Restoring clears the failure back-off, refreshes the age badge immediately, and if a grab was already running the kick waits for it and then runs once more instead of being dropped.
 - CI: Twitch validate-401 refresh test no longer depends on process uptime (`time.monotonic` vs a 1-hour validate interval); force the hourly validate path so GitHub runners with a fresh boot pass the same as a long-uptime PC.
+
+### Changed
+- Pinned Status preview is sharper (960x540 still from the live edge). Strip tiles stay 160x90; there is still no full-window 1080p preview.
 
 ## v3.1.3 (2026-11-05)
 

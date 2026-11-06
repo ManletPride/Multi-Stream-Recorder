@@ -218,6 +218,22 @@ class BackoffTests(unittest.TestCase):
         self.assertTrue(self.state.due("a"))
         self.assertEqual(self.state.record_failure("a", started=self.clock()), 4.0)
 
+    def test_clear_backoff_makes_due_again(self):
+        s = ps.PreviewState(clock=self.clock)
+        s.record_failure("ch")
+        self.clock.advance(1)
+        self.assertFalse(s.due("ch"))
+        s.clear_backoff(["ch"])
+        self.assertTrue(s.due("ch"))
+
+    def test_clear_backoff_all_channels(self):
+        s = ps.PreviewState(clock=self.clock)
+        s.record_failure("a")
+        s.record_failure("b")
+        s.clear_backoff()
+        self.assertTrue(s.due("a") and s.due("b"))
+
+
     def test_other_channels_are_not_held_back(self):
         self.state.record_failure("a", started=self.clock())
         self.assertTrue(self.state.due("b"))

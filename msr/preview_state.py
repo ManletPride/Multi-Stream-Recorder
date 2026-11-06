@@ -156,6 +156,17 @@ class PreviewState:
             c.source = raw_file
 
     # -- grabbing --------------------------------------------------------------------------
+    def clear_backoff(self, channels=None):
+        """Drop the failure back-off so the next tick grabs at once (e.g. window restored)."""
+        with self._lock:
+            if channels is None:
+                targets = list(self._channels.values())
+            else:
+                targets = [self._channels[ch] for ch in channels if ch in self._channels]
+            for c in targets:
+                c.failures = 0
+                c.retry_at = 0.0
+
     def due(self, ch):
         """False while the channel is backing off after failed grabs."""
         with self._lock:

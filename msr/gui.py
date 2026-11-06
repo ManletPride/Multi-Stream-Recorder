@@ -1385,11 +1385,12 @@ def main_gui(config):
     # recording's .ts on a worker thread every PREVIEW_MS. Sizes/rate are
     # starting points to tweak. PNG because tk.PhotoImage has no JPEG.
     PREVIEW_W, PREVIEW_H = 160, 90
-    PREVIEW_BIG_W, PREVIEW_BIG_H = 480, 270  # 3× the strip tiles
+    PREVIEW_BIG_W, PREVIEW_BIG_H = 960, 540  # 6x strip; sharper pin without a full 1080p still
     PREVIEW_MS = 4000
     _preview_photos = {}
     _preview_tiles = {}
     _preview_busy = [False]
+    _preview_again = [False]  # kick while busy: run once more when the current grab finishes
     _preview_big = [None]
     _preview_big_photo = [None]
     _pstate = _preview_state.PreviewState()  # last_ok, working seek, back-off per channel (Tk-free)
@@ -2609,7 +2610,7 @@ def main_gui(config):
         return os.path.join(folder, f"{safe}{suffix}.png")
 
     def _set_big_preview_image(png_path=None, from_small=None):
-        """Show *png_path*, or a 3× zoom of an existing strip PhotoImage."""
+        """Show *png_path*, or a zoom of the strip tile until the sharp pin PNG is ready."""
         photo = None
         if png_path and os.path.isfile(png_path):
             try:
@@ -2618,7 +2619,9 @@ def main_gui(config):
                 photo = None
         if photo is None and from_small is not None:
             try:
-                photo = from_small.zoom(3, 3)
+                zx = max(1, PREVIEW_BIG_W // PREVIEW_W)
+                zy = max(1, PREVIEW_BIG_H // PREVIEW_H)
+                photo = from_small.zoom(zx, zy)
             except tk.TclError:
                 photo = None
         if photo is None:
@@ -2889,6 +2892,9 @@ def main_gui(config):
                     from_small=_preview_photos.get(ch_name),
                 )
         _paint_preview_selection(_preview_selected[0])  # ages: a channel whose grabs fail goes stale
+        if _preview_again[0]:
+            _preview_again[0] = False
+            _kick_previews()
 
     def _tick_previews():
         _preview_kick[0] = False
@@ -2909,7 +2915,7 @@ def main_gui(config):
         except tk.TclError:
             return
         if _preview_busy[0]:
-            return
+            return  # a kick while busy sets _preview_again; _finish_preview_batch runs it
         jobs = _recording_preview_jobs()
         keys = [ch for ch, _path in jobs]
         if not jobs:
@@ -2965,6 +2971,14 @@ def main_gui(config):
 
     def _kick_previews(_event=None):
         """Grab now (the strip just became visible) instead of waiting for the next timer."""
+        _pstate.clear_backoff()  # hide time must not keep a 32-60 s failure wait
+        try:
+            _paint_preview_selection(_preview_selected[0])  # ages refresh even before ffmpeg returns
+        except Exception:
+            pass
+        if _preview_busy[0]:
+            _preview_again[0] = True  # do not drop the kick; run once the in-flight grab finishes
+            return
         if _preview_kick[0]:
             return
         _preview_kick[0] = True

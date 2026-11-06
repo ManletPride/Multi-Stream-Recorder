@@ -164,7 +164,7 @@ Related UI:
 
 ## Experimental live previews (`experiment/status-previews`)
 
-Status-tab stills from the live `.ts`. Constants in `msr/gui.py`: `PREVIEW_W`/`PREVIEW_H` (160×90), `PREVIEW_BIG_W`/`PREVIEW_BIG_H` (480×270), `PREVIEW_MS` (4000).
+Status-tab stills from the live `.ts`. Constants in `msr/gui.py`: `PREVIEW_W`/`PREVIEW_H` (160×90), `PREVIEW_BIG_W`/`PREVIEW_BIG_H` (960×540), `PREVIEW_MS` (4000).
 
 - `create_preview_frame` / `create_screenshot` in `msr/worker.py` — seek-before-EOF (`-sseof` first, elapsed `-ss` fallback). Do **not** prefer `-ss duration-N` for screenshots: after a Kick ad PCR reset that seeks minutes behind live (preview stays current). PNG for previews (tk.PhotoImage has no JPEG), `CREATE_NO_WINDOW`. Preview failures are quiet.
 - **Clip Now** after a PCR reset: if ffprobe elapsed is far behind file birth (`_elapsed_matches_file_age`, nicklee 2024s vs 5990s), treat duration as missing and probe/cut with `-sseof` like the no-duration path. Trusted elapsed still uses keyframe elapsed `-ss` (Kick/Twitch PCR). No output `-ss`, no `-copyts`.
@@ -175,7 +175,7 @@ Status-tab stills from the live `.ts`. Constants in `msr/gui.py`: `PREVIEW_W`/`P
 - Click tile / status row / roster stay on the same channel (`_sync_nav`). **Never** call `update()` or `update_idletasks` from `<<TreeviewSelect>>` or `_sync_nav` — that nested the Tk loop and froze the GUI on Windows. `see()` / canvas scroll only in `after_idle`. Hold `_nav_lock` around `tree.move` in `_reorder_status_rows`.
 - Roster **Filter** + **Enabled**: resolve rows by **channel name**, never `ch_tree.index` (a filtered tree’s row index is not `channels[]`).
 - **Recording first** uses `ordered_status_keys` then `tree.move`. Do not delete-and-rebuild the status tree.
-- Double-click a tile pins a 480×270 copy above the strip (extra ffmpeg only for that channel). Close / double-click the same tile / double-click the large image dismisses it. Drop the pin if that channel stops recording.
+- Double-click a tile pins a 960×540 copy above the strip (extra ffmpeg only for that channel). Close / double-click the same tile / double-click the large image dismisses it. Drop the pin if that channel stops recording.
 
 ## Left roster panel (`ui/left-panel`)
 
