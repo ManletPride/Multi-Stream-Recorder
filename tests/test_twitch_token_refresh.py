@@ -9,7 +9,7 @@ import urllib.error
 
 from msr import health, twitch_connect as tc
 from msr import twitch_eventsub as te
-from msr.twitch_push import TwitchPushListener
+from msr.twitch_push import TwitchPushListener, VALIDATE_EVERY
 
 
 class OneTimeApi:
@@ -158,6 +158,9 @@ class TestStore(Base):
         api = OneTimeApi(expired=False)
         api.validate_401 = 1
         lst = self.listener(api)
+        # Force the hourly validate path (clock is time.monotonic; CI runners
+        # often have uptime < VALIDATE_EVERY so _last_validate=0 would skip it).
+        lst._last_validate = -VALIDATE_EVERY
         tok = lst._ensure_token()
         self.assertEqual((api.sent, tok["refresh_token"]), (["rt0"], "rt1"))
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- CI: Twitch validate-401 refresh test no longer depends on process uptime (`time.monotonic` vs a 1-hour validate interval); force the hourly validate path so GitHub runners with a fresh boot pass the same as a long-uptime PC.
+
 ## v3.1.3 (2026-11-05)
 
 Release notes: [docs/release_notes/RELEASE_NOTES_v3.1.3.md](docs/release_notes/RELEASE_NOTES_v3.1.3.md).
