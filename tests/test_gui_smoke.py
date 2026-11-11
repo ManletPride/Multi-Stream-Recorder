@@ -297,7 +297,8 @@ class LibraryManageSmokeTests(unittest.TestCase):
         self.assertEqual(out["dark"], dark)
         self.assertTrue(out["allowed"])                                       # the safe move needs no typing
         self.assertFalse(out["permanent_blocked"])                            # permanent needs the typed word
-        # Linux fonts (DejaVu) render ~2% wider than Segoe UI; the bound is about Windows screens
+        # Type checks wrap at 760 px (library_dialog.FILTER_LINE). Windows fonts stay
+        # under 1000; Linux (DejaVu / Noto, and Tk 9 on Python 3.14) stays under 1100.
         self.assertLessEqual(out["dialog_req"][0], 1000 if os.name == "nt" else 1100)
         self.assertEqual(sorted(out["deleted"]), ["alice_20260101_120000.mp4", "alice_20260215_120000.mp4"])
         self.assertEqual(len(out["files_left"]), 2)                           # the fake moved nothing

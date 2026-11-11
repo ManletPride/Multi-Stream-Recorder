@@ -122,7 +122,7 @@ This README describes **v3.1.3**. Full history: [CHANGELOG.md](CHANGELOG.md).
 
 | Dependency | Needed | Purpose |
 | --- | --- | --- |
-| Python 3.10+ (3.12 tested) | Yes | Runtime. Windows/macOS installers include Tkinter; Linux needs `python3-tk` (and `python3-venv` on Debian/Ubuntu). |
+| Python 3.10+ (CI runs 3.12 and 3.14) | Yes | Runtime. Windows/macOS installers include Tkinter; Linux needs `python3-tk` (and `python3-venv` on Debian/Ubuntu). |
 | ffmpeg + ffprobe on PATH | Yes | Remux, previews, clips, Clip Editor, some HLS recording |
 | Deno | Recommended | yt-dlp uses it for YouTube's JS challenge; without it YouTube drops every ~15 s |
 | Python packages | Installed for you | yt-dlp, streamlink, curl_cffi, websocket-client, psutil, pystray, Pillow, plyer, colorama (see `requirements.txt`) |
@@ -329,6 +329,10 @@ Click the version text at the bottom left, or **Updates…** next to About. The 
 ```
 python -m unittest discover -s tests -t .
 ```
+
+On Linux, run that under a virtual display so the Tk tests execute (`xvfb-run -a python -m unittest discover -s tests -t .`) with `python3-tk` installed. Windows Python already includes Tk.
+
+GitHub Actions (`.github/workflows/tests.yml`) runs that suite on every push, pull request, and manual dispatch. The matrix is `ubuntu-latest` and `windows-latest`, each with Python 3.12 and 3.14, and `fail-fast` is off so one OS does not cancel the other. Linux installs Tk and uses Xvfb. Branch protection on `main` should require all four checks; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Code lives in `msr/`; `Multi-Stream-Recorder.py` is the entry point and `run_msr.pyw` the launcher. See [AGENTS.md](AGENTS.md) for the layout, design notes and gotchas, and [llms.txt](llms.txt) for a manual aimed at AI assistants.
 

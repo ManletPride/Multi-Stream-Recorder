@@ -28,6 +28,17 @@ class DialogCase(ManageCase):
 
 
 class ScopeTests(DialogCase):
+    def test_type_checks_wrap_within_the_body_line(self):
+        """One row of type checks is what made this dialog ~1125 px on Python 3.14 + Tk 9."""
+        dialog = self.open()
+        dialog.win.update_idletasks()
+        self.assertLessEqual(ldialog.FILTER_LINE, 760)
+        self.assertLessEqual(dialog.kinds_row.winfo_reqwidth(), ldialog.FILTER_LINE)
+        # The review window stays inside the minimum window on Windows and the
+        # Linux budget (DejaVu / Noto / Tk 9 run wider than Segoe UI).
+        limit = 1000 if os.name == "nt" else 1100
+        self.assertLessEqual(dialog.win.winfo_reqwidth(), limit)
+
     def test_default_ticks_recordings_and_raw_but_not_clips_or_pending(self):
         win = self.scanned(manage_ctx=self.ctx())
         put_dir = self.streams / "Clips" / "kick" / "alice"
