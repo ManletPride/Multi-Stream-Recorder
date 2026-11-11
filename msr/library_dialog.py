@@ -27,6 +27,11 @@ KIND_GROUPS = (  # (key, label, kinds)
     ("pending", "Already in PendingDeletion", ("media",)),
 )
 DEFAULT_KINDS = {"recordings", "raw"}
+# Same width as the intro and the summary. The type checks used to share one
+# horizontal line, and that line set the window width: about 1000 px with Tk 8.6
+# and Noto Sans, about 1125 px on Python 3.14 + Tk 9, past the 1100 px Linux
+# budget. Wrapping here starts a new row instead of widening the dialog.
+FILTER_LINE = 760
 MODES = (("all", "Everything ticked above"), ("older", "Older than N days"), ("newest_files", "All but the newest N files"),
          ("newest_gb", "All but the newest N GB"), ("range", "Recorded between two dates"))
 METHOD_TEXT = {
@@ -63,6 +68,30 @@ def dir_rows(paths) -> list[DirRow]:
     return rows
 
 
+def _pack_wrapping(parent, widgets, max_width: int = FILTER_LINE, gap: int = 10) -> None:
+    """Pack `widgets` left to right, starting a new row before `max_width`.
+
+    Widths are the widgets' own requested widths, so a larger font (Tk 9) wraps
+    sooner instead of pushing the window past the minimum."""
+    row = None
+    used = 0
+    rows = 0
+    for widget in widgets:
+        widget.update_idletasks()
+        width = widget.winfo_reqwidth()
+        extra = width if used == 0 else gap + width
+        if row is not None and used + extra > max_width:
+            row = None
+            used = 0
+            extra = width
+        if row is None:
+            row = ttk.Frame(parent)
+            row.pack(fill="x", pady=(2 if rows else 0, 0))
+            rows += 1
+        widget.pack(in_=row, side="left", padx=(0 if used == 0 else gap, 0))
+        used += extra
+
+
 def visible_recs(recs) -> list:
     """The rows to list: the info files (.meta.json) that go along with a video are not listed
     separately; lone ones are."""
@@ -95,7 +124,7 @@ class ActionDialog:
         self._refresh_job = None
         self.win, frame = dialogs.new_dialog(parent, title)
         self.win.resizable(True, True)
-        ttk.Label(frame, text=intro, wraplength=760, justify="left").pack(anchor="w")
+        ttk.Label(frame, text=intro, wraplength=FILTER_LINE, justify="left").pack(anchor="w")
 
         self.kind_vars: dict[str, tk.BooleanVar] = {}
         self.mode_var = tk.StringVar(value="all")
@@ -142,9 +171,9 @@ class ActionDialog:
         self.count_label = ttk.Label(side, text="")
         self.count_label.pack(side="left", padx=(12, 0))
 
-        self.summary = ttk.Label(frame, text="", wraplength=760, justify="left")
+        self.summary = ttk.Label(frame, text="", wraplength=FILTER_LINE, justify="left")
         self.summary.pack(anchor="w", pady=(8, 0))
-        self.warning = ttk.Label(frame, text=note, wraplength=760, justify="left", style="Error.TLabel")
+        self.warning = ttk.Label(frame, text=note, wraplength=FILTER_LINE, justify="left", style="Error.TLabel")
         self.warning.pack(anchor="w")
         self.confirm_row = ttk.Frame(frame)
         self.confirm_label = ttk.Label(self.confirm_row, text="")
@@ -178,18 +207,20 @@ class ActionDialog:
     def _build_filters(self, frame) -> None:
         box = ttk.LabelFrame(frame, text="What to include", padding=6)
         box.pack(fill="x", pady=(8, 0))
-        kinds_row = ttk.Frame(box)
-        kinds_row.pack(fill="x")
+        self.kinds_row = ttk.Frame(box)
+        self.kinds_row.pack(fill="x")
+        checks = []
         for key, label, kinds in KIND_GROUPS:
             count = sum(1 for r in self.recs if r.kind in kinds)
             size = sum(r.size for r in self.recs if r.kind in kinds)
             var = tk.BooleanVar(value=(key in DEFAULT_KINDS) and count > 0)
             self.kind_vars[key] = var
-            check = ttk.Checkbutton(kinds_row, text=f"{label} ({count:,}, {lib.fmt_size(size)})", variable=var,
+            check = ttk.Checkbutton(self.kinds_row, text=f"{label} ({count:,}, {lib.fmt_size(size)})", variable=var,
                                     command=self._scope_changed)
-            check.pack(side="left", padx=(0, 10))
             if not count:
                 check.state(["disabled"])
+            checks.append(check)
+        _pack_wrapping(self.kinds_row, checks)
         mode_row = ttk.Frame(box)
         mode_row.pack(fill="x", pady=(6, 0))
         self.mode_box = ttk.Combobox(mode_row, state="readonly", width=30, values=[m[1] for m in MODES])

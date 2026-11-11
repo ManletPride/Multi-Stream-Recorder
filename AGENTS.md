@@ -52,7 +52,7 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 | `msr/deps_dialog.py` | The **Updates** dialog (worker thread + queue + `after()`) |
 | `msr/appicon.py` | App icon, Windows AppUserModelID, tray image, shortcut / `.desktop` helpers (`create_shortcut.py` is the CLI; `assets/make_icon.py` regenerates `assets/` from the SVGs, needs cairosvg) |
 | `SECURITY.md` | Vulnerability reporting; what is stored on disk |
-| `.github/workflows/tests.yml` | unittest on Windows + Ubuntu, Python 3.10 and 3.12 |
+| `.github/workflows/tests.yml` | unittest on Windows + Ubuntu, Python 3.12 and 3.14 (Linux: Tk + Xvfb). `fail-fast` off. Require all four checks on `main` |
 | `tests/` | unittest (`python -m unittest discover -s tests -t .`) |
 
 Do not fold these back into one file without an explicit request. On Windows, `mp.set_start_method('spawn')` pickles `msr.worker.record_worker` — that function **must stay top-level in `msr.worker`**.
