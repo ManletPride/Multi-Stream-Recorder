@@ -21,6 +21,7 @@ from tkinter import ttk
 from msr import clip_core as core
 from msr import dialogs, themes, timeline_view, waveform
 from msr.nowindow import no_window_kwargs
+from msr.wheel import bind_wheel, wheel_delta
 
 POLL_MS = 40
 PLAY_POLL_MS = 4          # while playing: a frame lands within a few ms of its time
@@ -217,7 +218,7 @@ class ClipEditor:
         self.timeline.bind("<Button-1>", self._scrub)
         self.timeline.bind("<B1-Motion>", self._scrub)
         self.timeline.bind("<Double-Button-1>", lambda _e: self.zoom_reset())
-        self.timeline.bind("<MouseWheel>", self._wheel)
+        bind_wheel(self.timeline, self._wheel)
 
         times = ttk.Frame(body)
         times.grid(row=3, column=0, sticky="ew", pady=(4, 0))
@@ -397,7 +398,9 @@ class ClipEditor:
         self.seek(self.pos + mult * timeline_view.seek_step(b - a))
 
     def _wheel(self, event):
-        kind, n = timeline_view.wheel_action(event.state, event.delta)
+        # Button-4/5 become ±120; a real MouseWheel delta is passed through,
+        # so a high-resolution wheel keeps the same fractional notches.
+        kind, n = timeline_view.wheel_action(event.state, wheel_delta(event))
         L = self.marks.length or 0.0
         if kind == "zoom":
             at = self.view.t(event.x - 6, max(1, self.timeline.winfo_width() - 12), L)

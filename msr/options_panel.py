@@ -15,6 +15,8 @@ import webbrowser
 from tkinter import filedialog, ttk
 
 from msr import themes as _themes
+from msr.tooltip import Tooltip
+from msr.wheel import bind_wheel, unbind_wheel, wheel_steps, widget_is_inside
 from msr import twitch_connect as tc
 from msr import twitch_eventsub as te
 
@@ -174,29 +176,6 @@ def _ffmpeg_check(path):
     return check_ffmpeg(path)
 
 
-class _Tip:
-    """Fallback tooltip (gui.py passes its own _Tooltip)."""
-    def __init__(self, widget, text):
-        self.w, self.text, self.tip = widget, text, None
-        widget.bind("<Enter>", self.show, add="+")
-        widget.bind("<Leave>", self.hide, add="+")
-
-    def show(self, _e=None):
-        if self.tip or not self.text:
-            return
-        t = _themes.current()
-        self.tip = tk.Toplevel(self.w)
-        self.tip.wm_overrideredirect(True)
-        self.tip.wm_geometry(f"+{self.w.winfo_rootx() + 20}+{self.w.winfo_rooty() + self.w.winfo_height() + 4}")
-        tk.Label(self.tip, text=self.text, justify=tk.LEFT, background=t["entry_bg"], foreground=t["fg"],
-                 relief="solid", borderwidth=1, font=("Segoe UI", 8), padx=6, pady=4).pack()
-
-    def hide(self, _e=None):
-        if self.tip:
-            self.tip.destroy()
-            self.tip = None
-
-
 class OptionsPanel:
     def __init__(self, container, config, data_dir, apply_setting, on_twitch_changed=None,
                  tooltip=None, api=te, connect_job=tc.ConnectJob, opener=webbrowser.open,
@@ -216,7 +195,7 @@ class OptionsPanel:
         self.environ = environ
         self.sound_test = sound_test
         self.open_updates = open_updates
-        self.tip = tooltip or _Tip
+        self.tip = tooltip or Tooltip  # same helper as the rest of the window (msr/tooltip.py)
         self.job = None
         self._foreign = None   # a sign-in started elsewhere (control); shown, not driven
         self._uri = ""
@@ -237,8 +216,12 @@ class OptionsPanel:
         self._win = self.canvas.create_window(0, 0, window=self.body, anchor="nw")
         self.body.bind("<Configure>", lambda _e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._win, width=e.width))
-        self.frame.bind("<Enter>", lambda _e: self.canvas.bind_all("<MouseWheel>", self._wheel), add="+")
-        self.frame.bind("<Leave>", lambda _e: self.canvas.unbind_all("<MouseWheel>"), add="+")
+        # bind_all so the wheel works over the entries, not only the canvas.
+        # Leave also fires when the pointer moves onto a child (NotifyInferior);
+        # that must not drop the binding. Hiding the tab (Unmap) does drop it.
+        self.frame.bind("<Enter>", self._wheel_on, add="+")
+        self.frame.bind("<Leave>", self._wheel_off, add="+")
+        self.frame.bind("<Unmap>", self._wheel_unmap, add="+")
 
         self._build_twitch(t)
         if open_updates is not None:
@@ -249,9 +232,27 @@ class OptionsPanel:
         self.message.pack(fill=tk.X, pady=(6, 0))
         self.refresh_status()
 
+    def _wheel_on(self, _event=None):
+        bind_wheel(self.canvas, self._wheel, all=True)
+
+    def _wheel_off(self, _event=None):
+        try:
+            x, y = self.frame.winfo_pointerxy()
+            under = self.frame.winfo_containing(x, y)
+        except tk.TclError:
+            under = None
+        if widget_is_inside(under, self.frame):
+            return
+        unbind_wheel(self.canvas, all=True)
+
+    def _wheel_unmap(self, event):
+        if getattr(event, "widget", None) is self.frame:
+            unbind_wheel(self.canvas, all=True)
+
     def _wheel(self, e):
-        if self.canvas.yview() != (0.0, 1.0):
-            self.canvas.yview_scroll(int(-e.delta / 120), "units")
+        steps = wheel_steps(e)
+        if steps and self.canvas.yview() != (0.0, 1.0):
+            self.canvas.yview_scroll(-steps, "units")
 
     # -- building --
 

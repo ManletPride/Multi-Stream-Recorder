@@ -5,6 +5,7 @@ import logging
 import os
 import queue
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -37,6 +38,8 @@ from msr import winstate as _winstate
 from msr import restore_dialog as _restore_dialog
 from msr import logview
 from msr import themes as _themes
+from msr.tooltip import Tooltip, popup
+from msr.wheel import bind_wheel, wheel_steps
 from msr import themeui as _themeui
 from msr import theme_dialog as _theme_dialog
 from msr import wintheme as _wintheme
@@ -276,7 +279,9 @@ def main_gui(config):
     state_file = config.get('GUI', 'window_state_file', fallback='window_state.json')
     win_state = load_window_state(state_file)
     notifications_enabled = config.getboolean('GUI', 'notifications', fallback=True)
-    minimize_to_tray = config.getboolean('GUI', 'minimize_to_tray', fallback=True) and HAS_TRAY
+    # The config flag only. Whether a tray icon is actually docked is decided in
+    # setup_tray — a missing tray must never withdraw this window.
+    want_tray = config.getboolean('GUI', 'minimize_to_tray', fallback=True)
 
     # ── Theme: every colour below comes from msr/themes.py. [GUI] theme = <name> wins; an older
     # install only has dark_mode (window_state.json first, then config.ini): true -> PowerShell Blue,
@@ -503,34 +508,7 @@ def main_gui(config):
     frame_left = tk.Frame(root, padx=12, pady=12)
     frame_left.grid(row=0, column=0, sticky="ns", padx=(10, 5), pady=10)
 
-    # ── Tooltip helper (also used by the right panel) ──
-    class _Tooltip:
-        def __init__(self, widget, text):
-            self._widget = widget
-            self._text = text
-            self._tip = None
-            widget.bind("<Enter>", self._show, add="+")
-            widget.bind("<Leave>", self._hide, add="+")
-        def _show(self, event=None):
-            if self._tip:
-                return
-            text = self._text() if callable(self._text) else self._text
-            if not text:
-                return
-            x = self._widget.winfo_rootx() + 20
-            y = self._widget.winfo_rooty() + self._widget.winfo_height() + 4
-            self._tip = tw = tk.Toplevel(self._widget)
-            tw.wm_overrideredirect(True)
-            tw.wm_geometry(f"+{x}+{y}")
-            t = _themes.current()
-            tk.Label(tw, text=text, justify=tk.LEFT,
-                     background=t['entry_bg'], foreground=t['fg'],
-                     relief='solid', borderwidth=1,
-                     font=("Segoe UI", 8), padx=6, pady=4).pack()
-        def _hide(self, event=None):
-            if self._tip:
-                self._tip.destroy()
-                self._tip = None
+    # Tooltips: msr.tooltip (one helper). Do not build another override-redirect tip here.
 
     CHECK_ON = "☑"
     CHECK_OFF = "☐"
@@ -683,7 +661,14 @@ def main_gui(config):
     ch_tree.bind("<MouseWheel>", _schedule_badge_redraw)
     ch_tree.bind("<Button-4>", _schedule_badge_redraw)
     ch_tree.bind("<Button-5>", _schedule_badge_redraw)
-    badge_canvas.bind("<MouseWheel>", lambda e: (ch_tree.yview_scroll(int(-e.delta / 120), "units"), "break")[1])
+    def _badge_wheel(event):
+        # The tree's own class bindings scroll it. The badge strip is a canvas
+        # beside the rows, so the wheel has to be forwarded. yview_scroll goes
+        # through the wrapped yview, which redraws the badges.
+        ch_tree.yview_scroll(-wheel_steps(event), "units")
+        return "break"
+
+    bind_wheel(badge_canvas, _badge_wheel)
     _orig_yview = ch_tree.yview
 
     def _yview(*args):
@@ -729,14 +714,7 @@ def main_gui(config):
         _hover_hide()
         if not text:
             return
-        t = _themes.current()
-        tw = tk.Toplevel(ch_tree)
-        tw.wm_overrideredirect(True)
-        tw.wm_geometry(f"+{event.x_root + 14}+{event.y_root + 16}")
-        tk.Label(tw, text=text, justify=tk.LEFT, background=t['entry_bg'],
-                 foreground=t['fg'], relief='solid', borderwidth=1,
-                 font=("Segoe UI", 9), padx=6, pady=4).pack()
-        _hover["tip"] = tw
+        _hover["tip"] = popup(ch_tree, text, event.x_root + 14, event.y_root + 16, size=9)
         _hover["text"] = text
 
     ch_tree.bind("<Motion>", _hover_motion, add="+")
@@ -1034,7 +1012,7 @@ def main_gui(config):
     add_btn = tk.Button(add_frame, text="+  Add channel", command=add_channel,
                         font=("Segoe UI", 9), cursor="hand2")
     add_btn.pack(fill=tk.X, ipady=2)
-    _Tooltip(add_btn, "Add a Kick / Twitch / YouTube / Rumble / TikTok /\n"
+    Tooltip(add_btn, "Add a Kick / Twitch / YouTube / Rumble / TikTok /\n"
                       "Fishtank channel or a custom URL  (Ctrl+N or Insert).\n"
                       "Right-click a channel to enable, remove, or reorder.")
 
@@ -1044,7 +1022,7 @@ def main_gui(config):
         return "break"
 
     filter_entry.bind("<Return>", _search_enter)
-    _Tooltip(filter_entry, "Filter as you type (name or platform).\n"
+    Tooltip(filter_entry, "Filter as you type (name or platform).\n"
                            "Enter: add a channel with this name.  Esc: clear.")
 
     # ── Cookie status line ──
@@ -1066,7 +1044,7 @@ def main_gui(config):
         return ("Per-site cookies (cookies.txt):\n" + "\n".join(lines) +
                 f"\n\n{cp.BADGE_GLYPH} on a channel = its site needs attention.")
 
-    _Tooltip(cookie_frame, _cookie_summary_tip)
+    Tooltip(cookie_frame, _cookie_summary_tip)
 
     cookie_dot_state = ["", "muted"]  # glyph and theme token, so a theme change can repaint the dot
 
@@ -1377,7 +1355,7 @@ def main_gui(config):
         command=lambda: _reorder_status_rows() if recorder else None,
     )
     recording_first_cb.pack(side=tk.LEFT, padx=(12, 0))
-    _Tooltip(recording_first_cb,
+    Tooltip(recording_first_cb,
              "Keep Recording / Remuxing rows at the\n"
              "top of the status table, in roster order.")
 
@@ -1778,28 +1756,28 @@ def main_gui(config):
     streams_folder_btn = ttk.Button(status_header, text="Streams",
                                     command=_open_recordings_folder, width=8)
     streams_folder_btn.pack(side=tk.RIGHT)
-    _Tooltip(streams_folder_btn,
+    Tooltip(streams_folder_btn,
              "Open the recordings folder\n"
              "(streams_dir: Recorded, Processed, Clips...).")
 
     screenshot_now_btn = ttk.Button(status_header, text="Screenshot",
                                     command=_screenshot_selected_channel, width=11)
     screenshot_now_btn.pack(side=tk.RIGHT, padx=(0, 6))
-    _Tooltip(screenshot_now_btn,
+    Tooltip(screenshot_now_btn,
              "Grab a still frame from the channel\n"
              "selected in the status list.")
 
     clips_folder_btn = ttk.Button(status_header, text="Clips",
                                   command=_open_selected_clips_dir, width=6)
     clips_folder_btn.pack(side=tk.RIGHT, padx=(0, 6))
-    _Tooltip(clips_folder_btn,
+    Tooltip(clips_folder_btn,
              "Open the clips & screenshots folder\n"
              "of the channel selected in the status list.")
 
     dvr_btn = ttk.Button(status_header, text="DVR",
                          command=_clip_editor_selected_channel, width=6)
     dvr_btn.pack(side=tk.RIGHT, padx=(0, 6))
-    _Tooltip(dvr_btn,
+    Tooltip(dvr_btn,
              "Scrub back through a live recording and cut a clip\n"
              "(Clip Editor: In/Out marks, sound, live edge).\n"
              "Not recording? Opens the channel's newest finished recording.")
@@ -1819,7 +1797,7 @@ def main_gui(config):
         if clip_unavailable_reason(st):
             return f"{CATCHUP_UNAVAILABLE}.\nStill catching up from the start of the broadcast.\n\n" + _CLIP_TIP
         return _CLIP_TIP
-    _Tooltip(clip_now_btn, _clip_now_tip)
+    Tooltip(clip_now_btn, _clip_now_tip)
 
     # Whole-disk write + NIC download, right-aligned on its own row under the header.
     # Hidden when psutil is missing — there is no fallback counter.
@@ -1867,7 +1845,7 @@ def main_gui(config):
     if HAS_PSUTIL:
         status_meter_row.pack(fill=tk.X, padx=10, pady=(0, 4), after=status_header)
         io_meter_label.pack(side=tk.RIGHT)
-        _Tooltip(io_meter_label, lambda: format_tooltip(_io_sampler.last))
+        Tooltip(io_meter_label, lambda: format_tooltip(_io_sampler.last))
 
     def _show_status_context_menu(event):
         """Show context menu on status tree with options appropriate to channel state."""
@@ -2090,7 +2068,7 @@ def main_gui(config):
 
     options_panel = _options_panel.OptionsPanel(
         notebook, config, library_data_dir, _options_apply_setting,
-        on_twitch_changed=_options_twitch_changed, tooltip=_Tooltip, sound_test=sounds.test,
+        on_twitch_changed=_options_twitch_changed, tooltip=Tooltip, sound_test=sounds.test,
         open_updates=lambda: _open_updates())
     notebook.add(options_panel.frame, text="  Options  ")
 
@@ -2296,7 +2274,7 @@ def main_gui(config):
     clip_combo.pack(side=tk.RIGHT, padx=(0, 6))
     clip_combo.bind("<<ComboboxSelected>>", on_clip_length_change)
     clip_label.pack(side=tk.RIGHT, padx=(0, 2))
-    _Tooltip(clip_combo,
+    Tooltip(clip_combo,
              "Length of the clip cut when you use\n'Clip Now' on a recording channel\n"
              "(button above the status list, or\nright-click the channel).")
 
@@ -2310,7 +2288,7 @@ def main_gui(config):
     check_now_btn = ttk.Button(toggle_frame, text="Check Now",
                                command=_check_all_now, width=10)
     check_now_btn.pack(side=tk.RIGHT, padx=(0, 6))
-    _Tooltip(check_now_btn,
+    Tooltip(check_now_btn,
              "Skip the wait — immediately check all\nenabled channels for live streams.\n(Right-click a single channel for a\nper-channel Check Now.)")
 
     about_btn = ttk.Button(toggle_frame, text="About", command=_about_dialog, width=6)
@@ -2330,7 +2308,7 @@ def main_gui(config):
 
     updates_btn = ttk.Button(toggle_frame, text="Updates\u2026", command=_open_updates, width=10)
     updates_btn.pack(side=tk.RIGHT, padx=(0, 4))
-    _Tooltip(updates_btn, "Versions of MSR, yt-dlp, streamlink, ffmpeg and Python packages;\n"
+    Tooltip(updates_btn, "Versions of MSR, yt-dlp, streamlink, ffmpeg and Python packages;\n"
                           "check and install updates. A dot means updates are available.")
     _set_updates_badge(_depsupdate.remembered_updates(win_state))
 
@@ -2355,7 +2333,7 @@ def main_gui(config):
         get_state=lambda: load_window_state(state_file),
         twitch_check=_health_twitch,
         push_failed=lambda: bool(getattr(getattr(recorder, 'twitch_push', None), '_auth_failed', False)),
-        open_updates=_open_updates, logger=logging.getLogger("msr.health"), tooltip=_Tooltip)
+        open_updates=_open_updates, logger=logging.getLogger("msr.health"), tooltip=Tooltip)
     health_ctl.label.pack(side=tk.LEFT, padx=(6, 0))
     more_btn = ttk.Menubutton(toggle_frame, text="\u22ef", width=3)
     more_menu = tk.Menu(more_btn, tearoff=0)
@@ -3313,11 +3291,105 @@ def main_gui(config):
         threading.Thread(target=_bg, daemon=True, name="stop-recording").start()
 
     # ── System tray ──
+    # Hide only when an icon is actually docked. pystray's Xorg (XEmbed) backend
+    # imports on XWayland and then fails to dock under Hyprland; withdrawing
+    # anyway would leave the window gone with nothing in the bar.
     tray_icon = None
+    _tray_ready = [False]
+    _tray_hidden = [False]
+    _tray_notice = [False]
+    _dock_filter = _deps.DockFailureFilter()
+
+    def _tray_notice_once():
+        if _tray_notice[0]:
+            return
+        _tray_notice[0] = True
+        logging.info(_deps.TRAY_DISABLED_INFO)
+
+    def _stop_tray_icon(icon):
+        try:
+            icon.stop()
+        except Exception:
+            pass
+
+    def _abandon_tray():
+        """The icon did not dock. Stop it, bring the window back, log once."""
+        nonlocal tray_icon
+        _tray_ready[0] = False
+        icon = tray_icon
+        tray_icon = None
+        if icon is not None:
+            threading.Thread(target=_stop_tray_icon, args=(icon,), daemon=True,
+                             name="tray-stop").start()
+        if _tray_hidden[0]:
+            _tray_hidden[0] = False
+            try:
+                root.deiconify()
+                root.lift()
+            except tk.TclError:
+                pass
+        _tray_notice_once()
+
+    def _withdraw_for_tray():
+        """Hide the main window only when the tray icon is up. Otherwise stay shown."""
+        decision = _deps.hide_to_tray_decision(
+            _tray_ready[0], _dock_filter.failed, tray_icon is not None)
+        if decision != "withdraw":
+            _tray_hidden[0] = False
+            try:
+                if not smoke_test and str(root.state()) == "withdrawn":
+                    root.deiconify()
+            except tk.TclError:
+                pass
+            _tray_notice_once()
+            return
+        _tray_hidden[0] = True
+        root.withdraw()
+
+    def _watch_tray_dock():
+        if _dock_filter.failed:
+            _abandon_tray()
+            return
+        if tray_icon is not None:
+            root.after(1000, _watch_tray_dock)
+
+    def _poll_tray_dock(left):
+        if _dock_filter.failed:
+            _abandon_tray()
+            return
+        if tray_icon is None:
+            return
+        # Dock failure is logged before pystray marks the icon visible, so a
+        # visible icon that did not trip the filter is actually in the bar.
+        try:
+            up = bool(tray_icon.visible)
+        except Exception:
+            up = False
+        if up or left <= 0:
+            _tray_ready[0] = True
+            root.after(1000, _watch_tray_dock)
+            return
+        root.after(200, lambda: _poll_tray_dock(left - 1))
+
+    def _run_tray_icon(icon):
+        try:
+            icon.run()
+        except Exception:
+            # A dead tray thread must not dump a traceback. The poll turns the tray off.
+            _dock_filter.failed = True
 
     def setup_tray():
         nonlocal tray_icon
-        if not HAS_TRAY or not minimize_to_tray:
+        if not want_tray:
+            return
+        backend = ""
+        xembed = True
+        if HAS_TRAY and sys.platform.startswith("linux"):
+            backend = _deps.pystray_backend_name(pystray)
+            if backend == "xorg":
+                xembed = _deps.xembed_tray_present()
+        if not _deps.tray_can_start(bool(HAS_TRAY), backend, xembed):
+            _tray_notice_once()
             return
 
         def show_window(icon=None, item=None):
@@ -3325,7 +3397,7 @@ def main_gui(config):
             root.after(50, root.lift)
 
         def hide_to_tray(icon=None, item=None):
-            root.after(0, root.withdraw)
+            root.after(0, _withdraw_for_tray)
 
         def quit_app(icon=None, item=None):
             root.after(0, _full_quit)
@@ -3346,9 +3418,16 @@ def main_gui(config):
             pystray.MenuItem("Quit", quit_app),
         )
 
+        _deps.install_dock_filter(_dock_filter)
         icon_img = create_tray_icon_image(recording=False)
         tray_icon = pystray.Icon("multi_stream_recorder", icon_img, "Multi-Stream Recorder", menu)
-        threading.Thread(target=tray_icon.run, daemon=True).start()
+        threading.Thread(target=_run_tray_icon, args=(tray_icon,), daemon=True, name="tray").start()
+        if sys.platform.startswith("linux"):
+            # Dock failure is logged from the tray thread a moment after run().
+            # Windows marks the icon ready immediately (no XEmbed dock step).
+            root.after(200, lambda: _poll_tray_dock(15))
+        else:
+            _tray_ready[0] = True
 
     setup_tray()
 

@@ -20,10 +20,17 @@ websocket-client>=1.6.0   # Kick push notifications — recordings start within 
                           # go-live via Kick's WebSocket event feed (v1.7.0+)
 
 # ── Optional (GUI enhancements) ──────────────────
-pystray>=0.19.0           # System tray icon (minimize to tray)
+pystray>=0.19.0           # System tray icon (minimize to tray). On Linux the XEmbed
+                          # backend cannot dock on Hyprland/GNOME; PyGObject below is
+                          # the AppIndicator (StatusNotifierItem) backend.
 Pillow>=9.0.0             # Required by pystray for tray icon rendering (previews use Tk's PNG)
 plyer>=2.1.0              # Desktop notifications (stream started/stopped)
 colorama>=0.4.6           # Colored console/log output (Windows terminal support)
+# Linux only (Windows and macOS skip this line). Source-only: pip builds it, so the
+# system needs gobject-introspection, cairo headers and a C compiler first (see README).
+# pycairo is pulled in as its dependency. If gi cannot be imported, the tray stays off
+# (one info line, no traceback) and recording still runs.
+PyGObject>=3.50; sys_platform == "linux"
 
 # ── External tools (not pip-installable) ──────────
 # ffmpeg — required for remuxing .ts → .mp4

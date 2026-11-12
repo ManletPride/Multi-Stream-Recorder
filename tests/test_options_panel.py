@@ -161,6 +161,30 @@ class TestPanel(unittest.TestCase):
             self.root.update()
             time.sleep(0.02)
 
+    def test_wheel_over_a_child_stays_bound_and_button_4_scrolls_up(self):
+        from msr.wheel import SEQUENCES
+        p = self.make()
+        self.addCleanup(lambda: p._wheel_unmap(type("E", (), {"widget": p.frame})()))
+        p._wheel_on()
+        for seq in SEQUENCES:
+            self.assertTrue(p.canvas.bind_all(seq), seq)
+        p.frame.winfo_pointerxy = lambda: (1, 1)
+        p.frame.winfo_containing = lambda x, y: p.body
+        p._wheel_off()
+        self.assertTrue(p.canvas.bind_all("<Button-4>"))
+        p.frame.winfo_containing = lambda x, y: self.root
+        p._wheel_off()
+        self.assertEqual(p.canvas.bind_all("<Button-4>"), "")
+        scrolled = []
+        p.canvas.yview = lambda: (0.0, 0.4)
+        p.canvas.yview_scroll = lambda n, what: scrolled.append((n, what))
+
+        class Ev:
+            num, delta = 4, 0
+
+        p._wheel(Ev())
+        self.assertEqual(scrolled, [(-1, "units")])
+
     def test_initial_status_and_tooltip_text(self):
         p = self.make()
         self.assertEqual(p.status.cget("text"), "Not connected")

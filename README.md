@@ -125,7 +125,7 @@ This README describes **v3.1.3**. Full history: [CHANGELOG.md](CHANGELOG.md).
 | Python 3.10+ (CI runs 3.12 and 3.14) | Yes | Runtime. Windows/macOS installers include Tkinter; Linux needs `python3-tk` (and `python3-venv` on Debian/Ubuntu). |
 | ffmpeg + ffprobe on PATH | Yes | Remux, previews, clips, Clip Editor, some HLS recording |
 | Deno | Recommended | yt-dlp uses it for YouTube's JS challenge; without it YouTube drops every ~15 s |
-| Python packages | Installed for you | yt-dlp, streamlink, curl_cffi, websocket-client, psutil, pystray, Pillow, plyer, colorama (see `requirements.txt`) |
+| Python packages | Installed for you | yt-dlp, streamlink, curl_cffi, websocket-client, psutil, pystray, Pillow, plyer, colorama, and on Linux only PyGObject (see `requirements.txt`) |
 
 ## Install (Windows)
 
@@ -145,7 +145,19 @@ The first launch shows a small "first-time setup" window for about a minute whil
 
 Want a desktop shortcut with the icon? Run `python create_shortcut.py` once (`--data-dir D:\msr-data` for another data folder). It never replaces an existing shortcut; `--set-icon "path\to\Old.lnk"` only gives an existing one the icon.
 
-**Linux/macOS:** install ffmpeg and Tk from your package manager (`sudo apt install ffmpeg python3-tk python3-venv`, `brew install ffmpeg`), then run `python3 run_msr.pyw`. The environment is `.venv/bin/python`. `python3 create_shortcut.py --linux > ~/.local/share/applications/multi-stream-recorder.desktop` adds a menu entry.
+**Linux/macOS:** install ffmpeg and Tk from your package manager (`sudo apt install ffmpeg python3-tk python3-venv`, `brew install ffmpeg`), then run `python3 run_msr.pyw`. The environment is `.venv/bin/python`. `python3 create_shortcut.py --linux > ~/.local/share/applications/multi-stream-recorder.desktop` adds a menu entry. On Linux, install the tray libraries in the next section **before** that first launch: `requirements.txt` builds PyGObject from source, and the setup fails if the headers are missing.
+
+**Linux tray (Hyprland, GNOME, and other StatusNotifierItem bars):** `requirements.txt` installs `PyGObject>=3.50` only on Linux (`sys_platform == "linux"`). Windows and macOS skip that line. PyGObject has no wheels, so pip compiles it (and pycairo) and needs the system headers. The Ayatana typelib is what the tray icon actually loads. Install these, then launch MSR (or run `pip install -r requirements.txt` yourself):
+
+```
+# Arch / Omarchy
+sudo pacman -S gobject-introspection cairo libayatana-appindicator
+
+# Debian / Ubuntu
+sudo apt install gcc pkg-config python3-dev libgirepository-2.0-dev libcairo2-dev gir1.2-ayatanaappindicator3-0.1
+```
+
+PyGObject 3.50 and newer needs the girepository **2.0** headers (glib 2.80 or newer), which is `libgirepository-2.0-dev` on Debian/Ubuntu, plus Python headers (`python3-dev`) so pycairo can compile. An older release only has `libgirepository1.0-dev`; that is not enough for this version. On Arch the `python` package already includes headers; `base-devel` supplies the compiler. If the headers are missing and `gi` cannot be imported, recording still runs and the log has one info line: the system tray is off. No traceback. Creating the venv with `python3 -m venv --system-site-packages .venv` is the other way to see a distro `gi` that already imports AyatanaAppIndicator3. If you set `PYSTRAY_BACKEND` yourself, MSR leaves that choice alone.
 
 ### MSR's own environment (.venv)
 

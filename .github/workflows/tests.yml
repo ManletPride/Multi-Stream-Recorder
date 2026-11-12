@@ -34,6 +34,12 @@ jobs:
           # setup-python's _tkinter is linked to Tcl/Tk 8.6. Keep those
           # libraries present even when the distro's default Tk is 9.
           sudo apt-get install -y libtk8.6 libtcl8.6 || true
+          # requirements.txt installs PyGObject on Linux only, from source
+          # (no wheels). 3.50+ links girepository-2.0 (glib 2.80) and cairo.
+          # The Ayatana typelib is what the tray imports at runtime.
+          sudo apt-get install -y gcc pkg-config python3-dev libcairo2-dev \
+            libgirepository-2.0-dev gobject-introspection \
+            gir1.2-ayatanaappindicator3-0.1
 
       - name: Install ffmpeg (Windows)
         if: runner.os == 'Windows'
