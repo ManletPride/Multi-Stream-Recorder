@@ -43,7 +43,11 @@ class ReuseTests(unittest.TestCase):
         self.assertTrue(processed.endswith(os.path.join("Processed", "kick", "alice")))
         self.assertTrue(recorded.endswith(os.path.join("Recorded", "kick", "alice")))
         self.assertTrue(pending.endswith(os.path.join("PendingDeletion", "kick", "alice")))
-        self.assertFalse((self.root / "Processed").exists())
+        # On a case-insensitive volume "Processed" is the same directory as the
+        # "processed" we just created, so existence cannot prove a sibling.
+        # The listing still has exactly the name we made: reuse did not add one.
+        spellings = [p.name for p in self.root.iterdir() if p.name.lower() == "processed"]
+        self.assertEqual(spellings, ["processed"])
 
     def test_linux_reuses_the_existing_tree_and_does_not_create_a_sibling(self):
         if not _sensitive(self.root):
