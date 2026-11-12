@@ -38,6 +38,7 @@ from msr import winstate as _winstate
 from msr import restore_dialog as _restore_dialog
 from msr import logview
 from msr import themes as _themes
+from msr.context_menu import bind_context_menu
 from msr.tooltip import Tooltip, popup
 from msr.wheel import bind_wheel, wheel_steps
 from msr import themeui as _themeui
@@ -1277,7 +1278,7 @@ def main_gui(config):
         _populate_channel_tree()
         save_channels()
 
-    ch_tree.bind("<Button-3>", show_context_menu)
+    bind_context_menu(ch_tree, show_context_menu)
 
     # ── Keyboard shortcuts ──
     ch_tree.bind("<Delete>", lambda e: remove_selected())
@@ -1888,7 +1889,7 @@ def main_gui(config):
         finally:
             status_ctx_menu.grab_release()
 
-    tree.bind("<Button-3>", _show_status_context_menu)
+    bind_context_menu(tree, _show_status_context_menu)
 
     # ── Tab 2: Logs ──
     log_tab = ttk.Frame(notebook)

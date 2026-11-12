@@ -19,6 +19,7 @@ from tkinter import ttk
 from typing import Callable
 
 from msr import charts, dialogs
+from msr.context_menu import bind_context_menu
 from msr import library as lib
 from msr import library_browser as browse
 from msr import library_actions as act
@@ -256,7 +257,7 @@ class LibraryPanel:
         self.tree.bind("<Double-1>", lambda _e: self.open_selected_folder())
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._sync_buttons())
         self.tree.bind("<Control-a>", lambda _e: (self.tree.selection_set(self.tree.get_children()), "break")[1])
-        self.tree.bind("<Button-3>", self._channel_menu)
+        bind_context_menu(self.tree, self._channel_menu)
         self.menu = tk.Menu(self.tree, tearoff=0)
         self.menu.add_command(label="Open folder", command=self.open_selected_folder)
         self.menu.add_command(label="Show recordings", command=self.show_selected_recordings)

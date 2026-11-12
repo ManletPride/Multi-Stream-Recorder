@@ -56,6 +56,24 @@ class TooltipSourceTests(unittest.TestCase):
         self.assertTrue(idle)
         self.assertEqual(full, [])
 
+    def test_the_toplevel_is_created_with_the_hyprland_class(self):
+        tree = ast.parse((MSR / "tooltip.py").read_text(encoding="utf-8"))
+        found = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name != "Toplevel":
+                continue
+            classes = [kw.value for kw in node.keywords if kw.arg == "class_"]
+            found.append(classes)
+        self.assertEqual(len(found), 1, found)
+        self.assertEqual(len(found[0]), 1)
+        value = found[0][0]
+        self.assertIsInstance(value, ast.Name)
+        self.assertEqual(value.id, "POPUP_WM_CLASS")
+
     def test_options_panel_has_no_private_tip_class(self):
         src = (MSR / "options_panel.py").read_text(encoding="utf-8")
         self.assertNotIn("class _Tip", src)
@@ -114,6 +132,7 @@ class TooltipWindowTests(unittest.TestCase):
         self.assertLess(height, 200, seen)
         if "type" in seen:
             self.assertEqual(seen["type"], "tooltip")
+        self.assertEqual(tip.winfo_class(), "TkTooltip")
         # Mapped size matches what was committed before deiconify.
         tip.update_idletasks()
         tip.update()
@@ -172,58 +191,6 @@ class TooltipWindowTests(unittest.TestCase):
         self.assertLessEqual(y + height, sh)
         self.assertGreaterEqual(x, 0)
         self.assertGreaterEqual(y, 0)
-
-    def test_a_compositor_resize_snaps_back_and_then_stops(self):
-        """Omarchy floating mode maps the tip, then forces about 1100x760.
-
-        Generating that <Configure> must put the requested size back. Further
-        resizes stop after RESIZE_CORRECTIONS so the handler cannot loop.
-        """
-        import tkinter as tk
-        from msr import tooltip
-        host = tk.Label(self.root, text="host")
-        tip = tooltip.popup(host, "Versions of MSR", 40, 50, size=8)
-        self.addCleanup(tip.destroy)
-        tip.update_idletasks()
-        tip.update()
-        width, height = tip.winfo_reqwidth(), tip.winfo_reqheight()
-        placed = str(tip.wm_geometry())
-        self.assertTrue(placed.startswith(f"{width}x{height}+"), placed)
-
-        applied = []
-        real = tip.wm_geometry
-
-        def wrapped(value=None):
-            if value is not None:
-                applied.append(value)
-            return real(value)
-
-        tip.wm_geometry = wrapped
-        # The size we asked for is not a correction.
-        tip.event_generate("<Configure>", width=width, height=height)
-        self.assertEqual(applied, [])
-        # A child Configure (the label) is not the compositor resizing the tip.
-        tip.winfo_children()[0].event_generate("<Configure>", width=1100, height=760)
-        self.assertEqual(applied, [])
-
-        # The compositor's size, not a call the handler made.
-        real("1100x760+200+180")
-        tip.event_generate("<Configure>", width=1100, height=760, x=200, y=180)
-        tip.update_idletasks()
-        tip.update()
-        self.assertGreaterEqual(len(applied), 1)
-        self.assertLessEqual(len(applied), tooltip.RESIZE_CORRECTIONS)
-        self.assertTrue(all(spec == placed for spec in applied), applied)
-        self.assertEqual((tip.winfo_width(), tip.winfo_height()), (width, height))
-        self.assertEqual(str(real()), placed)
-
-        spent = len(applied)
-        applied.clear()
-        for _ in range(10):
-            tip.event_generate("<Configure>", width=1100, height=760)
-        self.assertEqual(len(applied), tooltip.RESIZE_CORRECTIONS - spent)
-        self.assertTrue(all(spec == placed for spec in applied))
-
 
 def _parse_geometry(geom: str):
     size, _, place = geom.partition("+")

@@ -1,21 +1,21 @@
 """The one override-redirect tooltip.
 
-Compositors can resize an override-redirect window after it maps. Omarchy's
-floating-workspace mode (``workspace-modes.lua``) matches every new non-modal
-window and forces ``float``, a size of about ``min(1100, 64% of the monitor)``
-by ``min(760, 68% of the monitor)``, and a centered move. That rule hits Tk's
-tooltip, so the themed label sits in the corner of a huge ``entry_bg`` box
-(measured 1100x760 on Hyprland 0.56.2). Building the window withdrawn and
-setting ``-type tooltip`` does not stop the rule. The fix is a ``<Configure>``
-handler that puts the requested ``WxH+X+Y`` back. It only does that a few
-times per tip, so a compositor that keeps resizing cannot spin the handler.
+The window is created withdrawn, with the theme background already set, so it
+is not mapped first at Tk's default size and default light background.
 
-The window is still created withdrawn, with the theme background already set,
-so it is not mapped first at Tk's default size and default light background.
+Omarchy's floating-workspace mode resizes every new non-modal window to about
+1100x760 and centers it. That rule skips a window whose class already has a
+user float rule. This tip is created with class ``TkTooltip`` so that rule
+can match it (a plain Toplevel is class ``Toplevel``, which would also catch
+dialogs). Tk menus are already class ``Menu`` and ttk combobox lists are
+``ComboboxPopdown``. The line to add is in the README. Re-applying geometry
+from ``<Configure>`` loses the race with the compositor, so this module does
+not do that.
 
 Every tip goes through :func:`popup`. Do not add another
-``wm_overrideredirect(True)`` window. Do not call ``update()`` here — this
-runs from enter/motion callbacks, and ``update()`` re-enters the Tk loop.
+``wm_overrideredirect(True)`` window; if one is added it must use
+:data:`POPUP_WM_CLASS`. Do not call ``update()`` here — this runs from
+enter/motion callbacks, and ``update()`` re-enters the Tk loop.
 """
 from __future__ import annotations
 
@@ -23,6 +23,9 @@ import sys
 import tkinter as tk
 
 from msr import themes as _themes
+
+# Hyprland class for this override-redirect window. Harmless on Windows.
+POPUP_WM_CLASS = "TkTooltip"
 
 
 def ui_font(size: int):
@@ -54,39 +57,6 @@ def clamp_tooltip_origin(x, y, width, height, screen_w, screen_h):
     return x, y
 
 
-# Omarchy applies its floating rule once on map. A few corrections cover a
-# compositor that applies it again. After that we stop: setting geometry from
-# <Configure> can itself generate <Configure>, and an endless fight would pin
-# the UI thread.
-RESIZE_CORRECTIONS = 4
-
-
-def _hold_requested_size(tw: tk.Toplevel, width: int, height: int, x: int, y: int) -> None:
-    """Snap the tip back if something else changes its size (a compositor rule)."""
-    wanted = f"{width}x{height}+{x}+{y}"
-    state = {"left": RESIZE_CORRECTIONS, "applying": False}
-
-    def on_configure(event):
-        if event.widget is not tw or state["applying"] or state["left"] <= 0:
-            return
-        try:
-            got_w, got_h = int(event.width), int(event.height)
-        except (TypeError, ValueError, tk.TclError):
-            return
-        if got_w == width and got_h == height:
-            return
-        state["left"] -= 1
-        state["applying"] = True
-        try:
-            tw.wm_geometry(wanted)
-        except tk.TclError:
-            pass
-        finally:
-            state["applying"] = False
-
-    tw.bind("<Configure>", on_configure, add="+")
-
-
 def _mark_x11_tooltip(win: tk.Toplevel) -> None:
     """Tell the window manager this is a tooltip. X11 only; ignored if unsupported."""
     try:
@@ -110,7 +80,7 @@ def popup(parent, text, x, y, size=8):
         return None
     t = _themes.current()
     bg, fg = t["entry_bg"], t["fg"]
-    tw = tk.Toplevel(parent)
+    tw = tk.Toplevel(parent, class_=POPUP_WM_CLASS)
     tw.withdraw()
     tw.configure(background=bg)
     tw.wm_overrideredirect(True)
@@ -126,10 +96,6 @@ def popup(parent, text, x, y, size=8):
     # Flush the size while withdrawn. Deiconify alone maps the window first and
     # applies geometry afterwards, which is the grey flash.
     tw.update_idletasks()
-    # Bound before map, so the compositor's resize (which arrives as
-    # <Configure> just after map) is caught. The initial size is already the
-    # requested one, so that event does not spend a correction.
-    _hold_requested_size(tw, width, height, x, y)
     tw.deiconify()
     return tw
 
