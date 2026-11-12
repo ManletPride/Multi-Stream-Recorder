@@ -113,22 +113,34 @@ def bar_rows(stats: lib.LibraryStats, count: int = TOP_CHANNELS):
     return rows
 
 
+def _button_width(button) -> int:
+    """Pixels the button actually occupies. The request can be a few short of the drawn width."""
+    req = int(button.winfo_reqwidth())
+    try:
+        drawn = int(button.winfo_width())
+    except tk.TclError:
+        return req
+    return max(req, drawn) if drawn > 1 else req
+
+
 def button_rows(width: int, buttons, gap: int = 6) -> list[list]:
     """Split buttons into left-to-right rows that fit in ``width``.
 
     A width that is not real yet (the widget has not been mapped) returns no
     rows, so the caller keeps whatever it already placed. The gap is the space
-    between two buttons, not an extra margin on the row.
+    between two buttons. One gap is kept spare: a themed button can draw a few
+    pixels past its request, and that was clipping the last button on the row.
     """
     if width <= 1:
         return []
+    budget = max(1, width - gap)
     rows: list[list] = []
     row: list = []
     used = 0
     for button in buttons:
-        need = button.winfo_reqwidth()
+        need = _button_width(button)
         extra = gap if row else 0
-        if row and used + extra + need > width:
+        if row and used + extra + need > budget:
             rows.append(row)
             row = []
             used = 0
@@ -208,6 +220,7 @@ class LibraryPanel:
         # last button is not clipped ("Remove fold").
         place_button_rows(self._toolbar_buttons, [list(self._toolbar_buttons)])
         self._toolbar_sig = (tuple(id(b) for b in self._toolbar_buttons),)
+        self._toolbar_fix = None
         bar.bind("<Configure>", self._layout_toolbar)
         self.progress = ttk.Progressbar(frame, mode="indeterminate", length=200)
 
@@ -267,12 +280,36 @@ class LibraryPanel:
             self.start_scan()
 
     def _layout_toolbar(self, _event=None) -> None:
-        rows = button_rows(self.toolbar.winfo_width(), self._toolbar_buttons)
+        width = self.toolbar.winfo_width()
+        if width <= 1:
+            return
+        self._apply_toolbar_rows(button_rows(width, self._toolbar_buttons))
+        # The drawn row can still stick out by a few pixels after the request
+        # was used. Measure once the geometry has settled and wrap that leftover.
+        if self._toolbar_fix is None:
+            self._toolbar_fix = self.toolbar.after_idle(self._fix_toolbar_overflow)
+
+    def _apply_toolbar_rows(self, rows) -> None:
         sig = tuple(tuple(id(b) for b in row) for row in rows)
         if not rows or sig == self._toolbar_sig:
             return
         self._toolbar_sig = sig
         place_button_rows(self._toolbar_buttons, rows)
+
+    def _fix_toolbar_overflow(self) -> None:
+        self._toolbar_fix = None
+        try:
+            width = self.toolbar.winfo_width()
+        except tk.TclError:
+            return
+        if width <= 1:
+            return
+        overflow = 0
+        for button in self._toolbar_buttons:
+            if button.winfo_width() > 1:
+                overflow = max(overflow, button.winfo_x() + button.winfo_width() - width)
+        if overflow > 0:
+            self._apply_toolbar_rows(button_rows(width - overflow, self._toolbar_buttons))
 
     @property
     def toplevel(self):

@@ -111,6 +111,20 @@ class PureTests(unittest.TestCase):
         self.assertEqual(lw.sorted_channels(chans, "size", True, "", True), [chans[0]])  # unknown (None) is not 'not in roster'
         self.assertEqual(len(lw.sorted_channels(chans, "nonsense", True)), 15)  # unknown column falls back to size
 
+    def test_button_rows_use_the_drawn_width_when_the_request_is_short(self):
+        # Ubuntu CI drew "Copy summary" 6px past the pane: the request fit, the
+        # themed button did not. The spare gap plus the drawn width must wrap it.
+        class Button:
+            def __init__(self, req, drawn):
+                self.req, self.drawn = req, drawn
+            def winfo_reqwidth(self):
+                return self.req
+            def winfo_width(self):
+                return self.drawn
+        buttons = [Button(60, 70), Button(60, 70), Button(60, 70)]
+        rows = lw.button_rows(220, buttons)
+        self.assertEqual([len(row) for row in rows], [2, 1])
+
 
 class WindowTests(Case):
     def test_scan_fills_text_charts_and_table(self):
