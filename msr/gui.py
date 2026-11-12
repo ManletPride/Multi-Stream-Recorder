@@ -39,6 +39,7 @@ from msr import restore_dialog as _restore_dialog
 from msr import logview
 from msr import themes as _themes
 from msr.tooltip import Tooltip, popup
+from msr.wheel import bind_wheel, wheel_steps
 from msr import themeui as _themeui
 from msr import theme_dialog as _theme_dialog
 from msr import wintheme as _wintheme
@@ -660,7 +661,14 @@ def main_gui(config):
     ch_tree.bind("<MouseWheel>", _schedule_badge_redraw)
     ch_tree.bind("<Button-4>", _schedule_badge_redraw)
     ch_tree.bind("<Button-5>", _schedule_badge_redraw)
-    badge_canvas.bind("<MouseWheel>", lambda e: (ch_tree.yview_scroll(int(-e.delta / 120), "units"), "break")[1])
+    def _badge_wheel(event):
+        # The tree's own class bindings scroll it. The badge strip is a canvas
+        # beside the rows, so the wheel has to be forwarded. yview_scroll goes
+        # through the wrapped yview, which redraws the badges.
+        ch_tree.yview_scroll(-wheel_steps(event), "units")
+        return "break"
+
+    bind_wheel(badge_canvas, _badge_wheel)
     _orig_yview = ch_tree.yview
 
     def _yview(*args):

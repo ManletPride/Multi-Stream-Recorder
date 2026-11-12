@@ -16,6 +16,7 @@ from tkinter import filedialog, ttk
 
 from msr import themes as _themes
 from msr.tooltip import Tooltip
+from msr.wheel import bind_wheel, unbind_wheel, wheel_steps, widget_is_inside
 from msr import twitch_connect as tc
 from msr import twitch_eventsub as te
 
@@ -215,8 +216,12 @@ class OptionsPanel:
         self._win = self.canvas.create_window(0, 0, window=self.body, anchor="nw")
         self.body.bind("<Configure>", lambda _e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._win, width=e.width))
-        self.frame.bind("<Enter>", lambda _e: self.canvas.bind_all("<MouseWheel>", self._wheel), add="+")
-        self.frame.bind("<Leave>", lambda _e: self.canvas.unbind_all("<MouseWheel>"), add="+")
+        # bind_all so the wheel works over the entries, not only the canvas.
+        # Leave also fires when the pointer moves onto a child (NotifyInferior);
+        # that must not drop the binding. Hiding the tab (Unmap) does drop it.
+        self.frame.bind("<Enter>", self._wheel_on, add="+")
+        self.frame.bind("<Leave>", self._wheel_off, add="+")
+        self.frame.bind("<Unmap>", self._wheel_unmap, add="+")
 
         self._build_twitch(t)
         if open_updates is not None:
@@ -227,9 +232,27 @@ class OptionsPanel:
         self.message.pack(fill=tk.X, pady=(6, 0))
         self.refresh_status()
 
+    def _wheel_on(self, _event=None):
+        bind_wheel(self.canvas, self._wheel, all=True)
+
+    def _wheel_off(self, _event=None):
+        try:
+            x, y = self.frame.winfo_pointerxy()
+            under = self.frame.winfo_containing(x, y)
+        except tk.TclError:
+            under = None
+        if widget_is_inside(under, self.frame):
+            return
+        unbind_wheel(self.canvas, all=True)
+
+    def _wheel_unmap(self, event):
+        if getattr(event, "widget", None) is self.frame:
+            unbind_wheel(self.canvas, all=True)
+
     def _wheel(self, e):
-        if self.canvas.yview() != (0.0, 1.0):
-            self.canvas.yview_scroll(int(-e.delta / 120), "units")
+        steps = wheel_steps(e)
+        if steps and self.canvas.yview() != (0.0, 1.0):
+            self.canvas.yview_scroll(-steps, "units")
 
     # -- building --
 
