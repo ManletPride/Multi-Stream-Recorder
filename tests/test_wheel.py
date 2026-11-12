@@ -68,9 +68,16 @@ class BindWheelTests(unittest.TestCase):
         self.frame.event_generate("<MouseWheel>", delta=240)
         self.root.update()
         self.root.withdraw()
-        # MouseWheel's num is Tk's '??' (not a button). Button-4/5 are 4 and 5.
-        self.assertEqual(seen, [(4, 0), (5, 0), ("??", 240)])
-        self.assertEqual(wheel_steps(type("E", (), {"num": "??", "delta": 240})()), 2)
+        self.assertEqual(len(seen), 3, seen)
+        # A real X11 wheel is num 4 and 5 (locked in by WheelStepTests). Generating
+        # <Button-4>/<Button-5> on Windows Tk (Python 3.14) comes back as button
+        # 8 and 9; the real Windows wheel is <MouseWheel>, whose delta is kept.
+        self.assertEqual(seen[0][1], 0)
+        self.assertEqual(seen[1][1], 0)
+        self.assertIn(seen[0][0], (4, 8))
+        self.assertIn(seen[1][0], (5, 9))
+        self.assertEqual(seen[2][1], 240)
+        self.assertEqual(wheel_steps(type("E", (), {"num": seen[2][0], "delta": seen[2][1]})()), 2)
         unbind_wheel(self.frame)
         for seq in SEQUENCES:
             self.assertEqual(self.frame.bind(seq), "")
