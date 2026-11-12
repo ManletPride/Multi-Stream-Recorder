@@ -17,6 +17,7 @@ from tkinter import ttk
 from typing import Callable
 
 from msr import charts, dialogs
+from msr.context_menu import bind_context_menu
 from msr import library as lib
 from msr import library_actions as act
 from msr import library_dialog as ldialog
@@ -303,7 +304,7 @@ class FilesTab:
         self.tree.bind("<Control-a>", lambda _e: (self.check_all(), "break")[1])
         self.tree.bind("<Delete>", lambda _e: (self.delete(), "break")[1])
         self.tree.bind("<Double-1>", self._double)
-        self.tree.bind("<Button-3>", self._menu)
+        bind_context_menu(self.tree, self._menu)
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._sync())
         self.menu = tk.Menu(self.tree, tearoff=0)
         self.menu.add_command(label="Tick / untick selected", command=self.toggle_selected)

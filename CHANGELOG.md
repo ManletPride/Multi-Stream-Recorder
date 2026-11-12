@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- Linux: a right-click opens the menu and leaves it open until an item is chosen, the pointer clicks elsewhere, or Esc. X11 was posting the menu on button press, so the release invoked the item under the pointer (Enable on a channel, for example). Channel list, status list, and the Library menus open on button release there (`msr/context_menu.py`). Windows still opens on button press.
 - Linux: the mouse wheel scrolls the Options tab, the channel-list badge strip, and the Clip Editor timeline. X11 sends Button-4/Button-5 rather than MouseWheel; those go through `msr/wheel.py`. Library, Logs and the other lists already scrolled (Tk's own Button-4/5 bindings).
 - Linux: hover tooltips no longer flash a large box. The tip is one withdrawn, theme-coloured window (`msr/tooltip.py`), sized and then shown, with window class `TkTooltip`. On X11 the window is marked as a tooltip. Windows tips are unchanged.
 - Linux (Hyprland / Omarchy): floating workspaces resize Tk menus, combobox lists and tooltips to about 1100x760. A user float rule for classes `Menu`, `ComboboxPopdown` and `TkTooltip` leaves them at the size Tk posted. The tooltip window uses that class. The rule is in the README.

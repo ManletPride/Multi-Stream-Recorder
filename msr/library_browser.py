@@ -24,6 +24,7 @@ from typing import Callable
 import inspect
 
 from msr import dialogs
+from msr.context_menu import bind_context_menu
 from msr import library as lib
 from msr.recordings_index import (  # noqa: F401  (Tk-free part, re-exported)
     CLIP_EXT, COLUMNS, LIST_CATEGORIES, _COLUMN, _DERIVED_RE, _STAMP_RE, ClipRef, Recording, _clip_source,
@@ -93,7 +94,7 @@ class RecordingsTab:
         self.tree.bind("<<TreeviewClose>>", lambda _e: self._opened(False))
         self.tree.bind("<Return>", lambda _e: self.play())
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._sync())
-        self.tree.bind("<Button-3>", self._menu)
+        bind_context_menu(self.tree, self._menu)
         self.menu = tk.Menu(self.tree, tearoff=0)   # filled per row in _menu()
         if clip_editor is None:
             self.clip_btn.pack_forget()
