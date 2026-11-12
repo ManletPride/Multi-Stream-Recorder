@@ -173,6 +173,57 @@ class TooltipWindowTests(unittest.TestCase):
         self.assertGreaterEqual(x, 0)
         self.assertGreaterEqual(y, 0)
 
+    def test_a_compositor_resize_snaps_back_and_then_stops(self):
+        """Omarchy floating mode maps the tip, then forces about 1100x760.
+
+        Generating that <Configure> must put the requested size back. Further
+        resizes stop after RESIZE_CORRECTIONS so the handler cannot loop.
+        """
+        import tkinter as tk
+        from msr import tooltip
+        host = tk.Label(self.root, text="host")
+        tip = tooltip.popup(host, "Versions of MSR", 40, 50, size=8)
+        self.addCleanup(tip.destroy)
+        tip.update_idletasks()
+        tip.update()
+        width, height = tip.winfo_reqwidth(), tip.winfo_reqheight()
+        placed = str(tip.wm_geometry())
+        self.assertTrue(placed.startswith(f"{width}x{height}+"), placed)
+
+        applied = []
+        real = tip.wm_geometry
+
+        def wrapped(value=None):
+            if value is not None:
+                applied.append(value)
+            return real(value)
+
+        tip.wm_geometry = wrapped
+        # The size we asked for is not a correction.
+        tip.event_generate("<Configure>", width=width, height=height)
+        self.assertEqual(applied, [])
+        # A child Configure (the label) is not the compositor resizing the tip.
+        tip.winfo_children()[0].event_generate("<Configure>", width=1100, height=760)
+        self.assertEqual(applied, [])
+
+        # The compositor's size, not a call the handler made.
+        real("1100x760+200+180")
+        tip.event_generate("<Configure>", width=1100, height=760, x=200, y=180)
+        tip.update_idletasks()
+        tip.update()
+        self.assertGreaterEqual(len(applied), 1)
+        self.assertLessEqual(len(applied), tooltip.RESIZE_CORRECTIONS)
+        self.assertTrue(all(spec == placed for spec in applied), applied)
+        self.assertEqual((tip.winfo_width(), tip.winfo_height()), (width, height))
+        self.assertEqual(str(real()), placed)
+
+        spent = len(applied)
+        applied.clear()
+        for _ in range(10):
+            tip.event_generate("<Configure>", width=1100, height=760)
+        self.assertEqual(len(applied), tooltip.RESIZE_CORRECTIONS - spent)
+        self.assertTrue(all(spec == placed for spec in applied))
+
 
 def _parse_geometry(geom: str):
     size, _, place = geom.partition("+")
