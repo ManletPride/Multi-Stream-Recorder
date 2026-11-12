@@ -112,8 +112,8 @@ class PureTests(unittest.TestCase):
         self.assertEqual(len(lw.sorted_channels(chans, "nonsense", True)), 15)  # unknown column falls back to size
 
     def test_button_rows_use_the_drawn_width_when_the_request_is_short(self):
-        # Ubuntu CI drew "Copy summary" 6px past the pane: the request fit, the
-        # themed button did not. The spare gap plus the drawn width must wrap it.
+        # The drawn width is what has to fit. A short request would leave the
+        # last button of the line past the pane.
         class Button:
             def __init__(self, req, drawn):
                 self.req, self.drawn = req, drawn
@@ -363,10 +363,20 @@ class WindowTests(Case):
         remove = win.remove_folder_btn
 
         def inside():
+            by_line: dict[int, list] = {}
             for button in win._toolbar_buttons:
                 self.assertGreaterEqual(button.winfo_width(), button.winfo_reqwidth() - 2, button.cget("text"))
                 self.assertGreaterEqual(button.winfo_x(), 0)
                 self.assertLessEqual(button.winfo_x() + button.winfo_width(), bar.winfo_width() + 2, button.cget("text"))
+                by_line.setdefault(button.winfo_y(), []).append(button)
+            # A button on the next line must not widen the columns of this line.
+            # That is what pushed "Copy summary" past the pane on the Ubuntu runners.
+            for group in by_line.values():
+                group.sort(key=lambda b: b.winfo_x())
+                x = 0
+                for button in group:
+                    self.assertLessEqual(abs(button.winfo_x() - x), 2, button.cget("text"))
+                    x += button.winfo_width() + 6
 
         self.assertEqual(remove.winfo_y(), win.rescan_btn.winfo_y())
         inside()
