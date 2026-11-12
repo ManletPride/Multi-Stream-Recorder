@@ -121,9 +121,10 @@ GUI_FEATURES = {
     "Options tab: Twitch connect / disconnect": ["twitch status", "twitch connect", "twitch disconnect"],
     "Options tab: Sounds (checkboxes = config set Sounds.*, Test button)": ["config set", "sound-test"],
     "Health line and details": ["health", "config set"],
-    "Library tab, PendingDeletion / Clean up": ["library summary", "library files", "library plan", "library run",
-                                                "library pending", "library batches", "library restore",
-                                                "library suggest", "library log"],
+    "Library tab, PendingDeletion / Clean up (Add folder / Remove folder is config set Library.extra_dirs)":
+        ["library summary", "library files", "library plan", "library run",
+         "library pending", "library batches", "library restore",
+         "library suggest", "library log", "config set"],
     "Library > Recordings (list, search, sort, clips under each recording)": ["recordings"],
     "Logs tab": ["logs"],
     "Updates window": ["update check", "update install", "deps"],

@@ -1209,8 +1209,9 @@ class Controller:
             raise ControlError(str(e), "invalid") from None
         if start >= length:
             raise ControlError(f"from is past the end ({core.fmt_time(length)}).", "invalid")
+        from msr.util import reuse_dir
         base = (config.get("Clipping", "clips_dir", fallback="") or "").strip() or \
-            os.path.join(config.get("Paths", "streams_dir"), "Clips")
+            reuse_dir(config.get("Paths", "streams_dir"), "Clips")
         job = (os.path.normcase(src), "cut")
         self._claim(job, "A clip of this file is already being made.")
         try:
@@ -1249,10 +1250,11 @@ class Controller:
             raw = find_active_recording_file(rec, key)
             if not raw:
                 raise ControlError("No active recording file found for this channel.", "not_found")
+            from msr.util import reuse_dir, reuse_path
             platform, username_dir = channel_key_to_dirs(key)
             base = (config.get("Clipping", "clips_dir", fallback="") or "").strip() or \
-                os.path.join(config.get("Paths", "streams_dir"), "Clips")
-            out_dir = os.path.join(base, platform, username_dir)
+                reuse_dir(config.get("Paths", "streams_dir"), "Clips")
+            out_dir = reuse_path(base, platform, username_dir)
             stem = channel_file_stem(username_dir)
             stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             ffmpeg = config.get("Advanced", "ffmpeg_path", fallback="ffmpeg") or "ffmpeg"
@@ -1705,7 +1707,7 @@ class Controller:
         if order not in ("asc", "desc"):
             raise ControlError("order must be asc or desc.", "bad_request")
         ch = self._archive_channel(args["channel"])
-        recs, loose = ri.channel_listing(ch.paths)
+        recs, loose = ri.channel_listing(ch.listing_map())
         rows = ri.filter_sort(recs, str(args.get("text") or ""), sort, order == "desc")
         limit = max(1, min(int(args.get("limit", 200)), 20000))
         with_clips = not (args.get("clips") is not None and not _truthy(args.get("clips")))
@@ -1723,10 +1725,12 @@ class Controller:
             raise ControlError(f"No such file: {args.get('path')}", "not_found")
         want = os.path.normcase(path)
         for ch in self._archive_channels():
-            folders = [v for k, v in ch.paths.items() if k in ri.LIST_CATEGORIES + ("clips",)]
+            folders = []
+            for values in ch.listing_map().values():
+                folders.extend(values if isinstance(values, list) else [values])
             if not any(want.startswith(os.path.normcase(os.path.abspath(f)) + os.sep) for f in folders):
                 continue
-            recs, _loose = ri.channel_listing(ch.paths)
+            recs, _loose = ri.channel_listing(ch.listing_map())
             for r in recs:
                 if os.path.normcase(r.path) == want:
                     if r.orphan:

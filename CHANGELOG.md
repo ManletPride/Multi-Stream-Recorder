@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- Linux: the Library counts `processed` / `recorded` / `PendingDeletion` / `Clips` (and the platform folders under them) whatever their case is, and merges every variant that exists. A drive that still has the lowercase folders Windows wrote no longer shows up as a handful of files in a new `Processed` folder. New recordings and remuxes reuse the existing folder instead of creating a differently-cased sibling. Windows paths are unchanged.
 - Linux: a right-click opens the menu and leaves it open until an item is chosen, the pointer clicks elsewhere, or Esc. X11 was posting the menu on button press, so the release invoked the item under the pointer (Enable on a channel, for example). Channel list, status list, and the Library menus open on button release there (`msr/context_menu.py`). Windows still opens on button press.
 - Linux: the mouse wheel scrolls the Options tab, the channel-list badge strip, and the Clip Editor timeline. X11 sends Button-4/Button-5 rather than MouseWheel; those go through `msr/wheel.py`. Library, Logs and the other lists already scrolled (Tk's own Button-4/5 bindings).
 - Linux: hover tooltips no longer flash a large box. The tip is one withdrawn, theme-coloured window (`msr/tooltip.py`), sized and then shown, with window class `TkTooltip`. On X11 the window is marked as a tooltip. Windows tips are unchanged.
@@ -12,6 +13,7 @@
 - CI: Twitch validate-401 refresh test no longer depends on process uptime (`time.monotonic` vs a 1-hour validate interval); force the hourly validate path so GitHub runners with a fresh boot pass the same as a long-uptime PC.
 
 ### Changed
+- Library tab: **Add folder…** and **Remove folder** remember extra folders in `[Library] extra_dirs` (the same `;`-separated setting as Options). Videos in those folders are attributed to a site and channel from the `.meta.json` sidecar, then from a parent folder named like a known platform, then left under Other / (unsorted). The date prefers the sidecar, then the date in the file name. The scan only reads; it never writes inside a recordings folder. Count hours still uses `duration_seconds` from the sidecar. `msr_ctl config set Library.extra_dirs` changes the same list.
 - Pinned Status preview is sharper (960x540 still from the live edge). Strip tiles stay 160x90; there is still no full-window 1080p preview.
 
 ## v3.1.3 (2026-11-05)

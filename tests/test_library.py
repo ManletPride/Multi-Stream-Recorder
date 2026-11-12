@@ -116,9 +116,12 @@ class ScanTests(Tree):
         put(self.root / "Clips/kick/alice/ignored.mp4", 99)  # not used: an override is set
         s = lib.scan_library(lib.Roots(str(self.root), str(clips), (str(extra), str(extra / "nope"))))
         self.assertEqual(s.cat("clips"), (30, 1))
-        self.assertEqual(s.cat("other"), (1005, 2))
-        self.assertEqual(s.recordings_bytes, 0)  # extra folders are not "recordings" and make no channels
-        self.assertEqual(s.channels.get(("other", "season1")), None)
+        # Videos in an extra folder are attributed (folder name, else unsorted). Not cleaned up.
+        self.assertEqual(s.cat("other"), (0, 0))
+        self.assertEqual(s.recordings_bytes, 1005)
+        self.assertEqual(s.channels[("other", "season1")].rec_bytes, 1000)
+        self.assertEqual(s.channels[("other", lib.UNSORTED)].rec_bytes, 5)
+        self.assertEqual(s.files, [])  # collect_files is off; extras never become a clean-up list
         self.assertTrue(s.roots_found["Other folder 1"])
         self.assertFalse(s.roots_found["Other folder 2"])
 
@@ -422,6 +425,162 @@ class JobTests(Tree):
         self.assertEqual((r.streams_dir, r.clips_dir, r.extra_dirs), ("X", "", ("A", "B")))
         r = lib.roots_from_config(Cfg({}))
         self.assertEqual((r.streams_dir, r.extra_dirs), ("", ()))
+
+
+def _snapshot(root: Path):
+    """Path, size and mtime of every file and folder. Reading must not change this."""
+    rows = []
+    for path in sorted(root.rglob("*")):
+        st = path.lstat()
+        rows.append((str(path.relative_to(root)), st.st_mtime_ns, st.st_size, stat_mode(st)))
+    return rows
+
+
+def stat_mode(st):
+    return st.st_mode
+
+
+def _case_sensitive(folder: Path) -> bool:
+    low, high = folder / "case_a", folder / "case_A"
+    low.mkdir()
+    try:
+        high.mkdir()
+    except FileExistsError:
+        return False
+    try:
+        return not os.path.samefile(low, high)
+    finally:
+        high.rmdir()
+        low.rmdir()
+
+
+class CaseMergeTests(Tree):
+    """processed and Processed are one library. The scan never writes into the tree."""
+
+    def setUp(self):
+        super().setUp()
+        if not _case_sensitive(self.root):
+            self.skipTest("this volume cannot hold two folders that differ only by case")
+
+    def test_both_cases_are_merged_and_not_double_counted(self):
+        put(self.root / "processed/kick/alice/a_20260101_000000.mp4", 10)
+        put(self.root / "Processed/kick/alice/b_20260102_000000.mp4", 20)
+        put(self.root / "recorded/kick/alice/a_20260103_000000.ts", 30)
+        put(self.root / "Recorded/kick/alice/b_20260104_000000.ts", 40)
+        put(self.root / "clips/kick/alice/c.mp4", 5)
+        put(self.root / "Clips/kick/alice/d.mp4", 7)
+        put(self.root / "PendingDeletion/twitch/bob/old.mp4", 9)
+        # same bytes reached twice (a hard link) count once
+        src = self.root / "processed/kick/alice/a_20260101_000000.mp4"
+        link = self.root / "Processed/kick/alice/linked.mp4"
+        try:
+            os.link(src, link)
+            linked = True
+        except OSError:
+            linked = False
+        before = _snapshot(self.root)
+        s = lib.scan_library(lib.Roots(str(self.root)), collect_files=True)
+        self.assertEqual(_snapshot(self.root), before)
+        self.assertEqual(s.channels[("kick", "alice")].rec_bytes, 30)
+        self.assertEqual(s.channels[("kick", "alice")].raw_bytes, 70)
+        self.assertEqual(s.channels[("kick", "alice")].clip_bytes, 12)
+        # a.mp4 and b.mp4. A hard link of a.mp4 under the other tree is the same file.
+        self.assertEqual(s.cat("processed"), (30, 2))
+        self.assertEqual(linked, bool(link.exists()) and os.path.samefile(src, link))
+        self.assertEqual(s.cat("clips"), (12, 2))
+        self.assertEqual(len([c for c in s.channels if c[0] == "kick"]), 1)
+        self.assertTrue(s.roots_found["Processed"] and s.roots_found["Recorded"] and s.roots_found["Clips"])
+        # both trees are remembered, so the Recordings list can open either
+        self.assertEqual(len(s.channels[("kick", "alice")].all_paths["processed"]), 2)
+
+    def test_only_lowercase_and_only_capitalized(self):
+        put(self.root / "processed/fishtank/cameraman/cam_20260201_000000.mp4", 756)
+        low = lib.scan_library(lib.Roots(str(self.root)))
+        self.assertEqual(low.channels[("fishtank", "cameraman")].rec_bytes, 756)
+        self.assertEqual(low.cat("processed"), (756, 1))
+        # a second tree that is only the capitalized name
+        other = Path(self.tmp.name) / "only_caps"
+        put(other / "Processed/kick/betty/b_20260301_000000.mp4", 99)
+        put(other / "Recorded/kick/betty/b_20260302_000000.ts", 11)
+        caps = lib.scan_library(lib.Roots(str(other)))
+        self.assertEqual(caps.channels[("kick", "betty")].recordings_bytes, 110)
+        self.assertEqual(caps.cat("raw"), (11, 1))
+
+    def test_platform_folder_case_is_one_channel(self):
+        put(self.root / "processed/Kick/Alice/a_20260101_000000.mp4", 10)
+        put(self.root / "processed/kick/alice/b_20260102_000000.mp4", 15)
+        s = lib.scan_library(lib.Roots(str(self.root)))
+        self.assertEqual(len(s.channels), 1)
+        self.assertEqual(s.channels[("kick", "alice")].rec_bytes, 25)
+
+
+class ExtraAttributionTests(Tree):
+    def test_sidecar_then_folder_then_filename_then_unsorted(self):
+        extra = Path(self.tmp.name) / "archive"
+        sidecar = {
+            "version": "3.0.0", "channel": "zackrawrr", "platform": "Twitch",
+            "recording_started": "2026-11-01T18:14:46.639489",
+            "duration_seconds": 7927.8, "duration_human": "2:12:07",
+            "stream_title": "a night", "file": "zackrawrr_20200101_000000.mp4",
+            "recorded_at": "2026-11-01T20:27:16.773334",
+        }
+        # filename date disagrees with the sidecar; the sidecar wins
+        video = put(extra / "Streamers/betty/kick/zackrawrr_20200101_000000.mp4", 100)
+        video.with_name(video.name.rsplit(".", 1)[0] + ".meta.json").write_text(
+            json.dumps(sidecar), encoding="utf-8")
+        # no sidecar: platform from the folder, channel under it, date from the name
+        put(extra / "kick/betty_fae/betty_fae_20260202_120000.mp4", 50)
+        # folder name is not a known platform: channel is the folder, site is Other
+        put(extra / "other_kick_processed/cameraman/cam_20260303_000000.mp4", 40)
+        # a folder that is not a known platform: the channel is that folder, under Other
+        put(extra / "Grok-Auto-Clipper-Clips/clip_20260707_000000.mp4", 4)
+        # nothing to go on (sits in the extra folder itself)
+        put(extra / "loose.mp4", 7)
+        put(extra / "notes.txt", 3)  # not a recording
+        # older sidecar with only a duration: folder names supply the channel
+        thin = put(extra / "youtube/dave/dave_20260404_000000.mp4", 8)
+        thin.with_name(thin.name.rsplit(".", 1)[0] + ".meta.json").write_text(
+            json.dumps({"duration_seconds": 12}), encoding="utf-8")
+        # a broken sidecar is ignored, not fatal
+        bad = put(extra / "rumble/news/news_20260505_000000.mp4", 6)
+        bad.with_name(bad.name.rsplit(".", 1)[0] + ".meta.json").write_bytes(b"{not json")
+        before = _snapshot(extra)
+        s = lib.scan_library(lib.Roots(str(self.root), extra_dirs=(str(extra),)), collect_files=True)
+        self.assertEqual(_snapshot(extra), before)
+        self.assertEqual(s.files, [])  # extra folders are never a clean-up candidate
+        zack = s.channels[("twitch", "zackrawrr")]
+        self.assertEqual(zack.rec_bytes, 100)
+        self.assertEqual(lib.month_key(zack.last), "2026-11")
+        self.assertEqual(s.channels[("kick", "betty_fae")].rec_bytes, 50)
+        self.assertIn("2026-02", s.months)
+        self.assertEqual(s.channels[("other", "cameraman")].rec_bytes, 40)
+        grok = s.channels[("other", "grok-auto-clipper-clips")]
+        self.assertEqual(grok.name, "Grok-Auto-Clipper-Clips")
+        self.assertEqual(grok.rec_bytes, 4)
+        self.assertEqual(s.channels[("other", lib.UNSORTED)].rec_bytes, 7)
+        self.assertIn("2026-07", s.months)
+        self.assertEqual(s.cat("other"), (3, 1))  # notes.txt only
+        self.assertEqual(s.cat("sidecars")[1], 3)  # zack, dave, and the broken one
+        cache = Path(self.tmp.name) / "appdata" / "library_cache.json"
+        cache.parent.mkdir()
+        known, missing = lib.count_hours(s, lib.DurationCache(str(cache)), None)
+        self.assertTrue(cache.is_file())
+        self.assertFalse(str(cache).startswith(str(extra)))
+        self.assertEqual(_snapshot(extra), before)  # hours still do not touch the media
+        self.assertAlmostEqual(zack.seconds, 7927.8)
+        self.assertAlmostEqual(s.channels[("youtube", "dave")].seconds, 12)
+        self.assertGreaterEqual(known, 2)
+        self.assertGreater(missing, 0)
+
+    def test_add_and_remove_extra_dir_list(self):
+        dirs = ("/mnt/media/Streamers",)
+        added = lib.add_extra_dir(dirs, "/mnt/media/Streamers")
+        self.assertIsInstance(added, str)
+        added = lib.add_extra_dir(dirs, "/mnt/media/other_kick_processed/")
+        self.assertEqual(added[-1], os.path.normpath("/mnt/media/other_kick_processed/"))
+        self.assertEqual(lib.remove_extra_dir(added, added[0]), (added[-1],))
+        self.assertEqual(lib.join_extra_dirs(added), ";".join(added))
+        self.assertEqual(lib.add_extra_dir((), "  "), "Choose a folder.")
 
 
 if __name__ == "__main__":

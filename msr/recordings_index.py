@@ -115,45 +115,68 @@ def make_recording(path: str, size: int, mtime: float, raw: bool) -> Recording:
     return Recording(path, name, when, seconds, str(title).strip(), size, raw)
 
 
+def _folder_list(value) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return [v for v in value if v]
+
+
 def list_recordings(folders: dict, cancel: threading.Event | None = None) -> list[Recording]:
-    """Video files under a channel's Processed/Recorded folders (no symlinks, no partial files)."""
+    """Video files under a channel's Processed/Recorded folders (no symlinks, no partial files).
+
+    A category may be one folder or a list, so ``processed`` and ``Processed`` are both listed."""
     out: list[Recording] = []
+    seen = set()
     for category in LIST_CATEGORIES:
-        top = folders.get(category)
-        if not top or not os.path.isdir(top):
-            continue
-        stack = [top]
-        while stack:
+        for top in _folder_list(folders.get(category)):
+            if not top or not os.path.isdir(top):
+                continue
+            _list_one(out, seen, top, category == "recorded", cancel)
             if cancel is not None and cancel.is_set():
                 return out
-            folder = stack.pop()
-            try:
-                entries = list(os.scandir(folder))
-            except OSError:
-                continue
-            for e in entries:
-                try:
-                    if e.is_symlink():
-                        continue
-                    if e.is_dir(follow_symlinks=False):
-                        stack.append(e.path)
-                        continue
-                    low = e.name.lower()
-                    if low.endswith(lib.PARTIAL_SUFFIXES) or os.path.splitext(low)[1] not in lib.VIDEO_EXT:
-                        continue
-                    st = e.stat(follow_symlinks=False)
-                except OSError:
-                    continue
-                out.append(make_recording(e.path, st.st_size, st.st_mtime, category == "recorded"))
     return out
 
 
-def list_clips(folder: str | None, cancel: threading.Event | None = None) -> list[ClipRef]:
-    """Clips in a channel's clips folder that name their source (sidecar or name pattern)."""
+def _list_one(out, seen, top: str, raw: bool, cancel) -> None:
+    stack = [top]
+    while stack:
+        if cancel is not None and cancel.is_set():
+            return
+        folder = stack.pop()
+        try:
+            entries = list(os.scandir(folder))
+        except OSError:
+            continue
+        for e in entries:
+            try:
+                if e.is_symlink():
+                    continue
+                if e.is_dir(follow_symlinks=False):
+                    stack.append(e.path)
+                    continue
+                low = e.name.lower()
+                if low.endswith(lib.PARTIAL_SUFFIXES) or os.path.splitext(low)[1] not in lib.VIDEO_EXT:
+                    continue
+                st = e.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            key = os.path.normcase(os.path.abspath(e.path))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(make_recording(e.path, st.st_size, st.st_mtime, raw))
+
+
+def list_clips(folder: str | list | None, cancel: threading.Event | None = None) -> list[ClipRef]:
+    """Clips in a channel's clips folder (or each case variant) that name their source."""
     out: list[ClipRef] = []
-    if not folder or not os.path.isdir(folder):
+    folders = _folder_list(folder)
+    if not folders:
         return out
-    stack = [folder]
+    # Walk the first existing folder; further variants are separate trees, so walk each.
+    stack = [f for f in folders if f and os.path.isdir(f)]
     while stack:
         if cancel is not None and cancel.is_set():
             break

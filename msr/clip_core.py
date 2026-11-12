@@ -381,7 +381,8 @@ def clips_folder_for(src: str, clips_base: str) -> str:
         if parts[i].lower() in ("recorded", "processed", "pendingdeletion"):
             rest = parts[i + 1:-1]
             if rest:
-                return os.path.join(clips_base, *rest)
+                from msr.util import reuse_path
+                return reuse_path(clips_base, *rest)
             break
     return clips_base
 

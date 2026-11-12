@@ -43,16 +43,30 @@ def _newest(folder, suffixes, since=0.0):
 
 
 def channel_dirs(config, key, category):
-    """Folders of one channel under Processed/ or Recorded/ (main and fallback drive)."""
+    """Folders of one channel under Processed/ or Recorded/ (main and fallback drive).
+
+    On Linux every case variant is included so a Windows-era ``processed`` tree is visible.
+    Windows still gets the single spelled path."""
     from msr import storage
-    from msr.util import channel_key_to_dirs
+    from msr.util import channel_key_to_dirs, read_layout_paths
     platform, user = channel_key_to_dirs(key)
     streams = config.get("Paths", "streams_dir", fallback="") or ""
     roots = [streams]
     fb = storage.fallback_root(config.get("Paths", "fallback_dir", fallback=""), streams)
     if fb:
         roots.append(fb)
-    return [os.path.join(r, category, platform, *user.split("/")) for r in roots if r]
+    out = []
+    seen = set()
+    for root in roots:
+        if not root:
+            continue
+        for path in read_layout_paths(root, category, platform, *user.split("/")):
+            key_path = os.path.normcase(os.path.abspath(path))
+            if key_path in seen:
+                continue
+            seen.add(key_path)
+            out.append(path)
+    return out
 
 
 class Tracker:
@@ -479,23 +493,35 @@ def cleanup_queue(config, busy_keys=()):
     for k in busy_keys:
         platform, user = channel_key_to_dirs(k)
         busy.add(os.path.normcase(os.path.join(platform, *user.split("/"))))
+    from msr.util import read_layout_paths
     out = []
+    seen = set()
     for root in roots:
-        base = os.path.join(root, "Recorded")
-        for dirpath, _dirs, files in os.walk(base):
-            rel = os.path.normcase(os.path.relpath(dirpath, base))
-            for name in files:
-                if not name.lower().endswith(".ts"):
-                    continue
-                path = os.path.join(dirpath, name)
-                try:
-                    s = os.stat(path)
-                except OSError:
-                    continue
-                out.append({"path": path, "size": s.st_size, "modified": iso(s.st_mtime),
-                            "recording_now": rel in busy})
+        for base in read_layout_paths(root, "Recorded"):
+            if not os.path.isdir(base):
+                continue
+            base_key = os.path.normcase(os.path.abspath(base))
+            if base_key in seen:
+                continue
+            seen.add(base_key)
+            _collect_raw(out, base, busy)
     out.sort(key=lambda r: r["path"])
     return out
+
+
+def _collect_raw(out, base, busy):
+    for dirpath, _dirs, files in os.walk(base):
+        rel = os.path.normcase(os.path.relpath(dirpath, base))
+        for name in files:
+            if not name.lower().endswith(".ts"):
+                continue
+            path = os.path.join(dirpath, name)
+            try:
+                s = os.stat(path)
+            except OSError:
+                continue
+            out.append({"path": path, "size": s.st_size, "modified": iso(s.st_mtime),
+                        "recording_now": rel in busy})
 
 
 def parse_since(text, now=None):

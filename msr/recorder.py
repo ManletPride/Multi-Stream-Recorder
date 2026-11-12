@@ -20,6 +20,11 @@ from msr.util import (
     iter_channel_record_dirs,
     kill_orphan_recording_processes,
     kill_process_tree,
+    layout_bases,
+    matching_dirs,
+    recorded_scan_bases,
+    reuse_dir,
+    reuse_path,
 )
 from msr.kick_realtime import (
     BROWSER_HEADERS, CENTRIFUGO_MAX_SUBS, cf_connect, cf_refresh, cf_subscribe,
@@ -48,9 +53,7 @@ class BackgroundCleaner:
     def __init__(self, config, status_dict=None):
         self.config = config
         self.root_path = config.get('Paths', 'streams_dir')
-        self.recorded_base = os.path.join(self.root_path, "Recorded")
-        self.processed_base = os.path.join(self.root_path, "Processed")
-        self.pending_base = os.path.join(self.root_path, PENDING_DELETION_FOLDER)
+        self.recorded_base, self.processed_base, self.pending_base = layout_bases(self.root_path)
         # Optional reference to the recorder's status_dict so the cleaner can
         # skip .ts files whose worker is actively remuxing them (Bug #4 fix).
         self.status_dict = status_dict if status_dict is not None else {}
@@ -143,7 +146,8 @@ class BackgroundCleaner:
         found_any = False
         found_locked = False
 
-        if not os.path.exists(self.recorded_base):
+        recorded_bases = [b for b in recorded_scan_bases(self.root_path, self.recorded_base) if os.path.isdir(b)]
+        if not recorded_bases:
             return False
 
         # Bug #4 fix, corrected (v1.7.0): map every busy channel in
@@ -166,179 +170,190 @@ class BackgroundCleaner:
                 except Exception:
                     pass
 
-        # Scan recorded_base dynamically so new platforms (tiktok, etc.)
-        # are picked up automatically without needing a hardcoded list.
+        # Scan every case variant of Recorded/ (Linux can have both `recorded` and
+        # `Recorded`). Finished files go into the existing Processed tree, not a new sibling.
         # One extra nesting level covers custom/chaturbate/alice as well as
         # leftover .ts files still in the old custom/chaturbate bag.
-        for platform, username_dir, username_path in iter_channel_record_dirs(self.recorded_base):
-            processed_path = os.path.join(self.processed_base, platform, username_dir)
-            pending_dir = os.path.join(self.pending_base, platform, username_dir)
-            os.makedirs(processed_path, exist_ok=True)
-            os.makedirs(pending_dir, exist_ok=True)
-
-            # Bug #4 fix: if the worker for this channel is actively
-            # recording, remuxing, or processing, its .ts may be open/
-            # locked (or about to be handled by the worker itself).
-            # Skip the entire channel directory — the worker moves its
-            # own file to PendingDeletion once done.  See busy_dirs
-            # construction above for why the match is done on
-            # (platform, username_dir) rather than a reconstructed key.
-            if (platform, username_dir) in busy_dirs:
-                logging.info(
-                    f"Cleanup: {platform}/{username_dir} has an active "
-                    "worker (recording/remuxing) — skipping its "
-                    "directory to avoid contention"
-                )
-                found_locked = True
-                continue
-
-            restore_stranded_probe_files(username_path)
-            try:   # parts of a stopped YouTube from-start capture -> one .ts, handled below
-                from msr.yt_live_start import merge_leftovers
-                merge_leftovers(username_path, ffmpeg_path, logging.getLogger())
-            except Exception as e:
-                logging.warning(f"Cleanup: could not merge from-start parts in {username_path}: {e}")
-            for filename in os.listdir(username_path):
-                if not filename.endswith('.ts'):
-                    continue
-
-                raw_file = os.path.join(username_path, filename)
-
-                # In-use probe 1: try to open the file for append.  ffmpeg
-                # holds its output with a share mode that denies this, so
-                # PermissionError is a reliable "still being written"
-                # signal for ffmpeg-based recordings.
+        # Destination folders are created only when a channel still has a raw file, so
+        # looking at an older tree does not sprinkle empty folders through it.
+        for recorded_base in recorded_bases:
+            for platform, username_dir, username_path in iter_channel_record_dirs(recorded_base):
                 try:
-                    with open(raw_file, 'ab'):
-                        pass
-                except PermissionError:
-                    logging.warning(f"Cleanup: {filename} is open by another process, skipping")
-                    found_locked = True
-                    continue
-                except Exception:
-                    pass  # transient error — fall through to the next probe
-
-                # In-use probe 2: rename round-trip.  Python-based writers
-                # (streamlink, yt-dlp) open with shared read/write, so the
-                # append probe passes — but they don't set
-                # FILE_SHARE_DELETE, so a rename fails while they hold the
-                # file.  This catches an in-progress recording BEFORE we
-                # waste a full remux on it, instead of discovering the
-                # lock at the move-to-PendingDeletion step afterwards.
-                probe_name = raw_file + PROBE_SUFFIX
-                try:
-                    os.rename(raw_file, probe_name)
-                    os.rename(probe_name, raw_file)
-                except PermissionError:
-                    logging.warning(
-                        f"Cleanup: {filename} is locked by a writer "
-                        "(rename probe) — likely still recording, skipping")
-                    found_locked = True
-                    continue
+                    present = os.listdir(username_path)
                 except OSError:
-                    # Rename failed for a non-lock reason; if the file got
-                    # stuck under the probe name, restore it.
-                    if os.path.exists(probe_name) and not os.path.exists(raw_file):
+                    continue
+                if not any(n.endswith('.ts') or (
+                        '.f' in n.lower() and n.lower().endswith(('.mp4', '.m4a', '.webm', '.mkv')))
+                           for n in present):
+                    continue
+                processed_path = reuse_path(self.processed_base, platform, username_dir)
+                pending_dir = reuse_path(self.pending_base, platform, username_dir)
+                os.makedirs(processed_path, exist_ok=True)
+                os.makedirs(pending_dir, exist_ok=True)
+
+                # Bug #4 fix: if the worker for this channel is actively
+                # recording, remuxing, or processing, its .ts may be open/
+                # locked (or about to be handled by the worker itself).
+                # Skip the entire channel directory — the worker moves its
+                # own file to PendingDeletion once done.  See busy_dirs
+                # construction above for why the match is done on
+                # (platform, username_dir) rather than a reconstructed key.
+                if (platform, username_dir) in busy_dirs:
+                    logging.info(
+                        f"Cleanup: {platform}/{username_dir} has an active "
+                        "worker (recording/remuxing) — skipping its "
+                        "directory to avoid contention"
+                    )
+                    found_locked = True
+                    continue
+
+                restore_stranded_probe_files(username_path)
+                try:   # parts of a stopped YouTube from-start capture -> one .ts, handled below
+                    from msr.yt_live_start import merge_leftovers
+                    merge_leftovers(username_path, ffmpeg_path, logging.getLogger())
+                except Exception as e:
+                    logging.warning(f"Cleanup: could not merge from-start parts in {username_path}: {e}")
+                for filename in os.listdir(username_path):
+                    if not filename.endswith('.ts'):
+                        continue
+
+                    raw_file = os.path.join(username_path, filename)
+
+                    # In-use probe 1: try to open the file for append.  ffmpeg
+                    # holds its output with a share mode that denies this, so
+                    # PermissionError is a reliable "still being written"
+                    # signal for ffmpeg-based recordings.
+                    try:
+                        with open(raw_file, 'ab'):
+                            pass
+                    except PermissionError:
+                        logging.warning(f"Cleanup: {filename} is open by another process, skipping")
+                        found_locked = True
+                        continue
+                    except Exception:
+                        pass  # transient error — fall through to the next probe
+
+                    # In-use probe 2: rename round-trip.  Python-based writers
+                    # (streamlink, yt-dlp) open with shared read/write, so the
+                    # append probe passes — but they don't set
+                    # FILE_SHARE_DELETE, so a rename fails while they hold the
+                    # file.  This catches an in-progress recording BEFORE we
+                    # waste a full remux on it, instead of discovering the
+                    # lock at the move-to-PendingDeletion step afterwards.
+                    probe_name = raw_file + PROBE_SUFFIX
+                    try:
+                        os.rename(raw_file, probe_name)
+                        os.rename(probe_name, raw_file)
+                    except PermissionError:
+                        logging.warning(
+                            f"Cleanup: {filename} is locked by a writer "
+                            "(rename probe) — likely still recording, skipping")
+                        found_locked = True
+                        continue
+                    except OSError:
+                        # Rename failed for a non-lock reason; if the file got
+                        # stuck under the probe name, restore it.
+                        if os.path.exists(probe_name) and not os.path.exists(raw_file):
+                            try:
+                                os.rename(probe_name, raw_file)
+                            except Exception:
+                                pass
+                        found_locked = True
+                        continue
+
+                    try:
+                        size1 = os.path.getsize(raw_file)
+                        time.sleep(2)
+                        size2 = os.path.getsize(raw_file)
+                        if size2 != size1:
+                            logging.warning(f"Cleanup: {filename} is still growing, skipping")
+                            found_locked = True
+                            continue
+                        file_size = size2
+                    except Exception:
+                        continue
+
+                    if file_size < min_file_size_mb * 1024 * 1024:
+                        logging.info(f"Cleanup: Skipping {filename} — too small ({human_size(file_size)})")
                         try:
-                            os.rename(probe_name, raw_file)
+                            os.remove(raw_file)
+                        except PermissionError:
+                            found_locked = True
                         except Exception:
                             pass
-                    found_locked = True
-                    continue
-
-                try:
-                    size1 = os.path.getsize(raw_file)
-                    time.sleep(2)
-                    size2 = os.path.getsize(raw_file)
-                    if size2 != size1:
-                        logging.warning(f"Cleanup: {filename} is still growing, skipping")
-                        found_locked = True
                         continue
-                    file_size = size2
-                except Exception:
-                    continue
 
-                if file_size < min_file_size_mb * 1024 * 1024:
-                    logging.info(f"Cleanup: Skipping {filename} — too small ({human_size(file_size)})")
-                    try:
-                        os.remove(raw_file)
-                    except PermissionError:
-                        found_locked = True
-                    except Exception:
-                        pass
-                    continue
+                    found_any = True
+                    logging.info(f"Cleanup: Processing {filename} ({human_size(file_size)})")
 
-                found_any = True
-                logging.info(f"Cleanup: Processing {filename} ({human_size(file_size)})")
+                    # Only the extension is replaced: 'a.tsunami.ts' -> 'a.tsunami.mp4'.
+                    mp4_filename = filename[:-len('.ts')] + '.mp4'
+                    mp4_file = os.path.join(processed_path, mp4_filename)
 
-                # Only the extension is replaced: 'a.tsunami.ts' -> 'a.tsunami.mp4'.
-                mp4_filename = filename[:-len('.ts')] + '.mp4'
-                mp4_file = os.path.join(processed_path, mp4_filename)
-
-                # Only take the "already remuxed" shortcut if the existing MP4 passes the same
-                # check a fresh remux must (readable, as long as the .ts).  Anything else is a
-                # stale partial: it is redone to a .part and replaces the old file only once the
-                # new one is verified, and the raw .ts is not touched before that.
-                existing_mp4_ok = False
-                if os.path.exists(mp4_file):
-                    existing_mp4_ok, why = verify_remux_output(
-                        raw_file, mp4_file, ffmpeg_path, logging.getLogger())
-                    if not existing_mp4_ok:
-                        logging.warning(
-                            f"Cleanup: existing MP4 for {filename} is not complete ({why}) "
-                            "— re-remuxing")
-
-                if existing_mp4_ok:
-                    logging.info(f"Cleanup: MP4 already exists for {filename}, just moving raw file")
-                else:
-                    self._report("remux_started", platform, username_dir, raw_file)
-                    file_size_gb = file_size / (1024**3)
-                    scaled_timeout = max(ffmpeg_timeout, int(file_size_gb * 60) + 120)
-                    success, mp4_size, error = remux_to_mp4(
-                        raw_file, mp4_file, ffmpeg_path,
-                        logging.getLogger(), scaled_timeout
-                    )
-                    if not success:
-                        logging.error(f"Cleanup: Failed to process {filename}: {error}")
-                        self._report("finished", platform, username_dir, raw_file, ok=False, error=error or "")
-                        if error != "output too small":
-                            # A failed remux (ffmpeg missing, timeout, disk full, antivirus lock)
-                            # says nothing about the recording: keep it where it is and retry.
+                    # Only take the "already remuxed" shortcut if the existing MP4 passes the same
+                    # check a fresh remux must (readable, as long as the .ts).  Anything else is a
+                    # stale partial: it is redone to a .part and replaces the old file only once the
+                    # new one is verified, and the raw .ts is not touched before that.
+                    existing_mp4_ok = False
+                    if os.path.exists(mp4_file):
+                        existing_mp4_ok, why = verify_remux_output(
+                            raw_file, mp4_file, ffmpeg_path, logging.getLogger())
+                        if not existing_mp4_ok:
                             logging.warning(
-                                f"Cleanup: {filename} kept in Recorded (not moved, not deleted); "
-                                "it is retried on the next pass")
-                            continue
-                        try:
-                            pending_path = os.path.join(pending_dir, filename)
-                            shutil.move(raw_file, pending_path)
-                            logging.info(f"Cleanup: Moved unprocessable {filename} to PendingDeletion")
-                        except Exception as move_err:
-                            logging.warning(f"Cleanup: Could not move {filename} to PendingDeletion: {move_err}")
-                        continue
+                                f"Cleanup: existing MP4 for {filename} is not complete ({why}) "
+                                "— re-remuxing")
 
-                pending_path = os.path.join(pending_dir, filename)
-                max_retries = 5
-                moved = False
-                for attempt in range(max_retries):
-                    if self._stop_event.is_set():
-                        return found_locked
-                    try:
-                        shutil.move(raw_file, pending_path)
-                        logging.info(f"Cleanup: Successfully processed {mp4_filename}")
-                        self._report("finished", platform, username_dir, mp4_file, ok=True)
-                        moved = True
-                        break
-                    except PermissionError:
-                        if attempt < max_retries - 1:
-                            wait_time = 3 * (attempt + 1)
-                            logging.warning(f"Cleanup: File locked, retrying in {wait_time}s…")
-                            time.sleep(wait_time)
-                        else:
-                            logging.warning(f"Cleanup: Could not move {filename} after {max_retries} attempts")
-                            found_locked = True
-                    except Exception as e:
-                        logging.error(f"Cleanup: Failed to move {filename}: {e}")
-                        break
+                    if existing_mp4_ok:
+                        logging.info(f"Cleanup: MP4 already exists for {filename}, just moving raw file")
+                    else:
+                        self._report("remux_started", platform, username_dir, raw_file)
+                        file_size_gb = file_size / (1024**3)
+                        scaled_timeout = max(ffmpeg_timeout, int(file_size_gb * 60) + 120)
+                        success, mp4_size, error = remux_to_mp4(
+                            raw_file, mp4_file, ffmpeg_path,
+                            logging.getLogger(), scaled_timeout
+                        )
+                        if not success:
+                            logging.error(f"Cleanup: Failed to process {filename}: {error}")
+                            self._report("finished", platform, username_dir, raw_file, ok=False, error=error or "")
+                            if error != "output too small":
+                                # A failed remux (ffmpeg missing, timeout, disk full, antivirus lock)
+                                # says nothing about the recording: keep it where it is and retry.
+                                logging.warning(
+                                    f"Cleanup: {filename} kept in Recorded (not moved, not deleted); "
+                                    "it is retried on the next pass")
+                                continue
+                            try:
+                                pending_path = os.path.join(pending_dir, filename)
+                                shutil.move(raw_file, pending_path)
+                                logging.info(f"Cleanup: Moved unprocessable {filename} to PendingDeletion")
+                            except Exception as move_err:
+                                logging.warning(f"Cleanup: Could not move {filename} to PendingDeletion: {move_err}")
+                            continue
+
+                    pending_path = os.path.join(pending_dir, filename)
+                    max_retries = 5
+                    moved = False
+                    for attempt in range(max_retries):
+                        if self._stop_event.is_set():
+                            return found_locked
+                        try:
+                            shutil.move(raw_file, pending_path)
+                            logging.info(f"Cleanup: Successfully processed {mp4_filename}")
+                            self._report("finished", platform, username_dir, mp4_file, ok=True)
+                            moved = True
+                            break
+                        except PermissionError:
+                            if attempt < max_retries - 1:
+                                wait_time = 3 * (attempt + 1)
+                                logging.warning(f"Cleanup: File locked, retrying in {wait_time}s…")
+                                time.sleep(wait_time)
+                            else:
+                                logging.warning(f"Cleanup: Could not move {filename} after {max_retries} attempts")
+                                found_locked = True
+                        except Exception as e:
+                            logging.error(f"Cleanup: Failed to move {filename}: {e}")
+                            break
 
         if found_any:
             logging.info("Cleanup: Pass complete")
@@ -455,9 +470,13 @@ def purge_old_pending_files(root_path, max_age_days, logger=None):
     if max_age_days <= 0:
         return 0
 
-    pending_base = os.path.join(root_path, PENDING_DELETION_FOLDER)
-    if not os.path.exists(pending_base):
-        return 0
+    pending_base = reuse_dir(root_path, PENDING_DELETION_FOLDER)
+    if not os.path.isdir(pending_base):
+        # The spelled folder is missing. On Linux the tree may be `pendingdeletion`.
+        others = [p for p in matching_dirs(root_path, PENDING_DELETION_FOLDER) if os.path.isdir(p)]
+        if not others:
+            return 0
+        pending_base = others[0]
 
     if logger:
         logger.info(f"PendingDeletion purge: scanning for files older than {max_age_days} day(s)...")
@@ -1170,9 +1189,9 @@ class StreamRecorder:
         self.watch_channels = list(watch_channels or [])
 
         self.root_path = config.get('Paths', 'streams_dir')
-        self.recorded_base = os.path.join(self.root_path, "Recorded")
-        self.processed_base = os.path.join(self.root_path, "Processed")
-        self.pending_base = os.path.join(self.root_path, PENDING_DELETION_FOLDER)
+        # On Linux an existing processed/recorded/PendingDeletion (any case) is reused so
+        # makedirs does not create a second tree beside the one Windows wrote.
+        self.recorded_base, self.processed_base, self.pending_base = layout_bases(self.root_path)
 
         # An unreachable drive must not stop the session from starting: the workers record into the
         # fallback folder meanwhile (see msr/storage.py) and the watch in run() reports it.
@@ -1186,7 +1205,7 @@ class StreamRecorder:
 
         # Recordings folder watch (a drive that is unplugged while we run).
         self.fallback_root = storage.fallback_root(config.get('Paths', 'fallback_dir', fallback=''), self.root_path)
-        self.fallback_recorded_base = (os.path.join(self.fallback_root, "Recorded")
+        self.fallback_recorded_base = (reuse_dir(self.fallback_root, "Recorded")
                                        if self.fallback_root else None)
 
         self.manager = mp.Manager()
@@ -2005,25 +2024,30 @@ class StreamRecorder:
         return '{timestamp}' in pattern or ('{date}' in pattern and '{time}' in pattern)
 
     def _snapshot_leftover_ts_files(self):
-        """List the .ts files in Recorded/ right now (fast: no sizing/sleeping)."""
+        """List the .ts files in Recorded/ right now (fast: no sizing/sleeping).
+
+        On Linux every case variant is included. Destination folders are created only
+        for a channel that actually has a leftover .ts."""
         entries = []
-        if not os.path.exists(self.recorded_base):
+        bases = [b for b in recorded_scan_bases(self.root_path, self.recorded_base) if os.path.isdir(b)]
+        if not bases:
             return entries
-        # Scan recorded_base dynamically so new platforms are picked up
-        # automatically without needing a hardcoded list.
         # One extra nesting level covers custom/chaturbate/alice.
-        for platform, username_dir, username_path in iter_channel_record_dirs(self.recorded_base):
-            processed_path = os.path.join(self.processed_base, platform, username_dir)
-            pending_dir = os.path.join(self.pending_base, platform, username_dir)
-            os.makedirs(processed_path, exist_ok=True)
-            os.makedirs(pending_dir, exist_ok=True)
-            restore_stranded_probe_files(username_path)
-            try:
-                names = os.listdir(username_path)
-            except OSError:
-                continue
-            for filename in names:
-                if filename.endswith('.ts'):
+        for recorded_base in bases:
+            for platform, username_dir, username_path in iter_channel_record_dirs(recorded_base):
+                restore_stranded_probe_files(username_path)
+                try:
+                    names = os.listdir(username_path)
+                except OSError:
+                    continue
+                ts_names = [filename for filename in names if filename.endswith('.ts')]
+                if not ts_names:
+                    continue
+                processed_path = reuse_path(self.processed_base, platform, username_dir)
+                pending_dir = reuse_path(self.pending_base, platform, username_dir)
+                os.makedirs(processed_path, exist_ok=True)
+                os.makedirs(pending_dir, exist_ok=True)
+                for filename in ts_names:
                     entries.append({
                         "raw_file": os.path.join(username_path, filename),
                         "processed_path": processed_path,
@@ -2052,7 +2076,15 @@ class StreamRecorder:
                     "skipping this one (leftover files are handled when the session stops)")
                 return empty
         self._startup_cleanup_cancel.clear()
-        remove_stale_remux_parts(self.processed_base)
+        seen_processed = set()
+        for processed in [self.processed_base, *matching_dirs(self.root_path, "Processed")]:
+            if not processed or not os.path.isdir(processed):
+                continue
+            key = os.path.normcase(os.path.abspath(processed))
+            if key in seen_processed:
+                continue
+            seen_processed.add(key)
+            remove_stale_remux_parts(processed)
 
         try:
             snapshot_time = time.time()
