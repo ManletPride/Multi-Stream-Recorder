@@ -159,6 +159,18 @@ sudo apt install gcc pkg-config python3-dev libgirepository-2.0-dev libcairo2-de
 
 PyGObject 3.50 and newer needs the girepository **2.0** headers (glib 2.80 or newer), which is `libgirepository-2.0-dev` on Debian/Ubuntu, plus Python headers (`python3-dev`) so pycairo can compile. An older release only has `libgirepository1.0-dev`; that is not enough for this version. On Arch the `python` package already includes headers; `base-devel` supplies the compiler. If the headers are missing and `gi` cannot be imported, recording still runs and the log has one info line: the system tray is off. No traceback. Creating the venv with `python3 -m venv --system-site-packages .venv` is the other way to see a distro `gi` that already imports AyatanaAppIndicator3. If you set `PYSTRAY_BACKEND` yourself, MSR leaves that choice alone.
 
+**Hyprland / Omarchy (menus, dropdowns, tooltips):** Omarchy's floating workspaces resize every new non-modal window to about 1100×760 and center it. That catches a right-click menu, a combobox list and a tooltip, so the menu opens as a huge dark box instead of at the pointer. A window whose class already has a user float rule is left out of that opener. Tk reports menus as class `Menu` and combobox lists as `ComboboxPopdown`. MSR's tooltip is class `TkTooltip` (a plain Toplevel is class `Toplevel`, which would also match dialogs). Add this at the end of `~/.config/hypr/hyprland.lua`, then run `hyprctl reload`:
+
+```lua
+o.window({ class = "^(Menu|ComboboxPopdown|TkTooltip)$" }, { float = true })
+```
+
+Plain Hyprland, in `hyprland.conf`, is the same match without Omarchy's helper:
+
+```
+windowrule = float on, match:class ^(Menu|ComboboxPopdown|TkTooltip)$
+```
+
 ### MSR's own environment (.venv)
 
 MSR keeps its packages in `.venv` inside the MSR folder, so updating them never changes the Python other programs on your computer use.
