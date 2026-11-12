@@ -22,6 +22,7 @@ from typing import Callable
 from msr import charts, dialogs
 from msr.context_menu import bind_context_menu
 from msr import library as lib
+from msr.scrollview import ScrollArea
 from msr import library_browser as browse
 from msr import library_actions as act
 from msr import library_manage as manage
@@ -112,6 +113,81 @@ def bar_rows(stats: lib.LibraryStats, count: int = TOP_CHANNELS):
     return rows
 
 
+def _button_width(button) -> int:
+    """Pixels the button actually occupies. The request can be a few short of the drawn width."""
+    req = int(button.winfo_reqwidth())
+    try:
+        drawn = int(button.winfo_width())
+    except tk.TclError:
+        return req
+    return max(req, drawn) if drawn > 1 else req
+
+
+def _button_height(button) -> int:
+    req = int(button.winfo_reqheight())
+    try:
+        drawn = int(button.winfo_height())
+    except tk.TclError:
+        return req
+    return max(req, drawn) if drawn > 1 else req
+
+
+def button_rows(width: int, buttons, gap: int = 6) -> list[list]:
+    """Split buttons into left-to-right rows that fit in ``width``.
+
+    A width that is not real yet (the widget has not been mapped) returns no
+    rows, so the caller keeps whatever it already placed. The gap is the space
+    between two buttons on the same row.
+    """
+    if width <= 1:
+        return []
+    rows: list[list] = []
+    row: list = []
+    used = 0
+    for button in buttons:
+        need = _button_width(button)
+        extra = gap if row else 0
+        if row and used + extra + need > width:
+            rows.append(row)
+            row = []
+            used = 0
+            extra = 0
+        row.append(button)
+        used += extra + need
+    if row:
+        rows.append(row)
+    return rows
+
+
+def place_button_rows(frame, buttons, rows, gap: int = 6) -> None:
+    """Place each row at its own y, packed from the left.
+
+    Grid is the wrong tool here: a column is as wide as the widest button in
+    it, on every row. ``Remove folder`` under ``Cancel`` then pushes
+    ``Copy summary`` past the pane even though the widths on that line would
+    have fitted. ``place`` keeps a button's x equal to the buttons to its left
+    on the same line only.
+    """
+    for button in buttons:
+        button.grid_forget()
+        button.pack_forget()
+        button.place_forget()
+    y = 0
+    last = len(rows) - 1
+    for r, items in enumerate(rows):
+        x = 0
+        row_h = 1
+        for button in items:
+            button.place(in_=frame, x=x, y=y, anchor="nw")
+            row_h = max(row_h, _button_height(button))
+            x += _button_width(button) + gap
+        y += row_h + (gap if r < last else 0)
+    # place does not feed the packer a height, so set it. Width still comes
+    # from pack(fill="x") on the toolbar.
+    frame.configure(height=max(y, 1))
+    frame.pack_propagate(False)
+
+
 def month_rows(stats: lib.LibraryStats):
     out = []
     for key in charts.month_axis(stats.months):
@@ -154,7 +230,7 @@ class LibraryPanel:
         self.status.pack(side="left")
         self.undo_btn = ttk.Button(top, text="Undo", command=lambda: self.mgr and self.mgr.undo_last())
 
-        bar = ttk.Frame(frame)
+        bar = self.toolbar = ttk.Frame(frame)
         bar.pack(fill="x", pady=(8, 6))
         self.rescan_btn = ttk.Button(bar, text="Rescan", command=self.start_scan)
         self.cancel_btn = ttk.Button(bar, text="Cancel", command=self.cancel)
@@ -162,9 +238,15 @@ class LibraryPanel:
         self.copy_btn = ttk.Button(bar, text="Copy summary", command=self.copy_summary)
         self.add_folder_btn = ttk.Button(bar, text="Add folder\u2026", command=self.add_extra_folder)
         self.remove_folder_btn = ttk.Button(bar, text="Remove folder", command=self.remove_extra_folder)
-        for b in (self.rescan_btn, self.cancel_btn, self.hours_btn, self.copy_btn,
-                  self.add_folder_btn, self.remove_folder_btn):
-            b.pack(side="left", padx=(0, 6))
+        self._toolbar_buttons = (self.rescan_btn, self.cancel_btn, self.hours_btn, self.copy_btn,
+                                 self.add_folder_btn, self.remove_folder_btn)
+        self._toolbar_sig = None
+        # One row until the pane has a real width; a narrow pane wraps so the
+        # last button is not clipped ("Remove fold").
+        one = [list(self._toolbar_buttons)]
+        place_button_rows(bar, self._toolbar_buttons, one)
+        self._toolbar_sig = self._toolbar_token(one)
+        bar.bind("<Configure>", self._layout_toolbar)
         self.progress = ttk.Progressbar(frame, mode="indeterminate", length=200)
 
         self.headline = ttk.Label(frame, text="", justify="left", anchor="nw")
@@ -173,9 +255,13 @@ class LibraryPanel:
 
         self.tabs = ttk.Notebook(frame)
         self.tabs.pack(fill="both", expand=True)
-        overview = ttk.Frame(self.tabs, padding=8)
+        # The overview scrolls like Options (same ScrollArea). Charts keep the
+        # height they ask for; a short window scrolls to the month chart instead
+        # of squashing it, and a tall window stretches this area to fill.
+        self.overview_scroll = ScrollArea(self.tabs, padding=8, stretch=True, passive=True)
+        overview = self.overview_scroll.body
         channels = ttk.Frame(self.tabs, padding=8)
-        self.tabs.add(overview, text="  Overview  ")
+        self.tabs.add(self.overview_scroll.frame, text="  Overview  ")
         self.tabs.add(channels, text="  Channels  ")
 
         overview.columnconfigure(1, weight=1)
@@ -214,8 +300,28 @@ class LibraryPanel:
 
     def activate(self) -> None:
         """The tab was opened: scan the first time (later: use Rescan)."""
+        self._layout_toolbar()
         if self.stats is None and not self.busy:
             self.start_scan()
+
+    def _toolbar_token(self, rows):
+        return (
+            tuple(tuple(id(b) for b in row) for row in rows),
+            tuple((_button_width(b), _button_height(b)) for b in self._toolbar_buttons),
+        )
+
+    def _layout_toolbar(self, _event=None) -> None:
+        width = self.toolbar.winfo_width()
+        if width <= 1:
+            return
+        self._apply_toolbar_rows(button_rows(width, self._toolbar_buttons))
+
+    def _apply_toolbar_rows(self, rows) -> None:
+        token = self._toolbar_token(rows)
+        if not rows or token == self._toolbar_sig:
+            return
+        self._toolbar_sig = token
+        place_button_rows(self.toolbar, self._toolbar_buttons, rows)
 
     @property
     def toplevel(self):
@@ -558,11 +664,14 @@ class LibraryPanel:
     def refresh_theme(self) -> None:
         if not self.exists():
             return
+        self.overview_scroll.apply_theme()
         # site colours come from the theme and are baked into the rows, so rebuild them
         if self.stats is not None:
             self._set_chart_data(self.stats)
         for chart in (self.donut, self.bars, self.months):
             chart.redraw()
+        self._toolbar_sig = None
+        self._layout_toolbar()
 
     # ------------------------------------------------------------ polling
     def _schedule_poll(self) -> None:

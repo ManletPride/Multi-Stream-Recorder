@@ -176,6 +176,19 @@ class DrawTests(TkCase):
         chart.destroy()  # must not leave an after() script behind
         self.root.update()
 
+    def test_a_taller_chart_redraws_the_columns_down_to_the_new_bottom(self):
+        chart = charts.ColumnChart(self.root, height=120, width=300)
+        chart.pack()
+        chart.set_data([("26-09", 5, "sep", "2026-09")])
+        chart.configure(height=280)
+        self.root.update_idletasks()
+        chart._on_configure(type("E", (), {"width": chart._drawn_width, "height": 280})())
+        self.assertIsNotNone(chart._job)
+        chart._resized()
+        baselines = [chart.coords(item)[1] for item in chart.find_all() if chart.type(item) == "line"]
+        self.assertTrue(baselines)
+        self.assertGreater(max(baselines), 200)
+
 
 if __name__ == "__main__":
     unittest.main()
