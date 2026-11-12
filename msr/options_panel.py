@@ -15,6 +15,7 @@ import webbrowser
 from tkinter import filedialog, ttk
 
 from msr import themes as _themes
+from msr.tooltip import Tooltip
 from msr import twitch_connect as tc
 from msr import twitch_eventsub as te
 
@@ -174,29 +175,6 @@ def _ffmpeg_check(path):
     return check_ffmpeg(path)
 
 
-class _Tip:
-    """Fallback tooltip (gui.py passes its own _Tooltip)."""
-    def __init__(self, widget, text):
-        self.w, self.text, self.tip = widget, text, None
-        widget.bind("<Enter>", self.show, add="+")
-        widget.bind("<Leave>", self.hide, add="+")
-
-    def show(self, _e=None):
-        if self.tip or not self.text:
-            return
-        t = _themes.current()
-        self.tip = tk.Toplevel(self.w)
-        self.tip.wm_overrideredirect(True)
-        self.tip.wm_geometry(f"+{self.w.winfo_rootx() + 20}+{self.w.winfo_rooty() + self.w.winfo_height() + 4}")
-        tk.Label(self.tip, text=self.text, justify=tk.LEFT, background=t["entry_bg"], foreground=t["fg"],
-                 relief="solid", borderwidth=1, font=("Segoe UI", 8), padx=6, pady=4).pack()
-
-    def hide(self, _e=None):
-        if self.tip:
-            self.tip.destroy()
-            self.tip = None
-
-
 class OptionsPanel:
     def __init__(self, container, config, data_dir, apply_setting, on_twitch_changed=None,
                  tooltip=None, api=te, connect_job=tc.ConnectJob, opener=webbrowser.open,
@@ -216,7 +194,7 @@ class OptionsPanel:
         self.environ = environ
         self.sound_test = sound_test
         self.open_updates = open_updates
-        self.tip = tooltip or _Tip
+        self.tip = tooltip or Tooltip  # same helper as the rest of the window (msr/tooltip.py)
         self.job = None
         self._foreign = None   # a sign-in started elsewhere (control); shown, not driven
         self._uri = ""

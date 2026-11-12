@@ -1,6 +1,7 @@
 """Optional/required tool detection (yt-dlp, streamlink, ffmpeg, …)."""
 import importlib.util
 import json
+import logging
 import os
 import sys
 import subprocess
@@ -65,16 +66,184 @@ except ImportError:
 _LAZY_GUI_NAMES = ("HAS_TRAY", "pystray", "Image", "ImageDraw",
                    "HAS_NOTIFICATIONS", "plyer_notification")
 
+# One INFO line when the tray will not run. No traceback: pystray's Xorg backend
+# logs "Failed to dock icon" twice (AssertionError) on a desktop with no XEmbed
+# tray, which is every Hyprland and GNOME session.
+TRAY_DISABLED_INFO = (
+    "System tray is off (no working tray on this desktop); the window stays open. "
+    "On Hyprland or GNOME, install PyGObject into the venv (or create it with "
+    "--system-site-packages) so the AppIndicator tray can load."
+)
+# Set when Linux has no usable tray. Empty on Windows, and when the tray did load.
+TRAY_NOTE = ""
+
+
+def appindicator_backend_importable() -> bool:
+    """True when pystray's appindicator backend can import.
+
+    That backend is StatusNotifierItem (what Hyprland and GNOME bars actually
+    show). It needs PyGObject, Gtk 3, and AyatanaAppIndicator3 or AppIndicator3.
+    Any failure means "not available" — this must not raise or log a traceback.
+    """
+    try:
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk  # noqa: F401
+    except Exception:
+        return False
+    try:
+        gi.require_version("AppIndicator3", "0.1")
+        from gi.repository import AppIndicator3  # noqa: F401
+        return True
+    except ValueError:
+        pass
+    except Exception:
+        return False
+    try:
+        gi.require_version("AyatanaAppIndicator3", "0.1")
+        from gi.repository import AyatanaAppIndicator3  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def prefer_linux_tray_backend(environ=None, platform=None, indicator_available=None):
+    """On Linux, point pystray at appindicator when that backend can import.
+
+    Call this before ``import pystray``. Returns ``"appindicator"`` when this
+    call set ``PYSTRAY_BACKEND``, otherwise None. An existing value is the
+    user's choice and is left alone. Windows and macOS are not touched.
+    """
+    environ = os.environ if environ is None else environ
+    platform = sys.platform if platform is None else platform
+    if platform in ("win32", "darwin") or not str(platform).startswith("linux"):
+        return None
+    if (environ.get("PYSTRAY_BACKEND") or "").strip():
+        return None
+    if indicator_available is None:
+        available = appindicator_backend_importable()
+    else:
+        available = bool(indicator_available)
+    if not available:
+        return None
+    environ["PYSTRAY_BACKEND"] = "appindicator"
+    return "appindicator"
+
+
+def pystray_backend_name(module) -> str:
+    """``xorg`` / ``appindicator`` / ``win32`` / ``darwin`` from the Icon class pystray bound."""
+    icon = getattr(module, "Icon", None)
+    name = getattr(icon, "__module__", "") or ""
+    tail = name.rsplit(".", 1)[-1]
+    return tail[1:] if tail.startswith("_") else tail
+
+
+def xembed_tray_present() -> bool:
+    """True when an XEmbed tray owns ``_NET_SYSTEM_TRAY_S<screen>``.
+
+    Hyprland has no such owner (its bar is StatusNotifierItem). A missing
+    Xlib or display is "no tray", not an error.
+    """
+    try:
+        import Xlib.X
+        import Xlib.display
+    except Exception:
+        return False
+    display = None
+    try:
+        display = Xlib.display.Display()
+        screen = display.get_default_screen()
+        atom = display.intern_atom("_NET_SYSTEM_TRAY_S%d" % screen)
+        owner = display.get_selection_owner(atom)
+        return owner != Xlib.X.NONE
+    except Exception:
+        return False
+    finally:
+        if display is not None:
+            try:
+                display.close()
+            except Exception:
+                pass
+
+
+def tray_can_start(has_tray: bool, backend: str, xembed_present: bool) -> bool:
+    """False when the tray libraries are missing, or Xorg has nothing to dock into.
+
+    Other backends (win32, darwin, appindicator, gtk) are not second-guessed here.
+    """
+    if not has_tray:
+        return False
+    if backend == "xorg" and not xembed_present:
+        return False
+    return True
+
+
+def hide_to_tray_decision(ready: bool, dock_failed: bool, icon_alive: bool) -> str:
+    """``withdraw`` only when a tray icon is up and has not failed to dock.
+
+    Anything else is ``stay``: minimize and the tray's Hide action must not
+    put the window into a tray that is not there.
+    """
+    if ready and icon_alive and not dock_failed:
+        return "withdraw"
+    return "stay"
+
+
+class DockFailureFilter(logging.Filter):
+    """Drop pystray's ``Failed to dock icon`` error, traceback included."""
+
+    MESSAGE = "Failed to dock icon"
+
+    def __init__(self):
+        super().__init__()
+        self.failed = False
+        self.dropped = 0
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name.startswith("pystray") and record.getMessage() == self.MESSAGE:
+            self.failed = True
+            self.dropped += 1
+            return False
+        return True
+
+
+def install_dock_filter(dock_filter: DockFailureFilter) -> None:
+    """Attach *dock_filter* to the pystray loggers and to handlers already installed.
+
+    A filter on a parent logger does not see records logged on ``pystray._base``,
+    so the emitting loggers get it too. Handlers that already exist (the log file,
+    the Log tab) also drop it, in case a future pystray logs under another name.
+    """
+    for name in ("pystray", "pystray._base", "pystray._xorg"):
+        logging.getLogger(name).addFilter(dock_filter)
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(dock_filter)
+
 
 def _load_gui_extras():
+    global TRAY_NOTE
     found = {}
+    try:
+        prefer_linux_tray_backend()  # before pystray: it reads PYSTRAY_BACKEND at import
+    except Exception:
+        pass
     try:
         import pystray as _pystray
         from PIL import Image as _Image, ImageDraw as _ImageDraw
-        found.update(HAS_TRAY=True, pystray=_pystray, Image=_Image, ImageDraw=_ImageDraw)
+        has_tray = True
+        if sys.platform.startswith("linux"):
+            backend = pystray_backend_name(_pystray)
+            xembed = xembed_tray_present() if backend == "xorg" else True
+            if not tray_can_start(True, backend, xembed):
+                has_tray = False
+                TRAY_NOTE = TRAY_DISABLED_INFO
+        found.update(HAS_TRAY=has_tray, pystray=_pystray, Image=_Image, ImageDraw=_ImageDraw)
     except Exception:
         # ImportError, or on Linux pystray's Xorg backend raising
-        # Xlib.error.DisplayNameError at import time without a display
+        # Xlib.error.DisplayNameError at import time without a display.
+        # No traceback. The GUI logs TRAY_NOTE once if a tray was wanted.
+        if sys.platform.startswith("linux"):
+            TRAY_NOTE = TRAY_DISABLED_INFO
         found.update(HAS_TRAY=False, pystray=None, Image=None, ImageDraw=None)
     try:
         from plyer import notification as _plyer_notification

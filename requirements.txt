@@ -20,7 +20,9 @@ websocket-client>=1.6.0   # Kick push notifications — recordings start within 
                           # go-live via Kick's WebSocket event feed (v1.7.0+)
 
 # ── Optional (GUI enhancements) ──────────────────
-pystray>=0.19.0           # System tray icon (minimize to tray)
+pystray>=0.19.0           # System tray icon (minimize to tray). On Linux the XEmbed
+                          # backend cannot dock on Hyprland/GNOME; optional PyGObject
+                          # plus libayatana-appindicator enables the tray. Not required.
 Pillow>=9.0.0             # Required by pystray for tray icon rendering (previews use Tk's PNG)
 plyer>=2.1.0              # Desktop notifications (stream started/stopped)
 colorama>=0.4.6           # Colored console/log output (Windows terminal support)

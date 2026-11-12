@@ -147,6 +147,20 @@ Want a desktop shortcut with the icon? Run `python create_shortcut.py` once (`--
 
 **Linux/macOS:** install ffmpeg and Tk from your package manager (`sudo apt install ffmpeg python3-tk python3-venv`, `brew install ffmpeg`), then run `python3 run_msr.pyw`. The environment is `.venv/bin/python`. `python3 create_shortcut.py --linux > ~/.local/share/applications/multi-stream-recorder.desktop` adds a menu entry.
 
+**Linux tray (Hyprland, GNOME, and other StatusNotifierItem bars):** the tray icon is optional. Those desktops have no XEmbed (Xorg) system tray, so MSR leaves the tray off and keeps the window open — one info line in the log, no error. To show an icon, install the Ayatana AppIndicator library from your distro and PyGObject into MSR's own environment, then fully quit and relaunch:
+
+```
+# Arch / Omarchy
+sudo pacman -S libayatana-appindicator
+.venv/bin/pip install PyGObject
+
+# Debian / Ubuntu
+sudo apt install gir1.2-ayatanaappindicator3-0.1
+.venv/bin/pip install PyGObject
+```
+
+Or create the environment so it can see the system `gi` module: `python3 -m venv --system-site-packages .venv` (then install MSR's requirements into it as usual). PyGObject is not a required dependency; recording works without it. If you set `PYSTRAY_BACKEND` yourself, MSR leaves that choice alone.
+
 ### MSR's own environment (.venv)
 
 MSR keeps its packages in `.venv` inside the MSR folder, so updating them never changes the Python other programs on your computer use.

@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Fixed
+- Linux: hover tooltips no longer flash a large light-grey box. Every tip is one withdrawn, theme-coloured window (`msr/tooltip.py`) that is sized and then shown. On X11 it is marked as a tooltip. Windows tips are unchanged.
+- Linux: the tray prefers pystray's AppIndicator backend when PyGObject and AyatanaAppIndicator3 or AppIndicator3 import (an already-set `PYSTRAY_BACKEND` is kept). If nothing can dock — Hyprland has no XEmbed tray, and MSR's venv often has no `gi` — the tray stays off with one INFO line and no traceback, and minimize/close does not hide the window into a tray that is not there.
 - Status live preview: after minimize/restore (or leaving the tray), the strip refreshes at once again. Restoring clears the failure back-off, refreshes the age badge immediately, and if a grab was already running the kick waits for it and then runs once more instead of being dropped.
 - CI: Twitch validate-401 refresh test no longer depends on process uptime (`time.monotonic` vs a 1-hour validate interval); force the hourly validate path so GitHub runners with a fresh boot pass the same as a long-uptime PC.
 
