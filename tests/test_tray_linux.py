@@ -258,6 +258,11 @@ class BackendBeforeImportTests(unittest.TestCase):
     """A fresh interpreter: the env var is set before pystray's module body runs."""
 
     def test_appindicator_is_selected_before_pystray_imports(self):
+        # The loader reads the real platform. On Windows and macOS it must not
+        # set PYSTRAY_BACKEND; this process check is the Linux path only.
+        # Call order is covered on every OS by the source test above.
+        if not sys.platform.startswith("linux"):
+            self.skipTest("appindicator is selected only on Linux")
         fake = Path(self._fake_tree(("Gtk", "AyatanaAppIndicator3"), ayatana_only=True))
         seen = fake / "seen.txt"
         code = textwrap.dedent(f"""
