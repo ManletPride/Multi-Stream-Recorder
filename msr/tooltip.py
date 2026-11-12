@@ -11,7 +11,7 @@ handler that puts the requested ``WxH+X+Y`` back. It only does that a few
 times per tip, so a compositor that keeps resizing cannot spin the handler.
 
 The window is still created withdrawn, with the theme background already set,
-so it is not mapped first at Tk's default size and light-grey ``#d9d9d9``.
+so it is not mapped first at Tk's default size and default light background.
 
 Every tip goes through :func:`popup`. Do not add another
 ``wm_overrideredirect(True)`` window. Do not call ``update()`` here — this
