@@ -282,6 +282,7 @@ class WindowTests(Case):
         self.addCleanup(themes.set_current, themes.current())
         themes.set_current(themes.find(themes.LIGHT_THEME))
         win.refresh_theme()
+        self.assertEqual(win.overview_scroll.canvas.cget("bg"), themes.current()["bg"])
         win.frame.destroy()
         win.refresh_theme()  # after close: nothing happens, nothing raises
 
@@ -310,6 +311,98 @@ class WindowTests(Case):
             win.remove_extra_folder()
         self.assertEqual(saved[-1], "")
         self.pump(lambda: not win.busy and win.stats is not None and ("kick", "betty") not in win.stats.channels)
+
+    def _fixed(self, width, height):
+        """A panel in a holder that stays the given size (the window is shown so geometry is real)."""
+        holder = ttk.Frame(self.root, width=width, height=height)
+        holder.pack_propagate(False)
+        holder.pack(fill="both", expand=True)
+        win = lw.LibraryPanel(holder, get_roots=lambda: lib.Roots(str(self.streams)),
+                              get_roster=lambda: ["alice"], cache_path=self.cache)
+        win.frame.pack(fill="both", expand=True)
+        self.addCleanup(win.shutdown)
+        self.root.geometry(f"{width}x{height}+0+0")
+        self.root.deiconify()
+        self.root.update()
+        return holder, win
+
+    def test_short_overview_scrolls_and_a_tall_one_stretches(self):
+        _holder, win = self._fixed(900, 430)
+        chart = win.months
+        asked = int(chart.cget("height"))
+        self.assertGreaterEqual(chart.winfo_height(), asked - 2)  # not squashed to a sliver
+        canvas = win.overview_scroll.canvas
+        x1, y1, x2, y2 = (float(v) for v in canvas.cget("scrollregion").split())
+        self.assertGreater(y2 - y1, canvas.winfo_height() + 30)
+        self.assertNotEqual(canvas.yview(), (0.0, 1.0))
+        self.assertTrue(win.overview_scroll.scroll.winfo_ismapped())
+        # a tall window fills the overview: the month chart grows and there is nothing to scroll
+        self.root.geometry("900x980")
+        self.root.update()
+        self.assertGreater(chart.winfo_height(), asked + 40)
+        self.assertEqual(canvas.yview(), (0.0, 1.0))
+        self.assertEqual(canvas.cget("bg"), themes.current()["bg"])
+
+    def test_toolbar_wraps_instead_of_clipping_remove_folder(self):
+        _holder, win = self._fixed(1100, 700)
+        bar = win.toolbar
+        remove = win.remove_folder_btn
+
+        def inside():
+            for button in win._toolbar_buttons:
+                self.assertGreaterEqual(button.winfo_width(), button.winfo_reqwidth() - 2, button.cget("text"))
+                self.assertGreaterEqual(button.winfo_x(), 0)
+                self.assertLessEqual(button.winfo_x() + button.winfo_width(), bar.winfo_width() + 2, button.cget("text"))
+
+        self.assertEqual(remove.winfo_y(), win.rescan_btn.winfo_y())
+        inside()
+        self.root.geometry("460x700")
+        self.root.update()
+        self.assertGreater(remove.winfo_y(), win.rescan_btn.winfo_y())  # wrapped onto a later line
+        self.assertLess(remove.winfo_width(), bar.winfo_width())
+        inside()
+        # wide again goes back to one row
+        self.root.geometry("1100x700")
+        self.root.update()
+        self.assertEqual(remove.winfo_y(), win.rescan_btn.winfo_y())
+        inside()
+
+    def test_wheel_over_a_list_does_not_scroll_the_overview(self):
+        from msr.wheel import SEQUENCES, widget_is_inside
+        win = self.make(activate=False)
+        area = win.overview_scroll
+        self.addCleanup(lambda: area.wheel_unmap(type("E", (), {"widget": area.frame})()))
+        self.assertTrue(widget_is_inside(win.donut, area.frame))
+        self.assertTrue(widget_is_inside(win.months, area.frame))
+        self.assertFalse(widget_is_inside(win.tree, area.frame))
+        self.assertFalse(widget_is_inside(win.recordings.tree, area.frame))
+        area.wheel_on()
+        for seq in SEQUENCES:
+            self.assertTrue(area.canvas.bind_all(seq), seq)
+        # moving onto a chart (a child) keeps the binding; moving onto the channel list drops it
+        area.frame.winfo_pointerxy = lambda: (1, 1)
+        area.frame.winfo_containing = lambda x, y: win.donut
+        area.wheel_off()
+        self.assertTrue(area.canvas.bind_all("<Button-4>"))
+        area.frame.winfo_containing = lambda x, y: win.tree
+        area.wheel_off()
+        self.assertEqual(area.canvas.bind_all("<Button-4>"), "")
+        scrolled = []
+        area.canvas.yview = lambda: (0.0, 0.4)
+        area.canvas.yview_scroll = lambda n, what: scrolled.append((n, what))
+
+        class Ev:
+            def __init__(self, num, widget):
+                self.num, self.delta, self.widget = num, 0, widget
+
+        area.wheel(Ev(4, win.tree))          # the list, not the overview
+        area.wheel(Ev(4, win.recordings.tree))
+        self.assertEqual(scrolled, [])
+        area.wheel(Ev(4, win.months))        # the month chart: the overview scrolls
+        self.assertEqual(scrolled, [(-1, "units")])
+        area.canvas.yview = lambda: (0.0, 1.0)  # already showing everything: the wheel does nothing
+        area.wheel(Ev(4, win.months))
+        self.assertEqual(scrolled, [(-1, "units")])
 
 
 if __name__ == "__main__":

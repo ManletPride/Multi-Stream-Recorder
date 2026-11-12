@@ -15,8 +15,8 @@ import webbrowser
 from tkinter import filedialog, ttk
 
 from msr import themes as _themes
+from msr.scrollview import ScrollArea
 from msr.tooltip import Tooltip
-from msr.wheel import bind_wheel, unbind_wheel, wheel_steps, widget_is_inside
 from msr import twitch_connect as tc
 from msr import twitch_eventsub as te
 
@@ -206,23 +206,15 @@ class OptionsPanel:
         self.groups = {}
         t = _themes.current()
 
-        # scrollable body
-        self.frame = ttk.Frame(container)
-        self.canvas = tk.Canvas(self.frame, highlightthickness=0, borderwidth=0, bg=t["bg"])
-        self.scroll = ttk.Scrollbar(self.frame, orient=tk.VERTICAL, command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=self.scroll.set)
-        self.scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.body = ttk.Frame(self.canvas, padding=10)
-        self._win = self.canvas.create_window(0, 0, window=self.body, anchor="nw")
-        self.body.bind("<Configure>", lambda _e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._win, width=e.width))
-        # bind_all so the wheel works over the entries, not only the canvas.
-        # Leave also fires when the pointer moves onto a child (NotifyInferior);
-        # that must not drop the binding. Hiding the tab (Unmap) does drop it.
-        self.frame.bind("<Enter>", self._wheel_on, add="+")
-        self.frame.bind("<Leave>", self._wheel_off, add="+")
-        self.frame.bind("<Unmap>", self._wheel_unmap, add="+")
+        # Same scrolling frame as the Library overview (scrollbar on the right,
+        # wheel over the entries). The form does not stretch: it is as tall as
+        # its rows, and a short window scrolls.
+        self.area = ScrollArea(container, padding=10)
+        self.frame = self.area.frame
+        self.canvas = self.area.canvas
+        self.scroll = self.area.scroll
+        self.body = self.area.body
+        self._win = self.area.window
 
         self._build_twitch(t)
         if open_updates is not None:
@@ -233,27 +225,17 @@ class OptionsPanel:
         self.message.pack(fill=tk.X, pady=(6, 0))
         self.refresh_status()
 
-    def _wheel_on(self, _event=None):
-        bind_wheel(self.canvas, self._wheel, all=True)
+    def _wheel_on(self, event=None):
+        self.area.wheel_on(event)
 
-    def _wheel_off(self, _event=None):
-        try:
-            x, y = self.frame.winfo_pointerxy()
-            under = self.frame.winfo_containing(x, y)
-        except tk.TclError:
-            under = None
-        if widget_is_inside(under, self.frame):
-            return
-        unbind_wheel(self.canvas, all=True)
+    def _wheel_off(self, event=None):
+        self.area.wheel_off(event)
 
     def _wheel_unmap(self, event):
-        if getattr(event, "widget", None) is self.frame:
-            unbind_wheel(self.canvas, all=True)
+        self.area.wheel_unmap(event)
 
-    def _wheel(self, e):
-        steps = wheel_steps(e)
-        if steps and self.canvas.yview() != (0.0, 1.0):
-            self.canvas.yview_scroll(-steps, "units")
+    def _wheel(self, event):
+        self.area.wheel(event)
 
     # -- building --
 
@@ -704,7 +686,7 @@ class OptionsPanel:
 
     def apply_theme(self):
         t = _themes.current()
-        self.canvas.configure(bg=t["bg"])
+        self.area.apply_theme()
         self.link.configure(foreground=t["link"])
         for h in self.hints.values():
             h.configure(foreground=t["muted"])

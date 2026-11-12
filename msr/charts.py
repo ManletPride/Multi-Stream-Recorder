@@ -113,6 +113,7 @@ class ChartCanvas(tk.Canvas):
         self.on_click: Callable[[str], None] | None = None   # called with the clicked item's key
         self.on_double: Callable[[str], None] | None = None
         self._drawn_width = -1
+        self._drawn_height = -1
         self._job = None
         self.bind("<Configure>", self._on_configure)
         self.bind("<Motion>", self._motion)
@@ -143,6 +144,7 @@ class ChartCanvas(tk.Canvas):
         self.configure(bg=pal["bg"])
         w, h = self.size()
         self._drawn_width = w
+        self._drawn_height = h
         if not self.data:
             self.create_text(w // 2, h // 2, text=self.empty_text, fill=pal["muted"], font=FONT)
             return
@@ -175,7 +177,11 @@ class ChartCanvas(tk.Canvas):
             handler(key)
 
     def _on_configure(self, event) -> None:
-        if event.width != self._drawn_width and self._job is None:
+        # Width or height: a short Library window scrolls, a tall one gives this
+        # canvas the extra room, and the columns have to be drawn into it.
+        width = getattr(event, "width", self._drawn_width)
+        height = getattr(event, "height", self._drawn_height)
+        if (width != self._drawn_width or height != self._drawn_height) and self._job is None:
             self._job = self.after(60, self._resized)
 
     def _resized(self) -> None:
