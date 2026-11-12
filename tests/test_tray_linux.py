@@ -21,6 +21,23 @@ ROOT = Path(__file__).resolve().parent.parent
 GUI = ROOT / "msr" / "gui.py"
 
 
+class RequirementsMarkerTests(unittest.TestCase):
+    def test_pygobject_is_installed_on_linux_only(self):
+        line = next(ln for ln in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+                    if ln.startswith("PyGObject"))
+        self.assertIn(">=3.50", line)
+        self.assertIn('sys_platform == "linux"', line)
+        try:
+            from packaging.requirements import Requirement
+        except ImportError:
+            from pip._vendor.packaging.requirements import Requirement
+        req = Requirement(line.strip())
+        self.assertEqual(req.name, "PyGObject")
+        self.assertTrue(req.marker.evaluate({"sys_platform": "linux"}))
+        self.assertFalse(req.marker.evaluate({"sys_platform": "win32"}))
+        self.assertFalse(req.marker.evaluate({"sys_platform": "darwin"}))
+
+
 class BackendChoiceTests(unittest.TestCase):
     def test_linux_with_appindicator_sets_the_backend(self):
         env = {}
