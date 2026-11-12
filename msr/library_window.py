@@ -12,10 +12,11 @@ goes through a review window and msr/library_actions.py; without a context the t
 
 from __future__ import annotations
 
+import os
 import queue
 import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import filedialog, ttk
 from typing import Callable
 
 from msr import charts, dialogs
@@ -127,8 +128,10 @@ class LibraryPanel:
     def __init__(self, container, get_roots: Callable[[], lib.Roots], get_roster: Callable[[], list[str]] | None = None,
                  cache_path: str | None = None, ffprobe: str | None = None,
                  opener: Callable[[str], None] | None = None, manage_ctx: manage.ManageContext | None = None,
-                 revealer: Callable[[str], None] | None = None, clip_editor: Callable[[str], None] | None = None):
+                 revealer: Callable[[str], None] | None = None, clip_editor: Callable[[str], None] | None = None,
+                 save_extra_dirs: Callable[[str], None] | None = None):
         self.get_roots, self.get_roster = get_roots, get_roster
+        self.save_extra_dirs = save_extra_dirs
         self.mgr: manage.Manager | None = None
         self._manage_ctx = manage_ctx
         self.site_filter: str | None = None
@@ -157,7 +160,10 @@ class LibraryPanel:
         self.cancel_btn = ttk.Button(bar, text="Cancel", command=self.cancel)
         self.hours_btn = ttk.Button(bar, text="Count hours", command=lambda: self.start_hours(False))
         self.copy_btn = ttk.Button(bar, text="Copy summary", command=self.copy_summary)
-        for b in (self.rescan_btn, self.cancel_btn, self.hours_btn, self.copy_btn):
+        self.add_folder_btn = ttk.Button(bar, text="Add folder\u2026", command=self.add_extra_folder)
+        self.remove_folder_btn = ttk.Button(bar, text="Remove folder", command=self.remove_extra_folder)
+        for b in (self.rescan_btn, self.cancel_btn, self.hours_btn, self.copy_btn,
+                  self.add_folder_btn, self.remove_folder_btn):
             b.pack(side="left", padx=(0, 6))
         self.progress = ttk.Progressbar(frame, mode="indeterminate", length=200)
 
@@ -386,6 +392,8 @@ class LibraryPanel:
         can_hours = (not busy) and self.stats is not None and bool(self.stats.videos)
         self.hours_btn.state(["!disabled"] if can_hours else ["disabled"])
         self.copy_btn.state(["!disabled"] if self.stats is not None else ["disabled"])
+        for button in (self.add_folder_btn, self.remove_folder_btn):
+            button.state(["disabled"] if busy or self.save_extra_dirs is None else ["!disabled"])
         channel = self.selected_channel() if hasattr(self, "tree") else None
         self.open_btn.state(["!disabled"] if channel and channel.best_folder() else ["disabled"])
         if hasattr(self, "recs_btn"):
@@ -403,6 +411,73 @@ class LibraryPanel:
         job.start()
         self._sync_buttons()  # after start(): the buttons follow job.is_alive()
         self._schedule_poll()
+
+    def _store_extras(self, dirs: tuple[str, ...]) -> None:
+        if self.save_extra_dirs is None:
+            dialogs.show_info(self.toplevel, "Library folders",
+                              "Extra folders are saved from the running app.")
+            return
+        try:
+            self.save_extra_dirs(lib.join_extra_dirs(dirs))
+        except Exception as exc:
+            dialogs.show_error(self.toplevel, "Library folders", str(exc))
+            return
+        self.start_scan()
+
+    def add_extra_folder(self) -> None:
+        """Ask for a folder outside the layout and remember it in [Library] extra_dirs."""
+        current = tuple(self.get_roots().extra_dirs)
+        initial = current[-1] if current else (self.get_roots().streams_dir or "")
+        got = filedialog.askdirectory(parent=self.toplevel, title="Add library folder",
+                                      initialdir=initial or None)
+        if not got:
+            return
+        added = lib.add_extra_dir(current, got)
+        if isinstance(added, str):
+            dialogs.show_info(self.toplevel, "Library folders", added)
+            return
+        if not os.path.isdir(added[-1]):
+            dialogs.show_error(self.toplevel, "Library folders", "That folder is not there.")
+            return
+        self._store_extras(added)
+
+    def remove_extra_folder(self) -> None:
+        current = tuple(self.get_roots().extra_dirs)
+        if not current:
+            dialogs.show_info(self.toplevel, "Library folders",
+                              "No extra folders yet. Add folder\u2026 includes one in the next scan.")
+            return
+        if len(current) == 1:
+            if dialogs.ask_yes_no(self.toplevel, "Library folders",
+                                  f"Stop scanning this folder?\n\n{current[0]}\n\n"
+                                  "Nothing in it is deleted."):
+                self._store_extras(())
+            return
+        picked = self._pick_extra(current)
+        if picked:
+            self._store_extras(lib.remove_extra_dir(current, picked))
+
+    def _pick_extra(self, dirs: tuple[str, ...]) -> str | None:
+        win, frame = dialogs.new_dialog(self.toplevel, "Remove library folder")
+        ttk.Label(frame, text="Which extra folder should the Library stop scanning?\n"
+                  "The files stay where they are.").pack(anchor="w")
+        tree = ttk.Treeview(frame, show="tree", height=min(8, len(dirs)), selectmode="browse")
+        tree.pack(fill="x", pady=(8, 0))
+        for index, folder in enumerate(dirs):
+            tree.insert("", "end", iid=str(index), text=folder)
+        tree.selection_set("0")
+        chosen: list[str | None] = [None]
+
+        def ok() -> None:
+            sel = tree.selection()
+            if sel:
+                chosen[0] = dirs[int(sel[0])]
+            win.destroy()
+
+        buttons = dialogs._buttons(frame, win, [("remove", "Remove", ok), ("cancel", "Cancel", win.destroy)])
+        dialogs._bind_keys(win, ok, win.destroy)
+        dialogs.run_modal(win, self.toplevel, buttons["cancel"])
+        return chosen[0]
 
     def start_scan(self) -> None:
         if self.busy:

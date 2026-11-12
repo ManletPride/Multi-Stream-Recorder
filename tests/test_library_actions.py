@@ -198,6 +198,38 @@ class GuardTests(Tree):
             self.skipTest("cannot create a link here")
         self.assertNotIn("clips", self.guard().tops)
 
+    def test_lowercase_layout_is_in_the_library_and_an_extra_folder_is_not(self):
+        low = self.base / "casecheck"
+        if not _two_case_names(low):
+            self.skipTest("this volume cannot hold two folders that differ only by case")
+        old = put(low / "processed/kick/alice/old_20260101_000000.mp4", 20)
+        put(low / "Processed/kick/alice/new_20260201_000000.mp4", 20)
+        extra = put(self.base / "Streamers/betty/kick/x_20260301_000000.mp4", 20)
+        roots = lib.Roots(str(low), extra_dirs=(str(self.base / "Streamers"),))
+        guard = act.Guard(roots, data_dir=str(self.data))
+        self.assertIsNone(guard.check(str(old), size=20, mtime=old.stat().st_mtime))
+        self.assertIn("not inside", guard.check(str(extra)) or "")
+        # the scan that feeds the guard does not write into either tree
+        before = sorted((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in low.rglob("*"))
+        lib.scan_library(roots, collect_files=True)
+        after = sorted((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in low.rglob("*"))
+        self.assertEqual(before, after)
+
+
+def _two_case_names(folder: Path) -> bool:
+    folder.mkdir(parents=True, exist_ok=True)
+    a, b = folder / "processed", folder / "Processed"
+    a.mkdir()
+    try:
+        b.mkdir()
+    except FileExistsError:
+        a.rmdir()
+        return False
+    same = os.path.samefile(a, b)
+    if same:
+        a.rmdir()
+    return not same
+
 
 class PlanTests(Tree):
     def test_plan_counts_sizes_and_brings_the_info_file(self):

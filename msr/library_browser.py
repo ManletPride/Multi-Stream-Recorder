@@ -139,8 +139,9 @@ class RecordingsTab:
         self._gen += 1
         gen, cancel, out = self._gen, threading.Event(), self.out
         self._cancel = cancel
-        folders = {k: v for k, v in ch.paths.items() if k in LIST_CATEGORIES}
-        clips_dir = ch.paths.get("clips")
+        listed = ch.listing_map()
+        folders = {k: v for k, v in listed.items() if k in LIST_CATEGORIES}
+        clips_dir = listed.get("clips")
 
         def work():  # worker: no Tk here, only the queue
             try:

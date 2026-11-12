@@ -101,12 +101,21 @@ def unique_path(folder: str, name: str) -> str:
 @dataclass
 class Library:
     """The real folders the tools may work in, resolved once."""
-    tops: dict[str, str]          # category -> absolute folder (links refused)
+    tops: dict[str, str]          # category -> fullest folder (where a restore is written)
     pending_top: str              # where PendingDeletion is (or will be created)
     streams_dir: str
+    folders: dict = field(default_factory=dict)  # category -> every case variant
+
+    def _places(self):
+        if self.folders:
+            for category, paths in self.folders.items():
+                for top in paths:
+                    yield category, top
+            return
+        yield from self.tops.items()
 
     def category_of(self, path: str) -> str | None:
-        for category, top in self.tops.items():
+        for category, top in self._places():
             if inside(path, top):
                 return category
         return None
@@ -114,22 +123,29 @@ class Library:
 
 def resolve_library(roots: lib.Roots) -> Library:
     tops: dict[str, str] = {}
+    folders: dict[str, list[str]] = {}
     streams = (roots.streams_dir or "").strip()
     if streams and os.path.isdir(streams) and not is_link_path(streams):
-        for category, folder in lib._top_level_map(streams).items():
-            if not is_link_path(folder):
-                tops[category] = os.path.abspath(folder)
+        for category, paths in lib._top_level_map(streams).items():
+            real = [os.path.abspath(p) for p in paths if p and not is_link_path(p)]
+            real = [p for p in real if os.path.dirname(p) != p and not (streams and _norm(p) == _norm(streams))]
+            if real:
+                folders[category] = real
+                tops[category] = lib.primary_dir(real, category)
     clips = (roots.clips_dir or "").strip()
-    if not clips and streams and os.path.isdir(streams):
-        named = next((c for c in lib._child_dirs(streams) if c.lower() == "clips"), "")
-        clips = os.path.join(streams, named) if named else ""
-    if clips and os.path.isdir(clips) and not is_link_path(clips):
-        tops["clips"] = os.path.abspath(clips)
-    for category, top in list(tops.items()):  # never a drive root or the streams folder itself
-        if os.path.dirname(top) == top or (streams and _norm(top) == _norm(streams)):
-            del tops[category]
+    clip_paths: list[str] = []
+    if clips:
+        if os.path.isdir(clips) and not is_link_path(clips):
+            clip_paths = [os.path.abspath(clips)]
+    elif streams and os.path.isdir(streams):
+        from msr.util import matching_dirs
+        clip_paths = [os.path.abspath(p) for p in matching_dirs(streams, "Clips") if not is_link_path(p)]
+    clip_paths = [p for p in clip_paths if os.path.dirname(p) != p and not (streams and _norm(p) == _norm(streams))]
+    if clip_paths:
+        folders["clips"] = clip_paths
+        tops["clips"] = lib.primary_dir(clip_paths, "clips")
     pending = tops.get("pending") or (os.path.join(os.path.abspath(streams), PENDING_DELETION_FOLDER) if streams else "")
-    return Library(tops, pending, os.path.abspath(streams) if streams else "")
+    return Library(tops, pending, os.path.abspath(streams) if streams else "", folders)
 
 
 # ------------------------------------------------------------------ guard
@@ -195,8 +211,11 @@ class Guard:
         return (platform.lower(), channel.replace("\\", "/").lower()) in self._busy_channels
 
     def _location(self, path: str):
-        """(category, top, relative parts) for a path below an allowed top, else None."""
-        for category, top in self.tops.items():
+        """(category, top, relative parts) for a path below an allowed top, else None.
+
+        Every case variant counts (``processed`` and ``Processed``), so a file in the
+        Windows-era tree can be managed. Extra Library folders are not in here."""
+        for category, top in self.library._places():
             if inside(path, top):
                 rel = os.path.relpath(os.path.abspath(path), top).replace("\\", "/").split("/")
                 return category, top, rel

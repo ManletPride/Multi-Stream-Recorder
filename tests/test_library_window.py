@@ -285,6 +285,32 @@ class WindowTests(Case):
         win.frame.destroy()
         win.refresh_theme()  # after close: nothing happens, nothing raises
 
+    def test_add_and_remove_folder_saves_extra_dirs_and_rescans(self):
+        saved = []
+        extra = self.base / "Streamers"
+        put(extra / "kick/betty/betty_20260101_000000.mp4", 80)
+        holder = {"dirs": ()}
+
+        def roots():
+            return lib.Roots(str(self.streams), extra_dirs=holder["dirs"])
+
+        def save(text):
+            saved.append(text)
+            holder["dirs"] = lib.split_extra_dirs(text)
+
+        win = self.scanned(get_roots=roots, save_extra_dirs=save)
+        self.assertNotIn("disabled", win.add_folder_btn.state())
+        with mock.patch.object(lw.filedialog, "askdirectory", return_value=str(extra)):
+            win.add_extra_folder()
+        self.pump(lambda: not win.busy and win.stats is not None and ("kick", "betty") in win.stats.channels)
+        self.assertEqual(saved[-1], str(extra))
+        self.assertEqual(win.stats.channels[("kick", "betty")].rec_bytes, 80)
+        # removing the only extra folder asks, then forgets it
+        with mock.patch.object(dialogs, "ask_yes_no", return_value=True):
+            win.remove_extra_folder()
+        self.assertEqual(saved[-1], "")
+        self.pump(lambda: not win.busy and win.stats is not None and ("kick", "betty") not in win.stats.channels)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,10 +9,14 @@ files that have none, rate-limited, cancellable and remembered in a cache.
 Layout it understands (see AGENTS.md): ``<streams_dir>/Processed|Recorded|PendingDeletion/
 <platform>/<channel folder>/files`` plus the clips folder (``clips_dir`` or
 ``<streams_dir>/Clips``, same ``<platform>/<channel>`` shape) and optional extra folders.
-Top-level folder names are matched case-insensitively.
+Folder names are matched case-insensitively, and every case variant that exists is scanned
+(``processed`` and ``Processed`` are one site, not two). Extra folders are attributed to a
+platform and channel from the ``.meta.json`` sidecar, then from folder names, then left
+under Other / (unsorted). The date prefers the sidecar, then the date in the file name.
 
-Nothing in this module draws, deletes or writes anything except the optional duration
-cache, whose location the caller chooses (the app's own data folder).
+Nothing in this module draws, deletes or writes anything inside a scanned folder. The only
+write is the optional duration cache, whose location the caller chooses (the app's own
+data folder).
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ from typing import Callable, Iterable, NamedTuple
 
 from msr import storage
 from msr.nowindow import no_window_kwargs
-from msr.util import PENDING_DELETION_FOLDER, channel_key_to_dirs
+from msr.util import KNOWN_PLATFORMS, PENDING_DELETION_FOLDER, channel_key_to_dirs, matching_dirs, prefer_dir
 
 VIDEO_EXT = frozenset({".mp4", ".mkv", ".ts", ".webm", ".mov", ".m4v", ".flv", ".avi", ".m4a", ".mp3"})
 IMAGE_EXT = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif"})
@@ -91,10 +95,41 @@ def month_key(ts: float) -> str:
 # ------------------------------------------------------------------ data
 @dataclass
 class Roots:
-    """Where to look. clips_dir blank = streams_dir/Clips. extra_dirs are scanned as 'Other'."""
+    """Where to look. clips_dir blank = streams_dir/Clips. extra_dirs are folders outside the
+    Processed/Recorded/PendingDeletion/Clips layout; their videos are attributed to a channel."""
     streams_dir: str
     clips_dir: str = ""
     extra_dirs: tuple[str, ...] = ()
+
+
+def split_extra_dirs(raw: str) -> tuple[str, ...]:
+    """``[Library] extra_dirs`` is a ';' separated list. Quotes around one entry are stripped."""
+    return tuple(p.strip().strip('"') for p in (raw or "").split(";") if p.strip().strip('"'))
+
+
+def join_extra_dirs(dirs: Iterable[str]) -> str:
+    return ";".join(d for d in dirs if str(d).strip())
+
+
+def same_folder(a: str, b: str) -> bool:
+    try:
+        return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+    except (OSError, ValueError):
+        return False
+
+
+def add_extra_dir(dirs: tuple[str, ...], new: str) -> tuple[str, ...] | str:
+    """The list plus ``new``, or a short reason the folder was not added. Does not touch disk."""
+    new = os.path.normpath((new or "").strip().strip('"'))
+    if not new or new == ".":
+        return "Choose a folder."
+    if any(same_folder(new, old) for old in dirs):
+        return "That folder is already included."
+    return dirs + (new,)
+
+
+def remove_extra_dir(dirs: tuple[str, ...], which: str) -> tuple[str, ...]:
+    return tuple(old for old in dirs if not same_folder(old, which))
 
 
 def roots_from_config(config) -> Roots:
@@ -103,14 +138,13 @@ def roots_from_config(config) -> Roots:
     streams = (config.get("Paths", "streams_dir", fallback="") or "").strip()
     clips = (config.get("Clipping", "clips_dir", fallback="") or "").strip()
     raw = config.get("Library", "extra_dirs", fallback="") or ""
-    extras = tuple(p.strip().strip('"') for p in raw.split(";") if p.strip())
-    return Roots(streams, clips, extras)
+    return Roots(streams, clips, split_extra_dirs(raw))
 
 
 class ChannelStat:
     __slots__ = ("platform", "name", "rec_bytes", "rec_files", "raw_bytes", "raw_files", "pending_bytes",
                  "pending_files", "clip_bytes", "clip_files", "shot_bytes", "shot_files", "first", "last",
-                 "seconds", "timed", "in_roster", "paths")
+                 "seconds", "timed", "in_roster", "paths", "all_paths", "folder_bytes")
 
     def __init__(self, platform: str, name: str):
         self.platform, self.name = platform, name
@@ -122,7 +156,25 @@ class ChannelStat:
         self.seconds: float | None = None  # recorded time; None until counted
         self.timed = 0  # finished recordings whose length is known
         self.in_roster: bool | None = None  # None = roster unknown
-        self.paths: dict[str, str] = {}  # category -> folder (for 'Open folder'; never exported)
+        self.paths: dict[str, str] = {}  # category -> folder to open (never exported)
+        self.all_paths: dict[str, list[str]] = {}  # category -> every case variant (never exported)
+        self.folder_bytes: dict[str, int] = {}
+
+    def note_folder(self, category: str, folder: str, size: int = 0) -> None:
+        """Remember a folder this channel's files live in. Open folder uses the fullest one."""
+        found = self.all_paths.setdefault(category, [])
+        if folder not in found:
+            found.append(folder)
+        if size:
+            self.folder_bytes[folder] = self.folder_bytes.get(folder, 0) + size
+        self.paths[category] = max(found, key=lambda p: (self.folder_bytes.get(p, 0), p))
+
+    def listing_map(self) -> dict:
+        """Category -> every folder the Recordings tab should list (case variants included)."""
+        out = {}
+        for category, folder in self.paths.items():
+            out[category] = list(self.all_paths.get(category) or [folder])
+        return out
 
     @property
     def recordings_bytes(self) -> int:
@@ -233,23 +285,125 @@ class LibraryStats:
         return sorted(rows, key=lambda r: (-r[1], r[0]))
 
 
+# ------------------------------------------------------------------ extra-folder attribution
+_SIDECAR_READ_MAX = 65536
+
+
+def _meta_text(value) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _iso_timestamp(value) -> float | None:
+    text = _meta_text(value)
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.datetime.fromisoformat(text)
+        return parsed.timestamp()
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def read_sidecar_meta(video_path: str) -> dict:
+    """The ``.meta.json`` next to a recording, or {}. Read-only; a huge or broken file is ignored."""
+    path = os.path.splitext(video_path)[0] + SIDECAR_SUFFIX
+    try:
+        if os.path.getsize(path) > _SIDECAR_READ_MAX:
+            return {}
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError, UnicodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _from_folder_names(parts: tuple[str, ...]) -> tuple[str | None, str | None]:
+    """Platform from a parent named like a known site; channel is the folders under it.
+
+    With no known platform, the channel is the folder the file sits in."""
+    platform = channel = None
+    for index, part in enumerate(parts):
+        if part.lower() in KNOWN_PLATFORMS:
+            platform = part.lower()
+            rest = parts[index + 1:]
+            if rest:
+                channel = "/".join(rest)
+            break
+    if not channel and parts and parts[-1].lower() not in KNOWN_PLATFORMS:
+        channel = parts[-1]
+    return platform, channel
+
+
+def attribute_extra(parts: tuple[str, ...], filename: str, meta: dict | None = None) -> tuple[str, str, float | None]:
+    """(platform, channel, timestamp or None) for a file that is not in the layout tree.
+
+    Order: sidecar ``platform`` / ``channel`` / ``recording_started`` (then ``recorded_at``),
+    then a parent folder named like a known platform and the channel folder under it,
+    then the date in the file name. A file that still has no platform and no channel is
+    Other / (unsorted). Missing sidecar keys are skipped. The timestamp is None when neither
+    the sidecar nor the file name has a date (the scan then uses the file's modified time)."""
+    meta = meta or {}
+    platform = _meta_text(meta.get("platform"))
+    channel = _meta_text(meta.get("channel"))
+    if platform:
+        platform = platform.lower()
+    when = _iso_timestamp(meta.get("recording_started")) or _iso_timestamp(meta.get("recorded_at"))
+    if when is None:
+        when = date_from_name(filename)
+    if not platform or not channel:
+        from_platform, from_channel = _from_folder_names(parts)
+        platform = platform or from_platform
+        channel = channel or from_channel
+    if not platform and not channel:
+        return "other", UNSORTED, when
+    return platform or "other", channel or UNSORTED, when
+
+
 # ------------------------------------------------------------------ scanning
 class Cancelled(Exception):
     pass
 
 
 def _top_level_map(streams_dir: str) -> dict:
-    """category -> actual folder name under streams_dir (matched case-insensitively)."""
-    found: dict = {}
+    """category -> every real folder under streams_dir whose name matches, ignoring case.
+
+    ``processed`` and ``Processed`` are both returned. The same directory inode is listed once.
+    Nothing is created."""
+    found: dict[str, list[str]] = {}
+    seen: dict[str, set] = {}
     try:
         with os.scandir(streams_dir) as it:
             for entry in it:
                 category = CATEGORY_FOLDERS.get(entry.name.lower())
-                if category and category not in found and _is_real_dir(entry):
-                    found[category] = entry.path
+                if not category or not _is_real_dir(entry) or _is_link(entry):
+                    continue
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                ident = (st.st_dev, st.st_ino) if getattr(st, "st_ino", 0) else None
+                bag = seen.setdefault(category, set())
+                if ident is not None:
+                    if ident in bag:
+                        continue
+                    bag.add(ident)
+                found.setdefault(category, []).append(entry.path)
     except OSError:
         pass
     return found
+
+
+_CANONICAL_TOP = {"processed": "Processed", "recorded": "Recorded",
+                  "pending": PENDING_DELETION_FOLDER, "clips": "Clips"}
+
+
+def primary_dir(paths: list[str], category: str) -> str:
+    """Which case variant Open / PendingDeletion moves should use: the fullest tree."""
+    return prefer_dir(paths, _CANONICAL_TOP.get(category, category))
 
 
 def _is_real_dir(entry) -> bool:
@@ -281,6 +435,7 @@ def scan_library(roots: Roots, progress: Callable[[int, int, str], None] | None 
     now = time.time() if now is None else now
     stats = LibraryStats(scanned_at=now)
     state = {"last_report": 0.0, "tick": 0}
+    seen_inodes: set = set()
 
     def check(label: str) -> None:
         state["tick"] += 1
@@ -292,12 +447,12 @@ def scan_library(roots: Roots, progress: Callable[[int, int, str], None] | None 
                 state["last_report"] = t
                 progress(stats.files_seen, stats.bytes_seen, label)
 
-    def channel_for(platform: str, name: str, category: str, folder: str) -> ChannelStat:
+    def channel_for(platform: str, name: str, category: str, folder: str, size: int = 0) -> ChannelStat:
         key = (platform.lower(), name.lower())
         stat = stats.channels.get(key)
         if stat is None:
             stat = stats.channels[key] = ChannelStat(platform.lower(), name)
-        stat.paths.setdefault(category, folder)
+        stat.note_folder(category, folder, size)
         return stat
 
     def add_cat(name: str, size: int) -> None:
@@ -309,22 +464,24 @@ def scan_library(roots: Roots, progress: Callable[[int, int, str], None] | None 
         ch.first = ts if ch.first is None else min(ch.first, ts)
         ch.last = ts if ch.last is None else max(ch.last, ts)
 
-    def handle_file(entry, st, category: str, platform: str, channel: str, folder: str, rel_key: str) -> None:
+    def handle_file(entry, st, category: str, platform: str, channel: str, folder: str, rel_key: str,
+                    when_override: float | None = None, manageable: bool = True) -> None:
         size = st.st_size
         name = entry.name
         low = name.lower()
         ext = os.path.splitext(low)[1]
+        partial = low.endswith(PARTIAL_SUFFIXES)
         stats.files_seen += 1
         stats.bytes_seen += size
         if category == "other":
             add_cat("other", size)
             return
-        ch = channel_for(platform, channel, category, folder)
-        partial = low.endswith(PARTIAL_SUFFIXES)
+        ch = channel_for(platform, channel, category, folder, size if ext in VIDEO_EXT or partial else 0)
         mtime = st.st_mtime
-        if collect_files:
+        # Extra folders are scan-only: they are counted, but they never enter the clean-up list.
+        if collect_files and manageable:
             stats.files.append(FileRec(entry.path, size, mtime, st.st_ctime, category, platform.lower(), channel,
-                                       classify(name, category), date_from_name(name) or mtime))
+                                       classify(name, category), when_override or date_from_name(name) or mtime))
         if partial:
             stats.partial_files += 1
             stats.partial_bytes += size
@@ -352,7 +509,7 @@ def scan_library(roots: Roots, progress: Callable[[int, int, str], None] | None 
         finished = category == "processed" and not partial
         bucket = "processed" if finished else "raw"
         add_cat(bucket, size)
-        when = date_from_name(name) or mtime
+        when = when_override or date_from_name(name) or mtime
         stats.oldest = when if stats.oldest is None else min(stats.oldest, when)
         stats.newest = when if stats.newest is None else max(stats.newest, when)
         widen(ch, when)
@@ -379,8 +536,30 @@ def scan_library(roots: Roots, progress: Callable[[int, int, str], None] | None 
             ch.raw_bytes += size
             ch.raw_files += 1
 
-    def walk(top: str, category: str, label: str) -> None:
+    def _fresh(st) -> bool:
+        """False when this file was already counted (another case variant, or a hard link)."""
+        ino = getattr(st, "st_ino", 0)
+        if not ino:
+            return True
+        ident = (st.st_dev, ino)
+        if ident in seen_inodes:
+            return False
+        seen_inodes.add(ident)
+        return True
+
+    def walk(top: str, category: str, label: str, *, attribute: bool = False) -> None:
         stats.roots_found[label] = True
+        ident = None
+        try:
+            st_top = os.lstat(top)
+            if getattr(st_top, "st_ino", 0):
+                ident = (st_top.st_dev, st_top.st_ino)
+        except OSError:
+            ident = None
+        if ident is not None:
+            if ident in seen_inodes:
+                return  # this directory was already scanned (same folder, other case or an extra)
+            seen_inodes.add(ident)
         # (path, depth, relative parts below top)
         stack = [(top, 0, ())]
         while stack:
@@ -413,19 +592,51 @@ def scan_library(roots: Roots, progress: Callable[[int, int, str], None] | None 
                         stats.symlinks_skipped += 1
                         continue
                     if entry.is_dir(follow_symlinks=False):
+                        ino = getattr(st, "st_ino", 0)
+                        if ino:
+                            ident = (st.st_dev, ino)
+                            if ident in seen_inodes:
+                                continue
+                            seen_inodes.add(ident)
                         if depth < MAX_DEPTH:
                             stack.append((entry.path, depth + 1, parts + (entry.name,)))
                         continue
-                    if category == "other":
-                        platform, channel = "other", parts[0] if parts else os.path.basename(top)
-                    elif len(parts) >= 2:
+                    if not _fresh(st):
+                        continue
+                    # The top folder's own spelling keeps `processed/...` and `Processed/...`
+                    # from sharing one cache key when both trees exist.
+                    rel_key = category + "/" + os.path.basename(top) + "/" + "/".join(parts + (entry.name,))
+                    if attribute:
+                        _handle_extra(entry, st, parts, path, rel_key)
+                        continue
+                    if len(parts) >= 2:
                         platform, channel = parts[0], "/".join(parts[1:])
                     elif len(parts) == 1:
                         platform, channel = parts[0], UNSORTED
                     else:
                         platform, channel = UNSORTED, UNSORTED
-                    rel_key = category + "/" + "/".join(parts + (entry.name,))
                     handle_file(entry, st, category, platform, channel, path, rel_key)
+
+    def _handle_extra(entry, st, parts, folder, rel_key: str) -> None:
+        """A file outside the layout. Videos are attributed; everything else stays an other-file total."""
+        low = entry.name.lower()
+        ext = os.path.splitext(low)[1]
+        partial = low.endswith(PARTIAL_SUFFIXES)
+        if low.endswith(SIDECAR_SUFFIX):
+            # Counted with the other info files. Not a channel of its own, and not a recording.
+            stats.files_seen += 1
+            stats.bytes_seen += st.st_size
+            add_cat("sidecars", st.st_size)
+            return
+        if ext not in VIDEO_EXT and not partial:
+            handle_file(entry, st, "other", "other", UNSORTED, folder, rel_key, manageable=False)
+            return
+        meta = {} if partial else read_sidecar_meta(entry.path)
+        platform, channel, when = attribute_extra(parts, entry.name, meta)
+        # .ts and partial downloads are raw; a finished container counts with Processed/.
+        category = "recorded" if ext == ".ts" or partial else "processed"
+        handle_file(entry, st, category, platform, channel, folder, rel_key,
+                    when_override=when, manageable=False)
 
     try:
         streams = roots.streams_dir
@@ -434,22 +645,28 @@ def scan_library(roots: Roots, progress: Callable[[int, int, str], None] | None 
             stats.roots_found["Recordings folder"] = False
         for category, label in (("processed", "Processed"), ("recorded", "Recorded"),
                                 ("pending", PENDING_DELETION_FOLDER)):
-            if category in top:
-                walk(top[category], category, label)
+            folders = top.get(category) or []
+            if folders:
+                for folder in folders:
+                    walk(folder, category, label)
             else:
                 stats.roots_found[label] = False
-        clips = roots.clips_dir
-        if not clips and streams:
-            clips = next((e for e in _child_dirs(streams) if e.lower() == "clips"), "")
-            clips = os.path.join(streams, clips) if clips else ""
-        if clips and os.path.isdir(clips):
-            walk(clips, "clips", "Clips")
+        clips = (roots.clips_dir or "").strip()
+        clip_folders: list[str] = []
+        if clips:
+            if os.path.isdir(clips):
+                clip_folders = [clips]
+        elif streams:
+            clip_folders = matching_dirs(streams, "Clips")
+        if clip_folders:
+            for folder in clip_folders:
+                walk(folder, "clips", "Clips")
         else:
             stats.roots_found["Clips"] = False
         for number, extra in enumerate(roots.extra_dirs, 1):
             name = f"Other folder {number}"  # numbered: a folder's own name is not exported
             if os.path.isdir(extra):
-                walk(extra, "other", name)
+                walk(extra, "other", name, attribute=True)
             else:
                 stats.roots_found[name] = False
     except Cancelled:

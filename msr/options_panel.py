@@ -123,7 +123,8 @@ GROUPS = (
     )),
     ("Other", False, (
         row("Library", "extra_dirs", "Extra Library folders", "dirlist", "scan only, ; separated",
-            "Shown in the Library tab as Other folder N. Never cleaned up.", applies=NOW, width=34),
+            "Videos are matched to a site and channel (sidecar, then folder names). Never cleaned up. "
+            "The Library tab can add and remove these too.", applies=NOW, width=34),
         row("Health", "check_minutes", "Health check every (min)", hint="0 = off",
             tip="Free space, recordings that stopped growing, sites whose checks all keep failing.\n"
                 "Reads the status table only: no extra network, check rates unchanged.", applies=NOW),

@@ -1540,10 +1540,11 @@ def main_gui(config):
     def _clips_output_dir(platform, username_dir):
         """Resolve the output directory for clips/screenshots of a channel,
         honoring the clips_dir config override (blank = streams_dir/Clips)."""
+        from msr.util import reuse_dir, reuse_path
         base = config.get('Clipping', 'clips_dir', fallback='').strip()
         if not base:
-            base = os.path.join(config.get('Paths', 'streams_dir'), 'Clips')
-        return os.path.join(base, platform, username_dir)
+            base = reuse_dir(config.get('Paths', 'streams_dir'), 'Clips')
+        return reuse_path(base, platform, username_dir)
 
     def _run_clip_job(ch_name, kind):
         """Off the GUI thread: resolve the live .ts, cut a clip or grab a
@@ -1653,8 +1654,9 @@ def main_gui(config):
         )
 
     def _clips_base():
+        from msr.util import reuse_dir
         return (config.get('Clipping', 'clips_dir', fallback='').strip()
-                or os.path.join(config.get('Paths', 'streams_dir'), 'Clips'))
+                or reuse_dir(config.get('Paths', 'streams_dir'), 'Clips'))
 
     def _open_clip_editor(path=None, ch_name=None, live=False, start_at=None, end_at=None):
         """The Clip Editor on a recording in progress (live) or a finished file."""
@@ -1675,9 +1677,15 @@ def main_gui(config):
 
     def _newest_processed(ch_name):
         try:
+            from msr.util import read_layout_paths
             platform, username_dir = channel_key_to_dirs(ch_name)
-            folder = os.path.join(config.get('Paths', 'streams_dir'), 'Processed', platform, username_dir)
-            mp4s = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith('.mp4')]
+            mp4s = []
+            for folder in read_layout_paths(config.get('Paths', 'streams_dir'), 'Processed',
+                                            platform, username_dir):
+                if not os.path.isdir(folder):
+                    continue
+                mp4s.extend(os.path.join(folder, f) for f in os.listdir(folder)
+                            if f.lower().endswith('.mp4'))
             return max(mp4s, key=os.path.getmtime) if mp4s else None
         except (OSError, ValueError):
             return None
@@ -2023,6 +2031,12 @@ def main_gui(config):
         return _library_actions.busy_from_status(dict(getattr(recorder, 'status_dict', None) or {}))
 
     library_data_dir = os.path.dirname(os.path.abspath(config.config_file))
+
+    def _library_save_extra_dirs(text):
+        # Same write path as Options and config_set. A rescan reads the new list.
+        running = bool(recorder and recorder.is_running)
+        _control.apply_setting(config, "Library", "extra_dirs", text, recording=running)
+
     library_panel = _library_window.LibraryPanel(
         notebook,
         manage_ctx=_library_manage.ManageContext(
@@ -2036,7 +2050,8 @@ def main_gui(config):
         get_roster=lambda: [c["name"] for c in channels],
         cache_path=os.path.join(os.path.dirname(os.path.abspath(config.config_file)), "library_cache.json"),
         ffprobe=ffprobe_from_ffmpeg(config.get("Advanced", "ffmpeg_path", fallback="ffmpeg") or "ffmpeg"),
-        opener=open_local_path)
+        opener=open_local_path,
+        save_extra_dirs=_library_save_extra_dirs)
     _library_panel[0] = library_panel
     notebook.add(library_panel.frame, text="  Library  ")
 

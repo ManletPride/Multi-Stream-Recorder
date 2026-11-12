@@ -39,6 +39,208 @@ KNOWN_PLATFORMS = frozenset({
 _PREFIXED_PLATFORMS = frozenset(KNOWN_PLATFORMS - {"kick"})
 _UNSAFE_NAME_CHARS = set(' \t\n\r<>"|?*:/\\')
 
+# How many directory entries to count when several case-variants of one folder exist.
+# Enough that a nearly empty Linux sibling loses to the Windows-era tree, and small
+# enough that the choice stays a short scandir (it runs when a recording starts, not
+# on the library scan).
+_DIR_WEIGHT_CAP = 2000
+
+
+def linux_reuses_dir_case() -> bool:
+    """Linux creates a second folder when only the case differs. Windows (and the
+    usual macOS volume) does not, so the spelled path is already the existing one."""
+    return sys.platform.startswith("linux")
+
+
+def _split_parts(parts) -> list[str]:
+    out = []
+    for part in parts:
+        for piece in str(part).replace("\\", "/").split("/"):
+            if piece not in ("", "."):
+                out.append(piece)
+    return out
+
+
+def _dir_inode(path: str):
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if not getattr(st, "st_ino", 0):
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def matching_dirs(parent: str, name: str) -> list[str]:
+    """Real child directories of ``parent`` whose name matches ``name`` ignoring case.
+
+    Symlinks are skipped. The same directory inode is returned once. Nothing is created.
+    A case-insensitive volume has at most one match; a case-sensitive one can have several
+    (``processed`` and ``Processed``)."""
+    if not parent or not name or not os.path.isdir(parent):
+        return []
+    want = name.lower()
+    found = []
+    seen = set()
+    try:
+        with os.scandir(parent) as it:
+            for entry in it:
+                if entry.name.lower() != want:
+                    continue
+                try:
+                    if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                        continue
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                ident = (st.st_dev, st.st_ino) if getattr(st, "st_ino", 0) else None
+                if ident is not None:
+                    if ident in seen:
+                        continue
+                    seen.add(ident)
+                found.append(entry.path)
+    except OSError:
+        return []
+    return found
+
+
+def _dir_weight(path: str, cap: int = _DIR_WEIGHT_CAP) -> int:
+    """How full a directory looks, counting entries (not following links) up to ``cap``."""
+    n = 0
+    stack = [path]
+    seen = set()
+    while stack and n < cap:
+        current = stack.pop()
+        ident = _dir_inode(current)
+        if ident is not None:
+            if ident in seen:
+                continue
+            seen.add(ident)
+        try:
+            with os.scandir(current) as it:
+                for entry in it:
+                    n += 1
+                    if n >= cap:
+                        return n
+                    try:
+                        if entry.is_dir(follow_symlinks=False) and not entry.is_symlink():
+                            stack.append(entry.path)
+                    except OSError:
+                        pass
+        except OSError:
+            break
+    return n
+
+
+def prefer_dir(paths: list[str], requested: str) -> str:
+    """The directory to keep using when several case-variants exist.
+
+    The one that already holds more files wins, so new recordings join the old tree
+    instead of the nearly empty sibling Linux created. A tie prefers the all-lowercase
+    name (what Windows wrote) and then the exact spelling."""
+    if not paths:
+        raise ValueError("prefer_dir needs a directory")
+    if len(paths) == 1:
+        return paths[0]
+
+    def key(path: str):
+        base = os.path.basename(path)
+        return (_dir_weight(path), base == requested.lower() and base != requested,
+                base == requested, base.lower())
+
+    return max(paths, key=key)
+
+
+def reuse_dir(parent: str, name: str, *, reuse: bool | None = None) -> str:
+    """``parent/name``, or on Linux an existing child whose name matches ignoring case.
+
+    Does not create anything. When no child matches, the spelled path is returned so the
+    caller can create it with today's name. Windows always returns the spelled path: the
+    volume already treats ``Processed`` and ``processed`` as one folder."""
+    if reuse is None:
+        reuse = linux_reuses_dir_case()
+    if not reuse or not parent or not name:
+        return os.path.join(parent, name)
+    found = matching_dirs(parent, name)
+    if not found:
+        return os.path.join(parent, name)
+    return prefer_dir(found, name)
+
+
+def reuse_path(parent: str, *parts: str, reuse: bool | None = None) -> str:
+    """Join ``parts`` under ``parent``, reusing an existing directory at each step on Linux."""
+    path = parent
+    for piece in _split_parts(parts):
+        path = reuse_dir(path, piece, reuse=reuse)
+    return path
+
+
+def layout_bases(root: str, *, reuse: bool | None = None) -> tuple[str, str, str]:
+    """(Recorded, Processed, PendingDeletion) under ``root``, existing case reused on Linux."""
+    return (reuse_dir(root, "Recorded", reuse=reuse),
+            reuse_dir(root, "Processed", reuse=reuse),
+            reuse_dir(root, PENDING_DELETION_FOLDER, reuse=reuse))
+
+
+def channel_record_dirs(root: str, platform: str, username_dir: str, *,
+                        reuse: bool | None = None) -> tuple[str, str, str]:
+    """Where one channel's raw file, finished file and PendingDeletion copy go.
+
+    On Linux each existing folder whose name matches ignoring case is reused, so a tree
+    that Windows created as ``processed/kick/alice`` keeps receiving files. A folder that
+    does not exist yet keeps the spelled name (``Recorded``, ``Processed``, …)."""
+    recorded, processed, pending = layout_bases(root, reuse=reuse)
+    return (reuse_path(recorded, platform, username_dir, reuse=reuse),
+            reuse_path(processed, platform, username_dir, reuse=reuse),
+            reuse_path(pending, platform, username_dir, reuse=reuse))
+
+
+def recorded_scan_bases(root: str, primary: str) -> list[str]:
+    """Raw-file folders to read. Windows: ``primary`` only. Linux: ``primary`` and every
+    other case variant of ``Recorded`` that exists. Nothing is created."""
+    ordered = []
+    seen = set()
+    candidates = [primary] if primary else []
+    if root and linux_reuses_dir_case():
+        candidates.extend(matching_dirs(root, "Recorded"))
+    for path in candidates:
+        if not path:
+            continue
+        key = os.path.normcase(os.path.abspath(path))
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(path)
+    return ordered
+
+
+def read_layout_paths(root: str, *parts: str) -> list[str]:
+    """Existing directories matching ``parts`` case-insensitively.
+
+    Windows returns the single spelled path (the volume has one folder either way), which
+    is what callers already joined. Linux returns every real match so a lowercase tree is
+    not invisible, or the spelled path when nothing is there yet. Nothing is created."""
+    flat = _split_parts(parts)
+    spelled = os.path.join(root, *flat) if root else ""
+    if not root:
+        return []
+    if not linux_reuses_dir_case():
+        return [spelled]
+    current = [root]
+    for piece in flat:
+        nxt = []
+        seen = set()
+        for parent in current:
+            for path in matching_dirs(parent, piece):
+                key = os.path.normcase(os.path.abspath(path))
+                if key not in seen:
+                    seen.add(key)
+                    nxt.append(path)
+        if not nxt:
+            return [spelled]
+        current = nxt
+    return current or [spelled]
+
 
 def validate_startup(config):
     """Validate dependencies and config at startup.

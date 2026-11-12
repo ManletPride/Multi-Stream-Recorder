@@ -56,8 +56,10 @@ from msr.util import (
     human_size,
     interruptible_sleep,
     jittered_sleep,
+    channel_record_dirs,
     find_cookies_file,
     kill_process_tree,
+    read_layout_paths,
     redact_cmd_for_log,
     redact_for_log,
     sanitize_path_component,
@@ -150,18 +152,26 @@ def find_active_recording_file(recorder, channel_key):
     except Exception:
         return None
     ts_files = []
-    for base in (recorder.recorded_base, getattr(recorder, "fallback_recorded_base", None)):
-        # the fallback folder holds the live file while the main drive is unavailable
-        channel_dir = os.path.join(base, platform, username_dir) if base else None
-        if not channel_dir or not os.path.isdir(channel_dir):
+    seen_dirs = set()
+    for base in (getattr(recorder, "recorded_base", None), getattr(recorder, "fallback_recorded_base", None)):
+        # the fallback folder holds the live file while the main drive is unavailable.
+        # On Linux every case variant of the channel folder is checked.
+        if not base:
             continue
-        try:
-            ts_files += [
-                os.path.join(channel_dir, f) for f in os.listdir(channel_dir)
-                if f.lower().endswith('.ts')
-            ]
-        except Exception:
-            continue
+        for channel_dir in read_layout_paths(base, platform, username_dir):
+            if not channel_dir or not os.path.isdir(channel_dir):
+                continue
+            key = os.path.normcase(os.path.abspath(channel_dir))
+            if key in seen_dirs:
+                continue
+            seen_dirs.add(key)
+            try:
+                ts_files += [
+                    os.path.join(channel_dir, f) for f in os.listdir(channel_dir)
+                    if f.lower().endswith('.ts')
+                ]
+            except Exception:
+                continue
     if not ts_files:
         return None
     return max(ts_files, key=os.path.getmtime)
@@ -2301,9 +2311,9 @@ def record_worker(args):
         username_dir = sanitize_path_component(username)
 
     def _channel_dirs(root):
-        return (os.path.join(root, "Recorded", platform, username_dir),
-                os.path.join(root, "Processed", platform, username_dir),
-                os.path.join(root, PENDING_DELETION_FOLDER, platform, username_dir))
+        # Linux: reuse processed/ or recorded/ (any case) instead of creating
+        # Processed/ beside it. Windows: the spelled path, unchanged.
+        return channel_record_dirs(root, platform, username_dir)
 
     recorded_path, processed_path, pending_dir = _channel_dirs(root_path)
 

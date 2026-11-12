@@ -238,6 +238,8 @@ def reconcile_fallback(fallback, primary, logger=None, min_age=MIN_AGE_SECONDS, 
     logger = logger or logging.getLogger()
     moved = young = failed = 0
     moved_ts = []
+    from msr.util import linux_reuses_dir_case, reuse_path
+    reuse_case = linux_reuses_dir_case()
     try:
         entries = [(d, n) for d, _dirs, names in os.walk(fallback) for n in names]
     except OSError:
@@ -252,7 +254,14 @@ def reconcile_fallback(fallback, primary, logger=None, min_age=MIN_AGE_SECONDS, 
             if now() - os.path.getmtime(src) < min_age:
                 young += 1
                 continue
-            dest = os.path.join(primary, os.path.relpath(src, fallback))
+            rel = os.path.relpath(src, fallback)
+            # Linux: land the file in an existing folder whose name matches ignoring
+            # case, so moving a fallback `Processed/...` back does not create a sibling.
+            if reuse_case:
+                parent = reuse_path(primary, os.path.dirname(rel))
+                dest = os.path.join(parent, os.path.basename(src))
+            else:
+                dest = os.path.join(primary, rel)
             result = _move_verified(src, dest, logger)
         except OSError as exc:
             failed += 1
