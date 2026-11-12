@@ -17,6 +17,7 @@ from tkinter import ttk
 from typing import Callable
 
 from msr import charts, dialogs
+from msr.popup_guard import popup_menu
 from msr import library as lib
 from msr import library_actions as act
 from msr import library_dialog as ldialog
@@ -52,7 +53,7 @@ def popup(win, menu: tk.Menu, event) -> None:
     menu.configure(bg=pal["menu_bg"], fg=pal["menu_fg"], activebackground=pal["menu_active"],
                    activeforeground=pal["menu_active_fg"])
     try:
-        menu.tk_popup(event.x_root, event.y_root)
+        popup_menu(menu, event.x_root, event.y_root)
     finally:
         menu.grab_release()
 

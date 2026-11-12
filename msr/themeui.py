@@ -103,10 +103,14 @@ def recolor_popdown(combo: ttk.Combobox, t: themes.Theme) -> None:
         combo.tk.call(popdown, "configure", "-background", t["entry_bg"])
     except tk.TclError:
         pass
+    from msr.popup_guard import guard_popdown
+    guard_popdown(combo)
 
 
 def recolor_popdowns(root: tk.Misc, t: themes.Theme) -> int:
     """Repaint the drop-down of every combobox below root (open dialogs included)."""
+    from msr.popup_guard import install_combobox_guard
+    install_combobox_guard(root)
     count = 0
     stack = [root]
     while stack:

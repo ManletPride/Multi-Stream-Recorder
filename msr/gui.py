@@ -38,6 +38,7 @@ from msr import winstate as _winstate
 from msr import restore_dialog as _restore_dialog
 from msr import logview
 from msr import themes as _themes
+from msr.popup_guard import guard_menu, popup_menu
 from msr.tooltip import Tooltip, popup
 from msr.wheel import bind_wheel, wheel_steps
 from msr import themeui as _themeui
@@ -1003,6 +1004,7 @@ def main_gui(config):
         logging.info(f"Channel list sorted ({mode})")
 
     sort_menu = tk.Menu(root, tearoff=0)
+    guard_menu(sort_menu)  # cascade: Tk posts it, the compositor must not resize it
     sort_menu.add_command(label="Enabled First", command=lambda: _sort_channels("enabled"))
     sort_menu.add_command(label="By Platform", command=lambda: _sort_channels("platform"))
     sort_menu.add_command(label="By Name (A–Z)", command=lambda: _sort_channels("name"))
@@ -1241,7 +1243,7 @@ def main_gui(config):
         ctx_menu.add_command(label="Remove…", command=remove_selected)
 
         try:
-            ctx_menu.tk_popup(event.x_root, event.y_root)
+            popup_menu(ctx_menu, event.x_root, event.y_root)
         finally:
             ctx_menu.grab_release()
 
@@ -1884,7 +1886,7 @@ def main_gui(config):
         status_ctx_menu.add_command(label="Open Clips Folder", command=_open_selected_clips_dir)
 
         try:
-            status_ctx_menu.tk_popup(event.x_root, event.y_root)
+            popup_menu(status_ctx_menu, event.x_root, event.y_root)
         finally:
             status_ctx_menu.grab_release()
 
@@ -2337,6 +2339,7 @@ def main_gui(config):
     health_ctl.label.pack(side=tk.LEFT, padx=(6, 0))
     more_btn = ttk.Menubutton(toggle_frame, text="\u22ef", width=3)
     more_menu = tk.Menu(more_btn, tearoff=0)
+    guard_menu(more_menu)  # the menubutton posts this itself
     more_menu.add_command(label="Library summary\u2026", command=lambda: notebook.select(library_panel.frame))
     more_menu.add_separator()
     more_menu.add_command(label="Restore previous channel list\u2026", command=_restore_channels)

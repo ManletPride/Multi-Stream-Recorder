@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- Linux: right-click menus and combobox lists are no longer stretched by a compositor rule that resizes every new window (Omarchy floating mode, about 1100x760). `msr/popup_guard.py` puts back the size and the position Tk posted, a few times per opening. Windows menus are unchanged.
 - Linux: the mouse wheel scrolls the Options tab, the channel-list badge strip, and the Clip Editor timeline. X11 sends Button-4/Button-5 rather than MouseWheel; those go through `msr/wheel.py`. Library, Logs and the other lists already scrolled (Tk's own Button-4/5 bindings).
 - Linux: hover tooltips no longer flash a large box. The tip is one withdrawn, theme-coloured window (`msr/tooltip.py`), sized and then shown. A compositor rule that resizes override-redirect windows after map (Omarchy floating mode forces about 1100x760) is undone from `<Configure>`, a few times per tip. On X11 the window is marked as a tooltip. Windows tips are unchanged.
 - Linux: the tray prefers pystray's AppIndicator backend when PyGObject and AyatanaAppIndicator3 or AppIndicator3 import (an already-set `PYSTRAY_BACKEND` is kept). If nothing can dock — Hyprland has no XEmbed tray, or `gi` did not import — the tray stays off with one INFO line and no traceback, and minimize/close does not hide the window into a tray that is not there. `requirements.txt` installs `PyGObject>=3.50` on Linux only; Windows and macOS skip that line.

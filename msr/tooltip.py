@@ -6,9 +6,10 @@ window and forces ``float``, a size of about ``min(1100, 64% of the monitor)``
 by ``min(760, 68% of the monitor)``, and a centered move. That rule hits Tk's
 tooltip, so the themed label sits in the corner of a huge ``entry_bg`` box
 (measured 1100x760 on Hyprland 0.56.2). Building the window withdrawn and
-setting ``-type tooltip`` does not stop the rule. The fix is a ``<Configure>``
-handler that puts the requested ``WxH+X+Y`` back. It only does that a few
-times per tip, so a compositor that keeps resizing cannot spin the handler.
+setting ``-type tooltip`` does not stop the rule. The fix lives in
+``msr/popup_guard.py`` (shared with menus): a ``<Configure>`` handler puts the
+requested ``WxH+X+Y`` back. It only does that a few times, so a compositor
+that keeps resizing cannot spin the handler.
 
 The window is still created withdrawn, with the theme background already set,
 so it is not mapped first at Tk's default size and default light background.
@@ -23,6 +24,7 @@ import sys
 import tkinter as tk
 
 from msr import themes as _themes
+from msr.popup_guard import RESIZE_CORRECTIONS, keep_popup_geometry
 
 
 def ui_font(size: int):
@@ -52,39 +54,6 @@ def clamp_tooltip_origin(x, y, width, height, screen_w, screen_h):
     if y < 0:
         y = 0
     return x, y
-
-
-# Omarchy applies its floating rule once on map. A few corrections cover a
-# compositor that applies it again. After that we stop: setting geometry from
-# <Configure> can itself generate <Configure>, and an endless fight would pin
-# the UI thread.
-RESIZE_CORRECTIONS = 4
-
-
-def _hold_requested_size(tw: tk.Toplevel, width: int, height: int, x: int, y: int) -> None:
-    """Snap the tip back if something else changes its size (a compositor rule)."""
-    wanted = f"{width}x{height}+{x}+{y}"
-    state = {"left": RESIZE_CORRECTIONS, "applying": False}
-
-    def on_configure(event):
-        if event.widget is not tw or state["applying"] or state["left"] <= 0:
-            return
-        try:
-            got_w, got_h = int(event.width), int(event.height)
-        except (TypeError, ValueError, tk.TclError):
-            return
-        if got_w == width and got_h == height:
-            return
-        state["left"] -= 1
-        state["applying"] = True
-        try:
-            tw.wm_geometry(wanted)
-        except tk.TclError:
-            pass
-        finally:
-            state["applying"] = False
-
-    tw.bind("<Configure>", on_configure, add="+")
 
 
 def _mark_x11_tooltip(win: tk.Toplevel) -> None:
@@ -126,10 +95,10 @@ def popup(parent, text, x, y, size=8):
     # Flush the size while withdrawn. Deiconify alone maps the window first and
     # applies geometry afterwards, which is the grey flash.
     tw.update_idletasks()
-    # Bound before map, so the compositor's resize (which arrives as
-    # <Configure> just after map) is caught. The initial size is already the
-    # requested one, so that event does not spend a correction.
-    _hold_requested_size(tw, width, height, x, y)
+    # Bound before map. A compositor that resizes the tip (Omarchy floating
+    # mode) is corrected by the same guard menus use. Not X11-only: this bind
+    # was already on every platform, and it does nothing when the size holds.
+    keep_popup_geometry(tw, lambda: (x, y), x11_only=False)
     tw.deiconify()
     return tw
 

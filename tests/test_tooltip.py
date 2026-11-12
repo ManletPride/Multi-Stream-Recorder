@@ -221,6 +221,8 @@ class TooltipWindowTests(unittest.TestCase):
         applied.clear()
         for _ in range(10):
             tip.event_generate("<Configure>", width=1100, height=760)
+            # The correction is applied after <Configure> returns.
+            tip.update()
         self.assertEqual(len(applied), tooltip.RESIZE_CORRECTIONS - spent)
         self.assertTrue(all(spec == placed for spec in applied))
 
