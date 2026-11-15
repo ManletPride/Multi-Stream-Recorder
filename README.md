@@ -89,7 +89,7 @@ This README describes **v3.1.3**. Full history: [CHANGELOG.md](CHANGELOG.md).
 - **Play with sound** and a **Volume** slider, so you can cut on dialogue. Playback runs at the recording's frame rate up to 60 fps; tick **Limit preview to 30 fps** on slower PCs (remembered).
 - **Mark In / Mark Out** (I / O keys), nudge buttons, **Replay In / Out** and the clip length.
 - **Save clip** (Ctrl+S or Enter) makes a lossless stream copy starting at the keyframe at or before your In point (it tells you the real start). Tick **Exact (re-encode)** for frame-exact edges. Clips never overwrite each other.
-- The editor only reads the file, so the recording keeps going. Nothing extra to install: it uses ffmpeg and Windows' own audio output.
+- The editor only reads the file, so the recording keeps going. On Windows the sound is ffmpeg and Windows' own audio output. On Linux it is ffmpeg piped to `pw-play`, `pw-cat` or `paplay` (PipeWire or PulseAudio, usually already installed). With none of those on PATH the picture still plays, in real time, with no sound.
 
 **Library tab**
 - How much space your recordings take: total, per site (donut), top channels (bars), per month, and a sortable channel table with **Open folder**. **Copy summary** gives plain text; **Count hours** (optional) adds recorded time. The scan runs in the background, only reads sizes and can be cancelled.
@@ -124,6 +124,7 @@ This README describes **v3.1.3**. Full history: [CHANGELOG.md](CHANGELOG.md).
 | --- | --- | --- |
 | Python 3.10+ (CI runs 3.12 and 3.14) | Yes | Runtime. Windows/macOS installers include Tkinter; Linux needs `python3-tk` (and `python3-venv` on Debian/Ubuntu). |
 | ffmpeg + ffprobe on PATH | Yes | Remux, previews, clips, Clip Editor, some HLS recording |
+| `pw-play` or `pw-cat`, or `paplay` | Linux Clip Editor sound | Plays the Clip Editor's audio. Comes with PipeWire (`pipewire`) or PulseAudio (`pulseaudio` / `pipewire-pulse`); usually already installed. Without one, the Clip Editor still plays the picture, silently, in real time. Nothing extra to pip-install. |
 | Deno | Recommended | yt-dlp uses it for YouTube's JS challenge; without it YouTube drops every ~15 s |
 | Python packages | Installed for you | yt-dlp, streamlink, curl_cffi, websocket-client, psutil, pystray, Pillow, plyer, colorama, and on Linux only PyGObject (see `requirements.txt`) |
 
