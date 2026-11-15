@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- CI: the bottom-bar health test uses today's date for the yt-dlp version. A fixed `2026.10.30` is now older than 14 days, so the bar no longer said Health OK.
 - Logs tab: lines from the per-channel worker processes (live checks, recording, split, remux progress) show up as they are written. The level filter and the text filter apply to them the same way as to lines from the window. Each line is still written to `stream_recorder.log` once, in the same format. Headless and `msr_ctl logs` are unchanged (they read that file). A worker killed while logging cannot stall shutdown.
 - Library overview: a short window scrolls to the "Recorded per month" chart instead of squashing it to an empty sliver. The chart keeps its height, and a tall window still stretches the overview to fill the tab. The scrollbar and mouse wheel are the same as the Options tab (Windows wheel and Linux Button-4/5). Wheeling over the Channels or Recordings list still scrolls that list. The Library toolbar wraps onto a second line when the pane is too narrow for "Remove folder".
 - Linux: the Library counts `processed` / `recorded` / `PendingDeletion` / `Clips` (and the platform folders under them) whatever their case is, and merges every variant that exists. A drive that still has the lowercase folders Windows wrote no longer shows up as a handful of files in a new `Processed` folder. New recordings and remuxes reuse the existing folder instead of creating a differently-cased sibling. Windows paths are unchanged.
