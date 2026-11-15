@@ -79,7 +79,7 @@ This README describes **v3.1.3**. Full history: [CHANGELOG.md](CHANGELOG.md).
 **Status tab**
 - Per-channel status with measured resolution, fps and bitrate; disk write and network meters.
 - Live preview strip of every recording; click a tile to select, double-click to pin a larger preview. A stale preview shows its age.
-- The button row, left to right: **Clip Now** (last N seconds, stream copy), **DVR** (open the Clip Editor to scrub back through the recording and cut a clip), **Clips** (the selected channel's clips folder), **Screenshot** and **Streams** (the recordings folder). None of them interrupts the recording.
+- The button row, left to right: **Clip Now** (last N seconds, stream copy), **DVR** (open the Clip Editor to scrub back through the recording and cut a clip), **Clips** (the selected channel's clips folder), **Screenshot** and **Streams** (the recordings folder). None of them interrupts the recording. They are mouse buttons: Space does not press them (Space in the channel list still toggles the selected channels).
 
 **Clip Editor**
 - Open it with the **DVR** button next to Clip Now (or Shift+click Clip Now), **right-click a channel > Clip Editor…**, or **Library > Files > right-click > Clip Editor…** for any finished recording.
@@ -87,7 +87,7 @@ This README describes **v3.1.3**. Full history: [CHANGELOG.md](CHANGELOG.md).
 - **Zoom and scrub**: Alt+wheel zooms the timeline at the pointer, Ctrl+wheel steps (finer when zoomed in), wheel or Shift+wheel pans, **+ / - / 0** zoom in, out and reset, double-click resets. The playhead stays in view while playing.
 - **Waveform** (off by default, remembered): tick it to show the audio level under the timeline. It is read in the background with ffmpeg and cached; on a live recording it keeps up with the growing file.
 - **Play with sound** and a **Volume** slider, so you can cut on dialogue. Playback runs at the recording's frame rate up to 60 fps; tick **Limit preview to 30 fps** on slower PCs (remembered).
-- **Mark In / Mark Out** (I / O keys), nudge buttons, **Replay In / Out** and the clip length.
+- **Play / pause** is Space, in the editor that has the keyboard (opening it takes focus; another DVR click still opens another editor). **Mark In / Mark Out** (I / O keys), nudge buttons, **Replay In / Out** and the clip length.
 - **Save clip** (Ctrl+S or Enter) makes a lossless stream copy starting at the keyframe at or before your In point (it tells you the real start). Tick **Exact (re-encode)** for frame-exact edges. Clips never overwrite each other.
 - The editor only reads the file, so the recording keeps going. Nothing extra to install: it uses ffmpeg and Windows' own audio output.
 

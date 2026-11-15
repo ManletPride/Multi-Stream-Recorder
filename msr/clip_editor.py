@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import queue
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -177,6 +178,7 @@ class ClipEditor:
         self._vinfo = None          # (w, h, fps) of the source, read once in the background
         self.shown = 0              # frames shown while playing (measurements, tests)
         self._vinfo_reader = lambda p: core.video_info(p, self.ffprobe)
+        self._focus_bind = None
 
         self.win, body = dialogs.new_dialog(parent, f"Clip Editor \u2014 {title_name or os.path.basename(src)}",
                                             padding=10)
@@ -194,7 +196,15 @@ class ClipEditor:
             except Exception:
                 pass
         if show:
+            # <Map> is bound before the window is shown. The idle claim is
+            # scheduled after present(): center_over's update_idletasks would
+            # otherwise run it while the toplevel is still withdrawn.
+            self._arm_keyboard_focus()
             dialogs.present(self.win, parent)
+            try:
+                self.win.after_idle(self._claim_keyboard_focus)
+            except tk.TclError:
+                pass
         self._refresh_length(force=True)
         self._job = self.win.after(POLL_MS, self._poll)
 
@@ -283,9 +293,55 @@ class ClipEditor:
         self.status.grid(row=7, column=0, sticky="ew", pady=(8, 0))
         body.bind("<Configure>", lambda e: self.status.configure(wraplength=max(200, e.width - 20)), add="+")
 
+    def _arm_keyboard_focus(self) -> None:
+        """On Linux, claim focus again when the toplevel maps.
+
+        Hyprland / XWayland can map the window after the first idle, so a claim
+        from that idle never sticks. Windows has no extra hook: the caller
+        schedules one idle claim after the window is shown. The binding is
+        removed once focus is inside this editor.
+        """
+        if not sys.platform.startswith("linux"):
+            return
+
+        def mapped(event=None):
+            if event is not None and event.widget is not self.win:
+                return
+            self._claim_keyboard_focus()
+            try:
+                self.win.after_idle(self._claim_keyboard_focus)
+            except tk.TclError:
+                pass
+
+        self._focus_bind = self.win.bind("<Map>", mapped, add="+")
+
+    def _claim_keyboard_focus(self) -> None:
+        try:
+            win = self.win
+            if not win.winfo_exists():
+                return
+            # Not viewable yet: the Map handler (Linux) will try again.
+            if sys.platform.startswith("linux") and not win.winfo_viewable():
+                return
+            win.lift()
+            win.focus_force()
+            self.timeline.focus_set()
+            got = win.focus_get()
+            inside = got is not None and got.winfo_toplevel() is win
+            if inside and self._focus_bind:
+                win.unbind("<Map>", self._focus_bind)
+                self._focus_bind = None
+        except tk.TclError:
+            pass
+
     def _bind_keys(self) -> None:
         w = self.win
-        w.bind("<space>", lambda e: (self.toggle_play(), "break")[1])
+
+        def on_space(_event=None):
+            self.toggle_play()
+            return "break"
+
+        w.bind("<space>", on_space)
         for key, fn in (("i", self.mark_in), ("o", self.mark_out), ("l", self.jump_live)):
             w.bind(f"<KeyPress-{key}>", lambda e, f=fn: f())
             w.bind(f"<KeyPress-{key.upper()}>", lambda e, f=fn: f())
@@ -309,13 +365,14 @@ class ClipEditor:
         for seqs, fn in keys:
             for seq in seqs:
                 w.bind(seq, lambda e, f=fn: None if self._typing() else (f(), "break")[1])
-        # Space is play/pause only: buttons and checks must not take it
-        tag = "ClipEditorKeys"
-        self.win.bind_class(tag, "<space>", lambda e: (self.toggle_play(), "break")[1])
+        # Space is play/pause for this editor only. A widget binding runs before
+        # TButton / TCheckbutton and stops them invoking. A shared bind_class would
+        # be whichever editor was opened last, so a second editor stole Space.
         def tagall(widget):
             for child in widget.winfo_children():
                 if child.winfo_class() in ("TButton", "TCheckbutton", "TScale"):
-                    child.bindtags((tag,) + child.bindtags())
+                    child.bind("<Key-space>", on_space)
+                    child.bind("<KeyRelease-space>", lambda _e: "break")
                 tagall(child)
         tagall(self.win)
 

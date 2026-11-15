@@ -270,6 +270,29 @@ class QueueLogHandler(logging.Handler):
 #          GUI
 # ────────────────────────────────────────────────
 
+# Status-row actions are mouse-only. ttk runs a focused button's command on
+# <Key-space> (ttk::button::activate). Clicking DVR left that button focused,
+# and the Clip Editor never took the keyboard, so the next Space opened another
+# editor. This tag is not on the channel list: its <space> binding stays as it is.
+_HEADER_ACTION = "MsrHeaderAction"
+
+
+def _swallow_header_space(_event=None):
+    return "break"
+
+
+def _header_action_button(parent, **kwargs):
+    """Clip Now / DVR / Clips / Screenshot / Streams. Click still runs the command."""
+    kwargs["takefocus"] = 0
+    btn = ttk.Button(parent, **kwargs)
+    btn.bind_class(_HEADER_ACTION, "<Key-space>", _swallow_header_space)
+    btn.bind_class(_HEADER_ACTION, "<KeyRelease-space>", _swallow_header_space)
+    tags = btn.bindtags()
+    if _HEADER_ACTION not in tags:
+        btn.bindtags((tags[0], _HEADER_ACTION) + tuple(tags[1:]))
+    return btn
+
+
 def main_gui(config):
     """Main GUI window with dark mode, system tray, log viewer, and notifications."""
     import tkinter as tk
@@ -1762,37 +1785,37 @@ def main_gui(config):
 
     # Left to right: Clip Now (primary, accent) | DVR | Clips | Screenshot | Streams.
     # pack(side=RIGHT) puts the first packed button rightmost, so they are packed in reverse.
-    streams_folder_btn = ttk.Button(status_header, text="Streams",
-                                    command=_open_recordings_folder, width=8)
+    streams_folder_btn = _header_action_button(status_header, text="Streams",
+                                               command=_open_recordings_folder, width=8)
     streams_folder_btn.pack(side=tk.RIGHT)
     Tooltip(streams_folder_btn,
              "Open the recordings folder\n"
              "(streams_dir: Recorded, Processed, Clips...).")
 
-    screenshot_now_btn = ttk.Button(status_header, text="Screenshot",
-                                    command=_screenshot_selected_channel, width=11)
+    screenshot_now_btn = _header_action_button(status_header, text="Screenshot",
+                                               command=_screenshot_selected_channel, width=11)
     screenshot_now_btn.pack(side=tk.RIGHT, padx=(0, 6))
     Tooltip(screenshot_now_btn,
              "Grab a still frame from the channel\n"
              "selected in the status list.")
 
-    clips_folder_btn = ttk.Button(status_header, text="Clips",
-                                  command=_open_selected_clips_dir, width=6)
+    clips_folder_btn = _header_action_button(status_header, text="Clips",
+                                             command=_open_selected_clips_dir, width=6)
     clips_folder_btn.pack(side=tk.RIGHT, padx=(0, 6))
     Tooltip(clips_folder_btn,
              "Open the clips & screenshots folder\n"
              "of the channel selected in the status list.")
 
-    dvr_btn = ttk.Button(status_header, text="DVR",
-                         command=_clip_editor_selected_channel, width=6)
+    dvr_btn = _header_action_button(status_header, text="DVR",
+                                    command=_clip_editor_selected_channel, width=6)
     dvr_btn.pack(side=tk.RIGHT, padx=(0, 6))
     Tooltip(dvr_btn,
              "Scrub back through a live recording and cut a clip\n"
              "(Clip Editor: In/Out marks, sound, live edge).\n"
              "Not recording? Opens the channel's newest finished recording.")
 
-    clip_now_btn = ttk.Button(status_header, text="Clip Now", style="Accent.TButton",
-                              command=_clip_selected_channel, width=9)
+    clip_now_btn = _header_action_button(status_header, text="Clip Now", style="Accent.TButton",
+                                         command=_clip_selected_channel, width=9)
     clip_now_btn.pack(side=tk.RIGHT, padx=(0, 6))
     clip_now_btn.bind("<Shift-Button-1>", _clip_editor_selected_channel)
     _CLIP_TIP = ("Cut the last N seconds (Clip Length setting)\n"
