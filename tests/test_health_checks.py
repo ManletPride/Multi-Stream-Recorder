@@ -180,7 +180,9 @@ class ControllerTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.status = {}
         self.updates = []
-        self.versions = {"ffmpeg": "7", "streamlink": "8.6.2", "yt-dlp": "2026.10.30"}
+        # yt-dlp's version is a release date. A fixed day ages past STALE_DAYS (14) and the
+        # bottom bar stops saying Health OK. Today's date stays inside that window.
+        self.versions = {"ffmpeg": "7", "streamlink": "8.6.2", "yt-dlp": time.strftime("%Y.%m.%d")}
         self.ctl = health_ui.HealthController(
             self.root, config=Cfg(), get_status=lambda: self.status, get_folder=lambda: self.tmp.name,
             free_gb=lambda _f: 500.0, get_versions=lambda: dict(self.versions), get_state=lambda: {},
