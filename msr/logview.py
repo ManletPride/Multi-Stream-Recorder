@@ -31,15 +31,35 @@ _TAG_RE = re.compile(r"^\S+ \[(WARNING|ERROR)\] ")
 
 class GuiFormatter(logging.Formatter):
     """The Log tab's format ("HH:MM:SS message"), with a [WARNING] / [ERROR] tag after the
-    time for those levels only, so plain INFO lines look exactly as before."""
+    time for those levels only, so plain INFO lines look exactly as before.
+
+    A worker record carries ``channel`` (and its own pid). Those are inserted after the
+    level tag, matching ``stream_recorder.log`` (``[PID n] [channel] message``). The level
+    tag stays the first bracket so the level filter still sees it. Main-process lines have
+    no channel and are unchanged.
+    """
 
     def format(self, record: logging.LogRecord) -> str:
         text = super().format(record)
         tag = "ERROR" if record.levelno >= logging.ERROR else "WARNING" if record.levelno >= logging.WARNING else ""
-        if not tag:
+        channel = getattr(record, "channel", None)
+        channel = channel.strip() if isinstance(channel, str) else ""
+        if not tag and not channel:
             return text
         head, sep, rest = text.partition(" ")
-        return f"{head} [{tag}] {rest}" if sep else f"[{tag}] {text}"
+        if not sep:
+            return f"[{tag}] {text}" if tag else text
+        parts = [head]
+        if tag:
+            parts.append(f"[{tag}]")
+        if channel:
+            pid = getattr(record, "process", None)
+            if isinstance(pid, int):
+                parts.append(f"[PID {pid}]")
+            parts.append(f"[{channel}]")
+        if rest:
+            parts.append(rest)
+        return " ".join(parts)
 
 
 def line_level(line: str) -> str:

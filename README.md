@@ -107,7 +107,7 @@ This README describes **v3.1.3**. Full history: [CHANGELOG.md](CHANGELOG.md).
 - A one-line status in the bottom bar, with details and an Updates button. Checked at start (tools, recordings folder writable and free space, Twitch sign-in) and every `[Health] check_minutes` (10, 0 = off): free space, stalled recordings, sites whose checks all fail. It also notes when yt-dlp or streamlink is more than 14 days behind a newer release.
 
 **Logs tab**
-- Follows new lines only while you are at the bottom (a **New lines** button appears when you scroll back), filter box, level drop-down, highlighting, coloured warnings and errors, Ctrl+F, **Open log file**.
+- Follows new lines only while you are at the bottom (a **New lines** button appears when you scroll back), filter box, level drop-down, highlighting, coloured warnings and errors, Ctrl+F, **Open log file**. Lines from the recording processes (checks, recording, remux) show here as they are written, the same lines as in `stream_recorder.log`.
 
 **Look and housekeeping**
 - **Themes**: the **Theme...** button opens a list with a live preview: PowerShell Blue (default), Neutral Dark, Light, High Contrast, Midnight Purple, Paper, plus ten based on [Omarchy](https://omarchy.org/themes/) palettes (Arc Blueberry, Catppuccin Mocha OLED, Rose Pine, Gruvbox Material, Dracula, Flexoki Dark, Vesper, Tokyo Night OLED, Tokyo Day, Solarized Light; credits in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)). Add your own as `themes/*.json` in the data folder.
