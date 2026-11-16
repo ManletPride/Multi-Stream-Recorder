@@ -212,6 +212,16 @@ def _proc_state(pid: int) -> str:
     return stat.rsplit(")", 1)[1].split()[0]
 
 
+def _wait_proc_state(pid: int, *, stopped: bool, timeout: float = 5.0) -> str:
+    """Poll until SIGSTOP or SIGCONT is visible. The kernel applies it after the call returns."""
+    deadline = time.monotonic() + timeout
+    state = _proc_state(pid)
+    while (state in ("T", "t")) != stopped and time.monotonic() < deadline:
+        time.sleep(0.01)
+        state = _proc_state(pid)
+    return state
+
+
 @unittest.skipUnless(POSIX, "pipe playback is Linux")
 class PipeSinkTests(unittest.TestCase):
     def _sink(self, script: str, *, latency_ms: int = 100, clock=None):
@@ -288,10 +298,10 @@ class PipeSinkTests(unittest.TestCase):
         sink = self._sink("import time; time.sleep(60)")
         pid = sink._proc.pid
         sink.pause()
-        self.assertIn(_proc_state(pid), ("T", "t"))
+        self.assertIn(_wait_proc_state(pid, stopped=True), ("T", "t"))
         self.assertEqual(sink.free_buffers(), 0)
         sink.resume()
-        self.assertNotIn(_proc_state(pid), ("T", "t"))
+        self.assertNotIn(_wait_proc_state(pid, stopped=False), ("T", "t"))
         sink.pause()
         sink.close()
         with self.assertRaises(ProcessLookupError):

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- CI (Linux): the clip-audio pause test read the process state immediately after SIGSTOP, before the kernel had stopped the process. It now polls until the state is stopped, and until it has left that state after resume, for up to 5 seconds.
+
 ## v3.1.5 (2026-11-16)
 
 Release notes: [docs/release_notes/RELEASE_NOTES_v3.1.5.md](docs/release_notes/RELEASE_NOTES_v3.1.5.md).
