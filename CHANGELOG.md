@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## v3.1.5 (2026-11-16)
+
+Release notes: [docs/release_notes/RELEASE_NOTES_v3.1.5.md](docs/release_notes/RELEASE_NOTES_v3.1.5.md).
 
 ### Fixed
 - Updates: choosing Multi-Stream Recorder and pressing Update selected or Update all uses the release that check just found. A window left open since before that release no longer asks to continue and then does nothing (the banner tag from the startup check was empty, and the click returned without a message). The header banner takes the same release, and a long-running window checks again with the daily update pass. If an update cannot start, the window says why and the log records it. There is one confirmation, not two.
