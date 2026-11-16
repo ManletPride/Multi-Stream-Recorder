@@ -2346,7 +2346,8 @@ def main_gui(config):
         from msr.deps_dialog import open_deps_dialog
         open_deps_dialog(root, config=config, state_file=state_file,
                          ffmpeg_path=config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg') or 'ffmpeg',
-                         on_msr_update=lambda: _begin_in_app_update(), on_badge=_set_updates_badge)
+                         on_msr_update=lambda row, parent=None: _begin_in_app_update(release=row, parent=parent),
+                         on_badge=_set_updates_badge, on_checked=_apply_banner_from_rows)
 
     updates_btn = ttk.Button(toggle_frame, text="Updates\u2026", command=_open_updates, width=10)
     updates_btn.pack(side=tk.RIGHT, padx=(0, 4))
@@ -2413,133 +2414,294 @@ def main_gui(config):
     _update_zipball = [None]
     _update_tag = [None]
     _update_busy = [False]
+    _banner_check_at = [0.0]
+
+    def _ui_parent(parent):
+        try:
+            if parent is not None and parent.winfo_exists():
+                return parent
+        except tk.TclError:
+            pass
+        return root
+
+    def _remember_release(tag, url, zipball):
+        _update_tag[0] = tag or None
+        _update_url[0] = url or None
+        _update_zipball[0] = zipball or None
+
+    def _show_update_banner(tag=None):
+        from msr.update import banner_text
+        text = banner_text(__version__, application_dir(), tag if tag is not None else _update_tag[0])
+        if not text:
+            update_label.grid_remove()
+            return
+        update_label.configure(text=text, cursor="hand2")
+        update_label.grid()
+
+    def _clear_update_banner():
+        if _update_busy[0]:
+            return
+        _update_tag[0] = None
+        _update_url[0] = None
+        _update_zipball[0] = None
+        update_label.grid_remove()
+
+    def _apply_banner_from_rows(rows):
+        """Header banner follows a check the Updates dialog or the daily pass just finished."""
+        if _update_busy[0]:
+            return
+        row = next((r for r in rows or [] if r.get("name") == "msr"), None)
+        from msr.update import disk_is_newer
+        ahead = disk_is_newer(application_dir(), __version__)
+        status = (row or {}).get("status")
+        if row and row.get("latest") and status not in (None, "unchecked", "unknown"):
+            _remember_release(str(row["latest"]).lstrip("vV"), row.get("url") or "", row.get("zipball") or "")
+            _banner_check_at[0] = time.time()
+        if ahead or (status == "update_available" and (row or {}).get("latest")):
+            _show_update_banner(_update_tag[0])
+        elif status == "up_to_date":
+            _clear_update_banner()
 
     def _on_update_found(latest_tag, release_url, zipball_url=None):
         """Called from version check thread — schedules GUI update on main thread."""
-        _update_url[0] = release_url
-        _update_zipball[0] = zipball_url or None
-        _update_tag[0] = latest_tag
+        _remember_release(latest_tag, release_url, zipball_url or "")
+
         def _show():
-            update_label.configure(text=f"  v{latest_tag} available — click to install")
-            update_label.grid()
+            _show_update_banner(latest_tag)
         root.after(0, _show)
 
     def _restore_update_banner():
-        tag = _update_tag[0]
-        if tag:
-            update_label.configure(
-                text=f"  v{tag} available — click to install", cursor="hand2",
-            )
-            update_label.grid()
+        _update_busy[0] = False
+        _show_update_banner(_update_tag[0])
+
+    def _cannot_start(msg, title="Cannot update", parent=None, *, clear_busy=True):
+        logging.warning("In-app update did not start: %s", " ".join((msg or "").split()))
+        _dialogs.show_error(_ui_parent(parent), title, msg)
+        if clear_busy:
+            _update_busy[0] = False
+
+    def _explain_update(title, msg, parent=None):
+        logging.warning("In-app update did not start: %s", " ".join((msg or "").split()))
+        _dialogs.show_info(_ui_parent(parent), title, msg)
         _update_busy[0] = False
 
-    def _begin_in_app_update(event=None):
-        if _update_busy[0] or not _update_tag[0]:
-            return
-        from msr.update import (
-            prepare_update, spawn_updater, zipball_url_for_tag, zipball_url_is_allowed,
-        )
-        tag = _update_tag[0]
-        zip_url = _update_zipball[0]
-        if not zipball_url_is_allowed(zip_url or ""):
-            zip_url = zipball_url_for_tag(tag)
-        target = application_dir()
-        if not os.access(target, os.W_OK):
-            _dialogs.show_error(
-                root,
-                "Cannot update",
-                f"The install folder is not writable:\n{target}",
-            )
-            return
-        recording = bool(recorder and recorder.is_running)
-        extra = (
-            "Active recordings will be stopped first.\n\n"
-            if recording else ""
-        )
-        if not _dialogs.ask_yes_no(
-            root,
-            "Install update",
-            f"Download v{tag} from GitHub and restart Multi-Stream Recorder?\n\n"
-            f"{extra}"
-            "config.ini, channels.json, cookies.txt, and recordings stay.\n"
-            "The app will quit and reopen on the new version.",
-        ):
-            return
-        _update_busy[0] = True
-        update_label.configure(text=f"  Downloading v{tag}…", cursor="arrow")
+    def _begin_in_app_update(event=None, release=None, parent=None):
+        """Start the app update. Returns True once it has actually started (the dialog then closes).
 
-        def _fail(msg):
-            logging.warning("In-app update failed: %s", msg)
-            _dialogs.show_error(
-                root,
-                "Update failed",
-                f"{msg}\n\nYou can still open the release page from GitHub.",
-            )
-            if _update_url[0]:
-                import webbrowser
-                webbrowser.open(_update_url[0])
-            _restore_update_banner()
+        ``release`` is the Updates-dialog row (tag in ``latest``, plus ``url`` and ``zipball``).
+        The banner click passes none and uses the stored tag, or checks again when that is empty.
+        A missing tag, a busy update, a git checkout and a copy that is already newer on disk
+        each tell the user why instead of returning with no message.
+        """
+        from msr.update import BUSY_MESSAGE, NO_RELEASE_MESSAGE, choose_release, disk_is_newer
+        ask_parent = parent or root
+        if _update_busy[0]:
+            _cannot_start(BUSY_MESSAGE, parent=ask_parent, clear_busy=False)
+            return False
+        stored = None
+        if _update_tag[0]:
+            stored = {"tag": _update_tag[0], "url": _update_url[0] or "", "zipball": _update_zipball[0] or ""}
+        chosen = choose_release(release, stored)
+        if chosen is None and disk_is_newer(application_dir(), __version__):
+            chosen = {"tag": "", "url": "", "zipball": ""}
+        if chosen is None:
+            _update_busy[0] = True
+
+            def work():
+                from msr.update import fetch_latest_release
+                found, why = fetch_latest_release(__version__)
+
+                def done():
+                    _update_busy[0] = False
+                    if not found:
+                        _cannot_start(why or NO_RELEASE_MESSAGE, parent=ask_parent)
+                        return
+                    _remember_release(found["tag"], found.get("url"), found.get("zipball"))
+                    _banner_check_at[0] = time.time()
+                    _show_update_banner(found["tag"])
+                    if _start_planned(found, ask_parent):
+                        _dismiss_deps_dialog(ask_parent)
+
+                root.after(0, done)
+
+            threading.Thread(target=work, daemon=True, name="update-recheck").start()
+            return False
+        return _start_planned(chosen, ask_parent)
+
+    def _dismiss_deps_dialog(parent):
+        """Close the Updates dialog after an async recheck started the update.
+
+        The synchronous path returns True and the dialog closes itself. Doing both would
+        destroy the window twice.
+        """
+        try:
+            if parent is not None and parent is not root and parent.winfo_exists():
+                parent.destroy()
+                root._msr_deps_dialog = None
+        except tk.TclError:
+            pass
+
+    def _start_planned(rel, parent):
+        from msr.update import BUSY_MESSAGE, choose_release, plan_app_update
+        if _update_busy[0]:
+            _cannot_start(BUSY_MESSAGE, parent=parent, clear_busy=False)
+            return False
+        target = application_dir()
+        recording = bool(recorder and recorder.is_running)
+        plan = plan_app_update(target, __version__, rel, recording=recording)
+        chosen = choose_release(rel, None)
+        if chosen and plan["action"] != "blocked":
+            # Keep the banner and the "open the release page" fallback on this release,
+            # including when the dialog row stores the tag as "latest".
+            _remember_release(chosen["tag"], chosen.get("url"), chosen.get("zipball"))
+        if plan["action"] == "blocked":
+            _cannot_start(plan["message"], title=plan.get("title") or "Cannot update", parent=parent)
+            return False
+        if plan["action"] == "git_manual":
+            _explain_update(plan["title"], plan["message"], parent=parent)
+            return False
+        if plan["action"] == "zip" and not os.access(target, os.W_OK):
+            _cannot_start(f"The install folder is not writable:\n{target}", parent=parent)
+            return False
+        if plan["confirm"] and not _dialogs.ask_yes_no(parent, plan["title"], plan["message"]):
+            logging.info("In-app update cancelled")
+            return False
+        _update_busy[0] = True
+        if plan["action"] == "zip":
+            update_label.configure(text=f"  Downloading v{plan['tag']}…", cursor="arrow")
+            update_label.grid()
+            _download_zip(plan, target)
+            return True
+        if plan["action"] == "git_pull":
+            update_label.configure(text="  Updating with git…", cursor="arrow")
+            update_label.grid()
+            _pull_then_restart(target, parent)
+            return True
+        update_label.configure(text="  Restarting…", cursor="arrow")
+        update_label.grid()
+        _stop_then(_restart_then_quit, open_release=False)
+        return True
+
+    def _fail(msg, *, open_release=True):
+        logging.warning("In-app update failed: %s", msg)
+        detail = f"{msg}\n\nYou can still open the release page from GitHub." if open_release else msg
+        _dialogs.show_error(root, "Update failed", detail)
+        if open_release and _update_url[0]:
+            import webbrowser
+            webbrowser.open(_update_url[0])
+        _restore_update_banner()
+
+    def _restart_then_quit():
+        def _after_children():
+            from msr.update import relaunch_app
+            relaunch_app(application_dir())
+        _full_quit(after_children=_after_children)
+
+    def _stop_then(after_stop, *, open_release):
+        rec = recorder
+        if rec and rec.is_running:
+            update_label.configure(text="  Stopping recordings…")
+
+            def _bg_stop():
+                try:
+                    rec.stop()
+                except Exception:
+                    logging.exception("Stop before update failed")
+                    root.after(0, lambda: _fail(
+                        "Could not stop recordings. Try Stop Recording, then click the banner again.",
+                        open_release=open_release,
+                    ))
+                    return
+                root.after(0, after_stop)
+
+            threading.Thread(target=_bg_stop, daemon=True, name="update-stop").start()
+            return
+        after_stop()
+
+    def _download_zip(plan, target):
+        from msr.update import prepare_update, spawn_updater
+        zip_url = plan["zipball"]
 
         def _spawn_then_quit(staging):
             def _after_children():
                 spawn_updater(staging, target_dir=target)
             _full_quit(after_children=_after_children)
 
-        def _stop_then_quit(staging):
-            rec = recorder
-            if rec and rec.is_running:
-                update_label.configure(text="  Stopping recordings…")
-
-                def _bg_stop():
-                    try:
-                        rec.stop()
-                    except Exception:
-                        logging.exception("Stop before update failed")
-                        root.after(0, lambda: _fail(
-                            "Could not stop recordings. Try Stop Recording, then click the banner again."
-                        ))
-                        return
-                    root.after(0, lambda: _spawn_then_quit(staging))
-
-                threading.Thread(target=_bg_stop, daemon=True, name="update-stop").start()
-                return
-            _spawn_then_quit(staging)
-
         def _bg_download():
             try:
                 staging = prepare_update(zip_url)
-            except Exception as e:
-                err = str(e) or "Download failed"
+            except Exception as exc:
+                err = str(exc) or "Download failed"
                 root.after(0, lambda m=err: _fail(m))
                 return
-            root.after(0, lambda: _stop_then_quit(staging))
+            root.after(0, lambda: _stop_then(lambda: _spawn_then_quit(staging), open_release=True))
 
         threading.Thread(target=_bg_download, daemon=True, name="update-download").start()
 
+    def _pull_then_restart(target, parent):
+        def work():
+            from msr.update import git_pull_ff_only
+            ok, text = git_pull_ff_only(target)
+
+            def done():
+                if not ok:
+                    logging.warning("In-app update failed: git pull --ff-only: %s", text)
+                    _dialogs.show_error(
+                        _ui_parent(parent), "Update failed",
+                        "git pull --ff-only failed.\n\n" + (text or "git pull --ff-only failed."),
+                    )
+                    _restore_update_banner()
+                    return
+                logging.info("git pull --ff-only finished; restarting")
+                _stop_then(_restart_then_quit, open_release=False)
+
+            root.after(0, done)
+
+        threading.Thread(target=work, daemon=True, name="update-git-pull").start()
+
     update_label.bind("<Button-1>", _begin_in_app_update)
 
-    # Delay the check by 10 seconds so it doesn't slow startup
+    def _banner_if_files_are_newer():
+        from msr.update import disk_is_newer
+        if disk_is_newer(application_dir(), __version__):
+            _show_update_banner(None)
+
+    # Local only: a pull that has not been restarted can say so before the network check.
+    root.after(800, _banner_if_files_are_newer)
+
+    # Delay the check by 10 seconds so it doesn't slow startup.
+    # Repeated from the hourly timer below so a window left open still notices a release.
     def _delayed_version_check():
+        _banner_check_at[0] = time.time()
         check_for_updates(__version__, callback=_on_update_found)
     root.after(10_000, _delayed_version_check)
 
+    def _repeat_banner_check():
+        if time.time() - _banner_check_at[0] < 24 * 3600:
+            return
+        _banner_check_at[0] = time.time()
+        check_for_updates(__version__, callback=_on_update_found)
+
     # Daily dependency check: a background thread long after startup; never delays recording.
     # Re-checked hourly so a copy left running for days still checks once a day.
+    # That same pass refreshes the header banner. When it does not run, the banner check
+    # itself still repeats once a day (the 10-second check never used to run again).
     _deps_q = stdlib_queue.Queue()
 
     def _daily_deps_check():
         root.after(3_600_000, _daily_deps_check)
-        if not config.getboolean('Updates', 'daily_check', fallback=True):
+        if not config.getboolean('Updates', 'daily_check', fallback=True) or \
+                not _depsupdate.due(load_window_state(state_file)):
+            _repeat_banner_check()
             return
-        if not _depsupdate.due(load_window_state(state_file)):
-            return
+        _banner_check_at[0] = time.time()
 
         def work():
             try:
                 rs = _depsupdate.rows(True, ffmpeg_path=config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg') or 'ffmpeg')
                 if any(r['status'] != 'unknown' for r in rs if r['name'] != 'ffmpeg'):
                     _depsupdate.remember(state_file, rs)
-                _deps_q.put(_depsupdate.updates_available(rs))
+                _deps_q.put(rs)
             except Exception:
                 logging.debug("Daily dependency check failed", exc_info=True)
                 _deps_q.put(None)
@@ -2549,9 +2711,10 @@ def main_gui(config):
 
     def _drain_deps_q():
         try:
-            names = _deps_q.get_nowait()
-            if names is not None:
-                _set_updates_badge(names)
+            payload = _deps_q.get_nowait()
+            if payload is not None:
+                _set_updates_badge(_depsupdate.updates_available(payload))
+                _apply_banner_from_rows(payload)
         except stdlib_queue.Empty:
             root.after(1000, _drain_deps_q)
 

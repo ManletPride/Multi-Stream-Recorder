@@ -126,6 +126,44 @@ class RowTests(unittest.TestCase):
                 self.assertIn("offline", r["note"])
         self.assertEqual(depsupdate.updates_available(rs), [])
 
+    def test_msr_row_carries_the_zipball_and_the_install_note(self):
+        def op(req, timeout=None):
+            if "api.github.com" in req.full_url:
+                return _Resp(json.dumps({
+                    "tag_name": "v9.9.9",
+                    "html_url": "https://github.com/ManletPride/Multi-Stream-Recorder/releases/tag/v9.9.9",
+                    "zipball_url": "https://api.github.com/repos/ManletPride/Multi-Stream-Recorder/zipball/v9.9.9",
+                }).encode())
+            return opener(req, timeout)
+
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, ".git"), "w", encoding="utf-8") as fh:
+                fh.write("gitdir: /nowhere\n")
+            with mock.patch("msr.__version__", "1.0.0"), \
+                 mock.patch("msr.util.application_dir", return_value=d):
+                rs = depsupdate.rows(True, opener=op, version_of=INSTALLED.get)
+        row = rs[0]
+        self.assertEqual(row["name"], "msr")
+        self.assertEqual(row["latest"], "9.9.9")
+        self.assertEqual(row["zipball"],
+                         "https://api.github.com/repos/ManletPride/Multi-Stream-Recorder/zipball/v9.9.9")
+        self.assertEqual(row["note"], "git checkout: updates with git pull")
+        self.assertNotIn("own updater", row["note"])
+
+    def test_disk_newer_than_the_running_copy_offers_a_restart(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "msr"))
+            with open(os.path.join(d, "msr", "__init__.py"), "w", encoding="utf-8") as fh:
+                fh.write('__version__ = "9.9.9"\n')
+            with mock.patch("msr.__version__", "3.1.3"), \
+                 mock.patch("msr.util.application_dir", return_value=d):
+                rs = depsupdate.rows(False, opener=offline, version_of=INSTALLED.get)
+        row = rs[0]
+        self.assertEqual(row["status"], "update_available")
+        self.assertTrue(row["updatable"])
+        self.assertEqual(row["latest"], "9.9.9")
+        self.assertEqual(row["note"], "Restart to finish updating")
+
     def test_http_404(self):
         def gh404(req, timeout=None):
             if "github" in req.full_url:
@@ -388,6 +426,95 @@ class DialogTests(unittest.TestCase):
             time.sleep(0.02)
         root.update()
         self.assertFalse(st["busy"])
+
+    def test_app_row_is_handed_to_the_updater_without_a_second_prompt(self):
+        """Update selected and Update all pass the release the dialog found. The dialog itself
+        does not ask; the callback owns the one confirmation."""
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("no display")
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        from msr import deps_dialog, dialogs
+        msr = {"name": "msr", "label": "Multi-Stream Recorder", "installed": "3.1.3", "latest": "3.1.4",
+               "status": "update_available", "source": "this app", "updatable": True,
+               "note": "git checkout: updates with git pull",
+               "url": "https://github.com/ManletPride/Multi-Stream-Recorder/releases/tag/v3.1.4",
+               "zipball": "https://api.github.com/repos/ManletPride/Multi-Stream-Recorder/zipball/v3.1.4"}
+        ytdlp = {"name": "yt-dlp", "label": "yt-dlp", "installed": "1", "latest": "2",
+                 "status": "update_available", "source": "pip", "updatable": True, "note": ""}
+        cfg = mock.Mock()
+        cfg.getboolean.return_value = True
+        seen = []
+
+        def decline(row, parent=None):
+            seen.append((row, parent))
+            return False
+
+        def boom(*_a, **_k):
+            raise AssertionError("the dialog asked for confirmation itself")
+
+        with tempfile.TemporaryDirectory() as d, \
+             mock.patch.object(dialogs, "present", lambda w, p: None), \
+             mock.patch.object(dialogs, "ask_yes_no", boom), \
+             mock.patch.object(depsupdate, "rows", return_value=[msr, ytdlp]), \
+             mock.patch.object(depsupdate, "update_packages",
+                               return_value=[{"name": "yt-dlp", "ok": True, "old": "1", "new": "2"}]) as up:
+            win = deps_dialog.open_deps_dialog(
+                root, config=cfg, state_file=os.path.join(d, "ws.json"),
+                on_msr_update=decline, check_now=False)
+            tree = self._tree(win)
+            self.assertIn("git checkout: updates with git pull", tree.item("msr", "values")[-1])
+            tree.selection_set("msr")
+            root.update()
+            [b for b in self._buttons(win) if b.cget("text") == "Update selected"][0].invoke()
+            self.assertEqual(seen[-1][0]["latest"], "3.1.4")
+            self.assertEqual(seen[-1][0]["zipball"], msr["zipball"])
+            self.assertIs(seen[-1][1], win)
+            self.assertTrue(win.winfo_exists())          # declined: dialog stays open
+            up.assert_not_called()
+            # Update all asks the same callback, and a decline still updates the packages.
+            [b for b in self._buttons(win) if b.cget("text") == "Update all"][0].invoke()
+            self._wait(root, win._deps_state)
+            self.assertEqual(up.call_args[0][0], ["yt-dlp"])
+            self.assertEqual(seen[-1][0]["latest"], "3.1.4")
+            root._msr_deps_dialog = None
+            win.destroy()
+            root.update()
+            self.assertFalse(win.winfo_exists())
+
+        started = []
+
+        def accept(row, parent=None):
+            started.append(row["zipball"])
+            return True
+
+        with tempfile.TemporaryDirectory() as d, \
+             mock.patch.object(dialogs, "present", lambda w, p: None), \
+             mock.patch.object(dialogs, "ask_yes_no", boom), \
+             mock.patch.object(depsupdate, "rows", return_value=[dict(msr)]), \
+             mock.patch.object(depsupdate, "update_packages") as up:
+            win = deps_dialog.open_deps_dialog(
+                root, config=cfg, state_file=os.path.join(d, "ws.json"),
+                on_msr_update=accept, check_now=False)
+            tree = self._tree(win)
+            tree.selection_set("msr")
+            root.update()
+            [b for b in self._buttons(win) if b.cget("text") == "Update selected"][0].invoke()
+            root.update()
+            self.assertEqual(started, [msr["zipball"]])
+            self.assertFalse(win.winfo_exists())
+            up.assert_not_called()
+
+    def _tree(self, w):
+        for c in w.winfo_children():
+            if c.winfo_class() == "Treeview":
+                return c
+            found = self._tree(c)
+            if found is not None:
+                return found
+        return None
 
     def test_summary(self):
         s = deps_dialog_summary = __import__("msr.deps_dialog", fromlist=["summary"]).summary

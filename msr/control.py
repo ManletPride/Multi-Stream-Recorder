@@ -1578,25 +1578,40 @@ class Controller:
         self._need_live()
         if not self.app.update_state:
             self.cmd_update_check({})
-        if not self.app.update_state:
-            raise ControlError("No newer version found.", "not_found")
-        self._confirm(args, f"This downloads v{self.app.update_state['tag']}, stops all recordings and restarts.")
-        from msr.update import prepare_update, spawn_updater, zipball_url_for_tag, zipball_url_is_allowed
+        from msr.update import git_pull_ff_only, plan_app_update, prepare_update, relaunch_app, spawn_updater
         from msr.util import application_dir
         target = application_dir()
-        if not os.access(target, os.W_OK):
-            raise ControlError("The program folder is not writable.", "write_failed")
-        url = self.app.update_state.get("zipball") or ""
-        if not zipball_url_is_allowed(url):
-            url = zipball_url_for_tag(self.app.update_state["tag"])
-        staging = prepare_update(url)
-        rec = self.app.recorder
-        if is_running_session(rec):
-            rec.stop()
+        # Same decision as the Updates dialog: the stored release, or a restart / git pull
+        # when a zip would be wrong. A normal install still downloads that release.
+        plan = plan_app_update(target, __version__, self.app.update_state or None,
+                               recording=is_running_session(self.app.recorder))
+        if plan["action"] in ("blocked", "git_manual"):
+            logging.warning("In-app update did not start: %s", " ".join(plan["message"].split()))
+            raise ControlError(plan["message"], plan.get("code") or "failed")
+        if plan["action"] == "zip":
+            if not self.app.update_state:
+                raise ControlError("No newer version found.", "not_found")
+            self._confirm(args, f"This downloads v{self.app.update_state['tag']}, stops all recordings and restarts.")
+            if not os.access(target, os.W_OK):
+                raise ControlError("The program folder is not writable.", "write_failed")
+            staging = prepare_update(plan["zipball"])
+            rec = self.app.recorder
+            if is_running_session(rec):
+                rec.stop()
+            relaunch = list(getattr(self.app, "relaunch_args", None) or [])
+            self.app.request_quit(after_children=lambda: spawn_updater(staging, target_dir=target,
+                                                                       launcher_args=relaunch))
+            return {"installing": self.app.update_state["tag"], "relaunch": [self.app.mode] + relaunch}
+        self._confirm(args, " ".join(plan["message"].split()))
+        if plan["action"] == "git_pull":
+            ok, text = git_pull_ff_only(target)
+            if not ok:
+                logging.warning("In-app update failed: git pull --ff-only: %s", text)
+                raise ControlError(text or "git pull --ff-only failed.", "failed")
         relaunch = list(getattr(self.app, "relaunch_args", None) or [])
-        self.app.request_quit(after_children=lambda: spawn_updater(staging, target_dir=target,
-                                                                   launcher_args=relaunch))
-        return {"installing": self.app.update_state["tag"], "relaunch": [self.app.mode] + relaunch}
+        self.app.request_quit(after_children=lambda: relaunch_app(target, relaunch))
+        return {"installing": plan.get("tag") or "restart", "action": plan["action"],
+                "relaunch": [self.app.mode] + relaunch}
 
     # -------------------------------------------------- health, recordings, events
     def cmd_health(self, args):
