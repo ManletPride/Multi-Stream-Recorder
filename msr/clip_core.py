@@ -106,6 +106,122 @@ def _pts_values(buf: bytes):
         yield ((b[0] >> 1) & 7) << 30 | b[1] << 22 | (b[2] >> 1) << 15 | b[3] << 7 | b[4] >> 1
 
 
+def _tick_step(later: int, earlier: int) -> int:
+    """later − earlier in 90 kHz ticks, wrap-safe around the 33-bit PTS."""
+    return (later - earlier + PTS_WRAP // 2) % PTS_WRAP - PTS_WRAP // 2
+
+
+# A later packet this far behind one already seen is a PCR reset, not B-frame
+# reordering (a frame or two) or audio sitting slightly ahead of video.
+_RESET_BEHIND = 2 * 90000
+# Consecutive timestamps inside one read. A real frame step is a fraction of
+# a second; tens of seconds between two packets in the same window is a splice.
+_RESET_AHEAD = 30 * 90000
+_TIMELINE_SAMPLES = 9
+
+
+def _timeline_spans(size: int, samples: int = _TIMELINE_SAMPLES, scan: int = _SCAN) -> list[tuple[int, int]]:
+    """Non-overlapping ``(offset, length)`` reads covering the start and the end.
+
+    A file that fits in ``samples`` windows is read through, so a reset cannot
+    hide between them. A longer recording is sampled (head, tail, and a few
+    windows between) so a multi-gigabyte file is not read whole.
+    """
+    if size <= 0:
+        return []
+    if size <= scan * 2:
+        return [(0, size)]
+    spans = [(0, scan)]
+    gap_lo = scan
+    gap_hi = size - scan
+    room = gap_hi - gap_lo
+    budget = max(0, samples - 2)
+    if room > 0 and budget > 0:
+        need = (room + scan - 1) // scan
+        if need <= budget:
+            off = gap_lo
+            while off < gap_hi:
+                length = min(scan, gap_hi - off)
+                spans.append((off, length))
+                off += length
+        else:
+            n = budget
+            stride = (room - scan) / (n - 1) if n > 1 else 0
+            for i in range(n):
+                off = gap_lo + int(round(i * stride))
+                read = scan
+                prev_end = spans[-1][0] + spans[-1][1]
+                if off < prev_end:
+                    off = prev_end
+                if off + read > gap_hi:
+                    read = gap_hi - off
+                if read >= 188 * 8 and off >= prev_end:
+                    spans.append((off, read))
+    tail = (size - scan, scan)
+    if tail[0] >= spans[-1][0] + spans[-1][1]:
+        spans.append(tail)
+    return spans
+
+
+def _assess_pts(windows: list[list[int]]) -> dict | None:
+    """Elapsed seconds from PTS windows (90 kHz ticks, file order).
+
+    The first window is the start of the file and the last is the end, same
+    as ``ts_length`` (earliest tick in the head, latest in the tail). A step
+    backwards of more than a couple of seconds — inside a window, or from an
+    earlier window to a later one — is a mid-file PCR reset: ``continuous``
+    is false and ``elapsed`` is None, because last−first is then not how long
+    the file is. A large *forward* step between windows is the unread gap, not
+    a reset. None when the ends have no timestamps.
+    """
+    if not windows or not windows[0] or not windows[-1]:
+        return None
+    ref = windows[0][0]
+    continuous = True
+    high = None
+    for window in windows:
+        if not window:
+            continue
+        prev = None
+        for p in window:
+            if prev is not None:
+                step = _tick_step(p, prev)
+                if step < -_RESET_BEHIND or step > _RESET_AHEAD:
+                    continuous = False
+            elif high is not None and _tick_step(p, high) < -_RESET_BEHIND:
+                continuous = False
+            prev = p
+            if high is None or _tick_step(p, high) > 0:
+                high = p
+    first = min(_tick_step(p, ref) for p in windows[0])
+    last = max(_tick_step(p, ref) for p in windows[-1])
+    elapsed = (last - first) / 90000.0 if continuous and last >= first else None
+    return {
+        "first": (ref + first) / 90000.0,
+        "last": (ref + last) / 90000.0,
+        "elapsed": elapsed,
+        "continuous": elapsed is not None,
+    }
+
+
+def ts_timeline(path: str, samples: int = _TIMELINE_SAMPLES) -> dict | None:
+    """Packet clock of an MPEG-TS: first PTS, last PTS, elapsed, continuous.
+
+    Reads the head, the tail, and — on a long file — a few windows between
+    them. Fast on a multi-gigabyte recording and safe while it is still
+    growing (shared read). ``elapsed`` is last−first only when timestamps
+    move forward; a backward jump sets ``continuous`` false. None when the
+    ends have no PTS.
+    """
+    with open(path, "rb") as f:   # shared read: the recorder keeps writing
+        size = os.fstat(f.fileno()).st_size
+        windows = []
+        for off, length in _timeline_spans(size, samples, _SCAN):
+            f.seek(off)
+            windows.append(list(_pts_values(f.read(length))))
+    return _assess_pts(windows)
+
+
 def ts_length(path: str) -> float | None:
     """Seconds from the first to the last timestamp of an MPEG-TS, read from both ends of the
     file (fast on a 20 GB recording, works while it grows). None when none are found."""

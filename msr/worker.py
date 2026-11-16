@@ -24,6 +24,7 @@ from msr.config import (
     parser_getint,
 )
 from msr import storage
+from msr.clip_core import ts_timeline
 from msr.deps import HAS_PSUTIL
 from msr.preview_state import build_ladder
 from msr.platforms import (
@@ -296,38 +297,48 @@ def _parse_ffprobe_packet_csv(stdout):
     return times, keys
 
 
-def _elapsed_media_duration(raw_duration, start_time=0.0):
-    """Return elapsed file time from an ffprobe duration + format.start_time.
+def _ts_packet_elapsed(path):
+    """Elapsed seconds of an MPEG-TS from its packet clock.
 
-    Live MPEG-TS (Twitch especially, Kick sometimes) reports
-    ``format.duration`` as the *last PCR/PTS* (e.g. 12686) rather than
-    last-minus-start (e.g. 67). A 15s Clip Now then computes
-    ``cut = 12671``, seeks to elapsed ~65s of a 67s file, and only gets
-    the last GOP — the powdur clip was 2.6s. Screenshots using
-    ``-ss duration-3`` miss the file entirely.
+    Returns ``(seconds or None, how)``:
 
-    Kick already worked because ffprobe gave *elapsed* duration there
-    (180 < start_time 10000, so this does not subtract). Only treat
-    duration as last-PTS when it is greater than a large PCR start_time.
+    * ``pts`` — timestamps only move forward. ``seconds`` is the last PTS
+      minus the first, which is the real length whether ffprobe's
+      ``format.duration`` is that length or the raw last PTS.
+    * ``reset`` — a later packet sits well behind an earlier one (a Kick
+      ad splice). The span is not the file's length; seek from EOF.
+    * ``unknown`` — not a ``.ts``, or no timestamps. The caller may use ffprobe.
+
+    Do not guess this from ``start_time``. A Kick file whose PCR already sat
+    at 2658 s when the recording began, and which then ran for 10186 s, has
+    an elapsed duration *greater* than ``start_time``. Subtracting
+    ``start_time`` there (and doing it again in the keyframe probe) sought
+    a 120 s clip at about 4800 s.
     """
-    if raw_duration is None or raw_duration <= 0:
-        return None
-    start_time = start_time or 0.0
-    # PCR clocks on Kick/Twitch live TS sit in the thousands of seconds.
-    # A 90s start_time with a genuine elapsed duration of 180 must not
-    # be rewritten to 90. 1000s is below observed live PCR (~10k–12k)
-    # and above normal file-start offsets.
-    if start_time >= 1000.0 and raw_duration > start_time:
-        return raw_duration - start_time
-    return raw_duration
+    if not str(path).lower().endswith(".ts"):
+        return None, "unknown"
+    try:
+        clock = ts_timeline(path)
+    except OSError:
+        return None, "unknown"
+    if clock is None:
+        return None, "unknown"
+    if not clock["continuous"]:
+        return None, "reset"
+    elapsed = clock.get("elapsed")
+    if not elapsed or elapsed <= 0:
+        return None, "unknown"
+    return elapsed, "pts"
 
 
 def _file_wall_age_seconds(path):
     """Seconds since *path* was created, or None if the FS has no birth time.
 
-    Used to catch MPEG-TS PCR resets (Kick HLS ads): ffprobe elapsed can be
-    33 min on a file that has existed for 99 min. Windows ``st_ctime`` is
-    creation; POSIX uses ``st_birthtime`` when the FS provides it.
+    Backstop for a PCR reset the packet scan missed: the reported length can
+    be 33 min on a file that has existed for 99 min. Windows ``st_ctime`` is
+    creation. POSIX uses ``st_birthtime`` when the filesystem provides it.
+    Many Linux volumes do not, so this returns None there — a missing birth
+    time is not evidence that the clock is continuous.
     """
     try:
         st = os.stat(path)
@@ -336,7 +347,7 @@ def _file_wall_age_seconds(path):
     created = getattr(st, "st_birthtime", None)
     if created is None and os.name == "nt":
         created = st.st_ctime
-    if created is None:
+    if not created or float(created) <= 0:
         return None
     age = time.time() - float(created)
     if age < 0:
@@ -347,10 +358,12 @@ def _file_wall_age_seconds(path):
 def _elapsed_matches_file_age(elapsed, path, slack=30.0):
     """False when container elapsed is far behind how long the file has existed.
 
-    Kick mid-roll ads splice a new PCR into the same ``.ts``. ffprobe then
-    reports lastPTS−start as the duration (e.g. 2024s) while the capture is
-    ~5990s long. ``-ss`` from the start hits the *first* occurrence of that
-    clock — minutes behind live. ``-sseof`` still reads the last bytes.
+    Kick mid-roll ads splice a new PCR into the same ``.ts``. The reported
+    length can then be ~2024 s while the capture has existed for ~5990 s.
+    ``-ss`` from the start hits the *first* occurrence of that clock —
+    minutes behind live. ``-sseof`` still reads the last bytes. A filesystem
+    with no birth time returns True here; the packet scan is what still
+    rejects a clock that jumped backwards.
     """
     if elapsed is None or elapsed <= 0:
         return False
@@ -459,16 +472,10 @@ def _find_clip_keyframe(ffmpeg_path, raw_file, clip_seconds, duration, logger, t
     except Exception:
         pass
 
-    elapsed = _elapsed_media_duration(duration, start_time)
-    if (
-        elapsed is not None and duration is not None
-        and abs(elapsed - duration) > 1.0
-    ):
-        logger.info(
-            f"Clip: duration {duration:.1f}s is last PTS (start_time "
-            f"{start_time:.1f}s) — using elapsed {elapsed:.1f}s"
-        )
-    duration = elapsed
+    # ``duration`` is already elapsed file time (packet span, or a container
+    # duration the probe could not correct). Subtracting start_time again
+    # seeks a long Kick recording about an hour behind the live edge: elapsed
+    # 10186 s with start_time 2658 s became 10186 − 2×2658 ≈ 4870 s.
 
     # Probe a small window around the cut point — not the whole clip, so a
     # 30-minute Clip Now doesn't dump half an hour of packets. The +2s past
@@ -515,14 +522,16 @@ def _find_clip_keyframe(ffmpeg_path, raw_file, clip_seconds, duration, logger, t
 def create_clip(raw_file, output_file, clip_seconds, ffmpeg_path, logger, timeout=60):
     """Cut the last *clip_seconds* out of raw_file into output_file (.mp4).
 
-    Probes the current duration, finds the last video keyframe at or before
-    (duration - clip_seconds), and stream-copies from that keyframe's
-    *elapsed* position (PTS minus format.start_time). MPEG-TS PCR often
-    runs hours ahead of the file; using the raw PTS as ``-ss`` misses the
-    cut and leaves audio starting at 0 while video waits for the next IDR.
+    Measures elapsed time from the first and last packet PTS (not from
+    ``format.duration`` minus ``start_time``), finds the last video keyframe
+    at or before (elapsed - clip_seconds), and stream-copies from that
+    keyframe's *elapsed* position (PTS minus format.start_time). MPEG-TS PCR
+    often runs hours ahead of the file; using the raw PTS as ``-ss`` misses
+    the cut and leaves audio starting at 0 while video waits for the next IDR.
     ``-t`` is extended so the clip still reaches the live edge. If the
     recording is younger than the requested clip length, the whole file
-    is used instead.
+    is used instead. A backward PTS jump, or an elapsed time far behind the
+    file's birth time, seeks from the end instead.
 
     Returns (success: bool, message: str) — message is an error reason on
     failure, or the actual clip length used on success.
@@ -530,15 +539,25 @@ def create_clip(raw_file, output_file, clip_seconds, ffmpeg_path, logger, timeou
     if not os.path.exists(raw_file):
         return False, "recording file not found"
 
-    duration = _probe_duration(ffmpeg_path, raw_file)
-    if duration is not None and not _elapsed_matches_file_age(duration, raw_file):
+    elapsed, how = _ts_packet_elapsed(raw_file)
+    if how == "unknown":
+        elapsed = _probe_container_duration(ffmpeg_path, raw_file)
+    if how == "reset":
+        logger.info(
+            "Clip: packet timestamps jump backwards "
+            "(PCR reset / Kick ad splice) — seeking from EOF"
+        )
+        duration = None
+    elif elapsed is not None and not _elapsed_matches_file_age(elapsed, raw_file):
         age = _file_wall_age_seconds(raw_file)
         age_s = f"{age:.0f}s" if age is not None else "unknown"
         logger.info(
-            f"Clip: elapsed {duration:.1f}s disagrees with file age {age_s} "
+            f"Clip: elapsed {elapsed:.1f}s disagrees with file age {age_s} "
             "(likely a PCR reset / Kick ad splice) — seeking from EOF"
         )
         duration = None
+    else:
+        duration = elapsed
 
     # Duration is a nice-to-have, not a requirement.  Some live MPEG-TS
     # captures never report one (see _probe_duration for why), and refusing
@@ -1423,31 +1442,49 @@ def _start_catchup_thread(from_start, ffmpeg_path, channel_key, interval=30.0):
 
 
 def _probe_duration(ffmpeg_path, raw_file):
-    """Return the duration of *raw_file* in seconds using ffprobe (or ffmpeg -i).
+    """Return the elapsed length of *raw_file* in seconds, or None.
 
-    Tries several strategies, because a live-growing MPEG-TS is a much harder
-    case than a finished file:
+    An MPEG-TS is measured from its packet timestamps (first PTS to last PTS).
+    That is the real length both when ffprobe's ``format.duration`` is already
+    elapsed and when ffprobe reports the last PTS instead (Twitch, powdur:
+    duration 12686, start 12621, file ~65 s). A backward jump in those
+    timestamps returns None — the span is not the file's length, and a seek
+    by it lands on the first time that clock appears.
+
+    Anything else, or a ``.ts`` with no readable timestamps, falls through to
+    ffprobe / ``ffmpeg -i``. That reported number is returned as-is. Comparing
+    it to ``start_time`` and subtracting is wrong once a recording runs longer
+    than its PCR start (Kick, start 2658 s, elapsed 10186 s, duration already
+    elapsed): the cut landed ~85 min behind live.
+    """
+    elapsed, how = _ts_packet_elapsed(raw_file)
+    if how == "pts":
+        return elapsed
+    if how == "reset":
+        return None
+    return _probe_container_duration(ffmpeg_path, raw_file)
+
+
+def _probe_container_duration(ffmpeg_path, raw_file):
+    """ffprobe / ffmpeg duration, unchanged. None if every strategy fails.
+
+    Tries several strategies, because a live-growing file is a harder case
+    than a finished one:
 
       1. format=duration — works for finished files and most growing ones.
       2. the video stream's own duration — MPEG-TS has no container-level
-         duration field, so ffprobe has to derive one by seeking to the end
-         and reading the last timestamp.  That derivation reports N/A on some
-         live captures (notably when PTS values are near the 33-bit MPEG-TS
-         wraparound, or when the tail packet is mid-write), while the
-         per-stream value still resolves.
+         duration field, so ffprobe derives one by seeking to the end.
+         That reports N/A on some live captures, while the per-stream value
+         still resolves.
       3. parsing "Duration:" out of `ffmpeg -i` stderr.
 
     Strategies 1 and 2 get an enlarged probesize/analyzeduration, since the
     defaults can bail out before finding timestamps on a portrait/low-bitrate
     stream.
-
-    Returns elapsed seconds, never a raw PCR last-PTS. See
-    ``_elapsed_media_duration``. Returns None if every strategy fails.
     """
     ffprobe_path = ffprobe_from_ffmpeg(ffmpeg_path)
 
     _big = ["-probesize", "50M", "-analyzeduration", "20M"]
-    start_time = 0.0
     try:
         fmt = _hidden_run(
             [ffprobe_path, "-v", "error", *_big,
@@ -1455,23 +1492,21 @@ def _probe_duration(ffmpeg_path, raw_file):
              "-of", "default=noprint_wrappers=1", raw_file],
             timeout=20,
         )
-        parsed = {}
         for line in (fmt.stdout or "").splitlines():
             if "=" not in line:
                 continue
             key, val = line.split("=", 1)
+            if key.strip() != "duration":
+                continue
             val = val.strip()
             if not val or val.upper() == "N/A":
                 continue
             try:
-                parsed[key.strip()] = float(val)
+                raw = float(val)
             except ValueError:
                 continue
-        start_time = parsed.get("start_time") or 0.0
-        raw = parsed.get("duration")
-        elapsed = _elapsed_media_duration(raw, start_time)
-        if elapsed:
-            return elapsed
+            if raw > 0:
+                return raw
     except Exception:
         pass
 
@@ -1490,9 +1525,8 @@ def _probe_duration(ffmpeg_path, raw_file):
                     d = float(val)
                 except ValueError:
                     continue
-                elapsed = _elapsed_media_duration(d, start_time)
-                if elapsed:
-                    return elapsed
+                if d > 0:
+                    return d
     except Exception:
         pass
 
@@ -1507,9 +1541,8 @@ def _probe_duration(ffmpeg_path, raw_file):
         if m:
             h, mn, s, cs = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
             total = h * 3600 + mn * 60 + s + cs / 100
-            elapsed = _elapsed_media_duration(total, start_time)
-            if elapsed:
-                return elapsed
+            if total > 0:
+                return total
     except Exception:
         pass
     return None

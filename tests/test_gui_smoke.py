@@ -130,6 +130,40 @@ def fake_mainloop(self, n=0):
         header = clips.master
         out["header_req"], out["header_width"] = header.winfo_reqwidth(), header.winfo_width()
         out["root_width"] = self.winfo_width()
+        # Space on a focused action button must not run its command. A plain
+        # button in the same window still does, so a missed event fails the test.
+        fired = []
+        saved = [(b, b.cget("command")) for b in btns]
+        for b in btns:
+            b.configure(command=lambda n=b.cget("text"): fired.append(n))
+        plain_hits = []
+        plain = ttk.Button(self, text="plain-probe", command=lambda: plain_hits.append(1))
+        plain.place(x=0, y=0, width=80, height=28)
+        self.deiconify()
+        self.geometry("1600x800+0+0")   # the right pane has to be wide enough to map Clip Now
+        self.update()
+        plain.focus_force()
+        self.update()
+        plain.event_generate("<Key-space>")
+        out["plain_space"] = len(plain_hits)
+        out["plain_focused"] = str(self.focus_get()) == str(plain)
+        plain.destroy()
+        out["action_focused"] = []
+        for b in btns:
+            b.focus_force()
+            self.update()
+            if str(self.focus_get()) != str(b):
+                b.focus_force()
+            out["action_focused"].append(str(self.focus_get()) == str(b))
+            b.event_generate("<Key-space>")
+            b.event_generate("<KeyRelease-space>")
+        out["space_fired"] = fired
+        out["action_takefocus"] = [str(b.cget("takefocus")) for b in btns]
+        out["action_space_tag"] = ["MsrHeaderAction" in b.bindtags() for b in btns]
+        for b, cmd in saved:
+            b.configure(command=cmd)
+        self.withdraw()
+        self.update()
         import msr.util, msr.gui
         with mock.patch.object(msr.gui._dialogs, "show_info") as info, \
                 mock.patch.object(msr.util, "open_local_path") as opener:
@@ -178,6 +212,12 @@ class StreamsButtonTests(unittest.TestCase):
         self.assertEqual(out["xs"], sorted(out["xs"]), out)            # Clip Now | DVR | Clips | Screenshot | Streams
         self.assertEqual(out["clip_style"], "Accent.TButton")
         self.assertTrue(all(out["tooltips"]) and out["shift_click"], out)
+        self.assertEqual(out["plain_space"], 1, out)                       # the event reaches a normal button
+        self.assertTrue(out["plain_focused"], out)
+        self.assertEqual(out["action_focused"], [True] * 5, out)           # Space was delivered while each button held focus
+        self.assertEqual(out["space_fired"], [], out)                      # Clip Now, DVR, Clips, Screenshot, Streams
+        self.assertEqual(out["action_takefocus"], ["0"] * 5, out)
+        self.assertEqual(out["action_space_tag"], [True] * 5, out)
         self.assertIn("Select a channel", " ".join(out["dvr_popup"]))
         self.assertEqual(out["opened"], [str(rec)])                       # same helper as Clips
         self.assertEqual(out["popups_when_present"], 0)

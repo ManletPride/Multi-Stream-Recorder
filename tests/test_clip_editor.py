@@ -325,6 +325,56 @@ class EditorWindowTests(unittest.TestCase):
             self.assertEqual(cut, [], geometry)
         self.ed.win.withdraw()
 
+    def _focus_inside(self, ed):
+        try:
+            got = self.root.focus_get()
+        except tk.TclError:
+            return False
+        return got is not None and got.winfo_toplevel() is ed.win
+
+    def _press_space(self):
+        got = self.root.focus_get()
+        self.assertIsNotNone(got)
+        got.event_generate("<Key-space>")
+        self.root.update()
+
+    def test_shown_editor_takes_focus_and_space_plays_only_that_editor(self):
+        self.root.deiconify()
+        self.root.geometry("800x600+0+0")
+        self.root.update()
+        extra = []
+
+        def make():
+            ed = self.mod.ClipEditor(
+                self.root, self.src, clips_base=os.path.join(self.tmp.name, "Clips"),
+                show=True, audio_factory=self._audio,
+                frame_grabber=lambda *_a, **_k: PPM, length_reader=lambda _p: self.length)
+            extra.append(ed)
+            return ed
+
+        try:
+            ed = make()
+            self.pump(lambda: self._focus_inside(ed))
+            self._press_space()
+            self.assertTrue(ed.playing)
+            ed2 = make()
+            self.assertTrue(ed.win.winfo_exists() and ed2.win.winfo_exists())
+            self.pump(lambda: self._focus_inside(ed2))
+            self.assertFalse(self._focus_inside(ed))
+            self._press_space()
+            self.assertTrue(ed2.playing)
+            self.assertTrue(ed.playing)                 # the key did not toggle the other editor
+            ed.play_btn.focus_force()
+            self.root.update()
+            ed.play_btn.event_generate("<Key-space>")
+            self.root.update()
+            self.assertFalse(ed.playing)
+            self.assertTrue(ed2.playing)
+        finally:
+            for opened in extra:
+                opened.close()
+            self.root.withdraw()
+
     def test_ctrl_s_and_enter_save(self):
         self.assertTrue(self.ed.win.bind("<Control-s>"))
         self.assertTrue(self.ed.win.bind("<Return>"))
