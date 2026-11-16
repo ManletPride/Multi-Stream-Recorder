@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Updates: choosing Multi-Stream Recorder and pressing Update selected or Update all uses the release that check just found. A window left open since before that release no longer asks to continue and then does nothing (the banner tag from the startup check was empty, and the click returned without a message). The header banner takes the same release, and a long-running window checks again with the daily update pass. If an update cannot start, the window says why and the log records it. There is one confirmation, not two.
+- A git checkout is not overwritten with a release zip. When the tree is clean and the branch tracks origin, MSR offers `git pull --ff-only` and a restart. Otherwise it explains and shows the command. The Updates row says "git checkout: updates with git pull".
+- When the files on disk are already newer than the running copy (a pull that has not been restarted), MSR says "Restart to finish updating" and restarts instead of downloading. A normal install still downloads the GitHub zip.
+
 ## v3.1.4 (2026-11-16)
 
 Release notes: [docs/release_notes/RELEASE_NOTES_v3.1.4.md](docs/release_notes/RELEASE_NOTES_v3.1.4.md).

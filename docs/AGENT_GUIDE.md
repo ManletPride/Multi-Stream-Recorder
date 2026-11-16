@@ -84,7 +84,7 @@ python msr_ctl.py --json deps check     # installed vs latest for msr, yt-dlp, s
 python msr_ctl.py deps update yt-dlp    # pip, hidden; restores the old version on failure; next recording uses it
 ```
 MSR keeps its packages in `.venv` in the MSR folder; `deps` runs there automatically (or call `.venv\Scripts\python msr_ctl.py ...`, Linux `.venv/bin/python`). Outside a venv `deps update` is refused (`not_venv`); never add `--system` without the user's OK, it changes the Python other programs use.
-`deps update` changes MSR's packages: ask first unless the user asked for it. ffmpeg and MSR itself are never updated by `deps` (MSR: `update install --yes`).
+`deps update` changes MSR's packages: ask first unless the user asked for it. ffmpeg and MSR itself are never updated by `deps` (MSR: `update install --yes`). On a git checkout that does not overwrite the tree: a clean branch tracking origin is `git pull --ff-only` and a restart, and any other checkout is refused with the command to run. If the files on disk are already newer than the running process, it restarts instead of downloading.
 
 **Twitch sign-in** (same as Options > Twitch)
 ```

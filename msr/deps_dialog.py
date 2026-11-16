@@ -6,6 +6,7 @@ drains, so Tk is touched from the main thread only.
 
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 import tkinter as tk
@@ -22,9 +23,14 @@ COLUMNS = (("label", "Item", 170), ("installed", "Installed", 170), ("latest", "
 
 
 def open_deps_dialog(parent, *, config, state_file, ffmpeg_path="ffmpeg", on_msr_update=None,
-                     on_badge=None, check_now=True):
-    """Open (or raise) the dialog. on_msr_update() starts the app's own updater; on_badge(names)
-    tells the main window which items have updates."""
+                     on_badge=None, on_checked=None, check_now=True):
+    """Open (or raise) the dialog.
+
+    ``on_msr_update(row, parent=win)`` starts the app update from the release this dialog just
+    found (tag, url, zipball on the row). It asks the one confirmation itself and returns True
+    when the update has started, so this dialog does not ask again. ``on_badge(names)`` and
+    ``on_checked(rows)`` tell the main window about the badge and the header banner.
+    """
     existing = getattr(parent, "_msr_deps_dialog", None)
     if existing is not None and existing.winfo_exists():
         existing.deiconify(); existing.lift(); existing.focus_force()
@@ -75,6 +81,8 @@ def open_deps_dialog(parent, *, config, state_file, ffmpeg_path="ffmpeg", on_msr
                 STATUS_TEXT.get(r["status"], r["status"]), f"{src}  {note}".strip()))
         if on_badge:
             on_badge(depsupdate.updates_available(state["rows"]))
+        if on_checked:
+            on_checked(state["rows"])
         _buttons()
 
     def _buttons():
@@ -86,7 +94,9 @@ def open_deps_dialog(parent, *, config, state_file, ffmpeg_path="ffmpeg", on_msr
         return list(tree.selection())
 
     def _all_updatable():
-        return [r["name"] for r in state["rows"] if r.get("updatable") and r["name"] != "msr"]
+        # MSR is included. Its updater asks once and, if it starts, restarts the app, so the
+        # package installs below are skipped. Declining leaves those packages to update.
+        return [r["name"] for r in state["rows"] if r.get("updatable")]
 
     def _work(fn, kind):
         state["busy"] = True
@@ -116,13 +126,23 @@ def open_deps_dialog(parent, *, config, state_file, ffmpeg_path="ffmpeg", on_msr
             return
         by = {r["name"]: r for r in state["rows"]}
         if "msr" in names:
-            if by["msr"].get("updatable") and on_msr_update:
-                if dialogs.ask_yes_no(win, "Update Multi-Stream Recorder",
-                                      "Updating the app stops running recordings and restarts it. Continue?"):
-                    _close()
-                    on_msr_update()
-                    return
+            # The app update stops recordings and restarts. It is not a pip install, and it asks
+            # its own single confirmation (zip, git pull, or restart). Declining it leaves any
+            # packages in this same click free to update.
+            row = by.get("msr") or {}
             names = [n for n in names if n != "msr"]
+            if row.get("updatable") and on_msr_update:
+                try:
+                    started = bool(on_msr_update(row, parent=win))
+                except Exception as exc:
+                    logging.exception("App update did not start")
+                    dialogs.show_error(win, "Cannot update", f"The update could not start.\n\n{exc}")
+                    return
+                if started and win.winfo_exists():
+                    _close()
+                    return
+                if not names:
+                    return
         skipped = [by[n]["label"] for n in names if n in by and not by[n].get("updatable")]
         names = [n for n in names if n in by and by[n].get("updatable")]
         if not names:

@@ -102,10 +102,16 @@ def pypi_info(dist: str, opener=None, installed: str | None = None) -> tuple[str
     return str(data["info"]["version"]), released
 
 
-def latest_msr(opener=None) -> tuple[str, str]:
+def latest_msr(opener=None) -> tuple[str, str, str]:
+    """(tag without v, html url, zipball url) from GitHub ``releases/latest``.
+
+    The zipball is whatever the API returns (usually ``api.github.com/.../zipball/<tag>``).
+    Callers still reject it unless ``zipball_url_is_allowed``.
+    """
     from msr.util import GITHUB_OWNER, GITHUB_REPO
     data = _get_json(f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest", opener=opener)
-    return str(data.get("tag_name", "")).lstrip("vV"), str(data.get("html_url", ""))
+    return (str(data.get("tag_name", "")).lstrip("vV"), str(data.get("html_url", "")),
+            str(data.get("zipball_url") or ""))
 
 
 def _offline(e: Exception) -> bool:
@@ -140,6 +146,38 @@ def _status(installed, latest):
     return "update_available" if vkey(latest) > vkey(installed) else "up_to_date"
 
 
+def _annotate_msr(msr: dict, running: str) -> None:
+    """Note a git checkout, or a copy whose files are already newer than this process.
+
+    A release-zip overwrite of a git working tree would leave it dirty and diverged, so the
+    Source / note column says to update with git. Files already newer than the running
+    process (a pull that has not been restarted) are a restart, not a download. A failed
+    version check keeps its own error text, unless the files on disk are already newer.
+    """
+    try:
+        from msr.update import GIT_NOTE, RESTART_TITLE, disk_version, source_note
+        from msr.util import application_dir
+        folder = application_dir()
+        note = source_note(folder, running)
+    except Exception:
+        return
+    if note == RESTART_TITLE:
+        msr["note"] = RESTART_TITLE
+        msr["updatable"] = True
+        if msr.get("status") in ("unchecked", "unknown", "up_to_date", "", None):
+            msr["status"] = "update_available"
+        if not msr.get("latest"):
+            on_disk = disk_version(folder)
+            if on_disk:
+                msr["latest"] = on_disk
+        return
+    if note == GIT_NOTE and msr.get("status") != "unknown":
+        msr["note"] = GIT_NOTE
+        return
+    if msr.get("updatable") and not msr.get("note"):
+        msr["note"] = ZIP_NOTE
+
+
 def rows(check: bool = False, *, ffmpeg_path: str = "ffmpeg", opener=None, version_of=installed_version) -> list[dict]:
     """One dict per item. check=False lists installed versions only (no network)."""
     from msr import __version__
@@ -148,13 +186,15 @@ def rows(check: bool = False, *, ffmpeg_path: str = "ffmpeg", opener=None, versi
            "latest": None, "status": "unchecked", "source": "this app", "updatable": False, "note": ""}
     if check:
         try:
-            tag, url = latest_msr(opener)
-            msr.update(latest=tag or None, status=_status(__version__, tag or None), url=url)
+            tag, url, zipball = latest_msr(opener)
+            msr.update(latest=tag or None, status=_status(__version__, tag or None), url=url,
+                       zipball=zipball or "")
             msr["updatable"] = msr["status"] == "update_available"
             if msr["updatable"]:
                 msr["note"] = "Installed by the app's own updater (the banner / Update in the window)."
         except Exception as e:
             msr.update(status="unknown", note=_why(e))
+    _annotate_msr(msr, __version__)
     out.append(msr)
     out.append(ffmpeg_row(ffmpeg_path))
     for dist, label, kind in PACKAGES:
