@@ -619,7 +619,10 @@ class ClipEditor:
     def _clock(self) -> float:
         sink = getattr(self.audio, "sink", None)
         real_sound = self.audio is not None and getattr(sink, "available", True)
-        p = self.audio.position() if real_sound else None   # a silent sink runs ahead: use the wall clock
+        # No speaker: follow the wall clock so the picture starts when Space is pressed.
+        # A real sink (waveOut, or pw-play / paplay) reports the sample that has left
+        # the speakers, with its buffer already taken out of that position.
+        p = self.audio.position() if real_sound else None
         if p is None or p < self._play_from[0]:
             p = self._play_from[0] + (time.monotonic() - self._play_from[1])
         return p
