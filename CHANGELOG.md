@@ -33,6 +33,7 @@ Release notes: [docs/release_notes/RELEASE_NOTES_v3.1.4.md](docs/release_notes/R
 
 ### Tests
 - GitHub Actions runs the suite on Windows and Linux, Python 3.12 and 3.14 (`fail-fast` off).
+- CI (Windows): Chocolatey exits 0 when the community feed times out and installs nothing, so the ffmpeg step stayed green while ffmpeg was missing. A subscribe test then received `health_problem` ("ffmpeg is not installed") on the line where it expected the server's bye. The install step retries and fails unless `ffmpeg -version` runs. The test reads until that bye, within 10 seconds, and still requires `{"type": "bye", "reason": "server stopping"}`.
 - The health-bar test dates its yt-dlp version from today, so a fixture older than 14 days does not turn Health OK into a stale-version warning.
 - The Twitch validate-401 refresh test forces the hourly validate path, so it does not depend on process uptime.
 

@@ -93,9 +93,25 @@ class SubscribeTests(unittest.TestCase):
         s, f = self.raw({"heartbeat": 30})
         with s:
             self.assertTrue(json.loads(f.readline())["ok"])
+            # The status thread's health check can publish a line after the ack and
+            # before bye (CI: "ffmpeg is not installed"). The bye is still required.
+            self.tracker.emit("health_problem", None, problem="injected", source="health")
             threading.Timer(0.3, self.h.service.server.stop).start()
-            s.settimeout(10)
-            self.assertEqual(json.loads(f.readline()), {"type": "bye", "reason": "server stopping"})
+            deadline = time.monotonic() + 10
+            bye = None
+            while time.monotonic() < deadline:
+                s.settimeout(max(0.1, deadline - time.monotonic()))
+                try:
+                    line = f.readline()
+                except (TimeoutError, socket.timeout):
+                    break
+                if not line:
+                    break
+                obj = json.loads(line)
+                if obj.get("type") == "bye":
+                    bye = obj
+                    break
+            self.assertEqual(bye, {"type": "bye", "reason": "server stopping"})
 
     def test_cli_prints_json_lines(self):
         threading.Timer(0.5, lambda: self.tracker.emit("health_problem", None, problem="x", source="health")).start()
