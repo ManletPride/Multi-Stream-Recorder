@@ -2240,13 +2240,32 @@ def setup_logging(root_path, config=None):
     return log_file
 
 
-def setup_child_logging(root_path, channel_key):
-    """Setup logging for child process."""
+def setup_child_logging(root_path, channel_key, log_queue=None):
+    """Setup logging for a worker process.
+
+    The file handler is the only writer of this process's lines (same format as
+    before). ``log_queue`` (a manager queue owned by the GUI session) receives
+    a copy for the Logs tab; headless passes none. The queue handler never
+    writes the file, so a line is not doubled.
+    """
     root_path, _problem = resolve_log_dir(root_path)
     log_file = os.path.join(root_path, "stream_recorder.log")
 
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
+        # A forked child inherits the parent's open log file. Drop that fd here.
+        # Handler.close() takes the handler lock, which a thread that did not
+        # survive the fork may still hold, so close the stream directly.
+        stream = getattr(handler, "stream", None)
+        if stream is not None and stream not in (sys.stderr, sys.stdout):
+            try:
+                stream.close()
+            except Exception:
+                pass
+            try:
+                handler.stream = None
+            except Exception:
+                pass
 
     max_bytes, backups = _log_limits_from_env()
     file_handler = SharedRotatingFileHandler(log_file, max_bytes, backups)
@@ -2266,6 +2285,14 @@ def setup_child_logging(root_path, channel_key):
     logging.root.setLevel(logging.INFO)
     logging.root.addHandler(file_handler)
     logging.root.addHandler(console_handler)
+    if log_queue is not None:
+        # Local import: logbridge imports nothing at module level that needs util
+        # to be finished, and a headless worker never loads it.
+        from msr.logbridge import WorkerLogHandler
+        gui_handler = WorkerLogHandler(log_queue)
+        gui_handler.setLevel(logging.INFO)
+        logging.root.addHandler(gui_handler)
+        _ensure_redact_filter(gui_handler)
     _ensure_redact_filter(logging.root)
     # Logger filters only see records made by that logger, not ones propagated from
     # named child loggers, so the handlers carry the filter too.

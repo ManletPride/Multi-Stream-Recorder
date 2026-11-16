@@ -2242,7 +2242,9 @@ def _reap_capture(proc, logger):
 
 def record_worker(args):
     """Worker process to record a single channel."""
-    (channel_entry, config_dict, stop_event, status_queue, wake_event, runtime) = args
+    # log_queue is optional so a caller still passing the old 6-tuple keeps working.
+    channel_entry, config_dict, stop_event, status_queue, wake_event, runtime = args[:6]
+    log_queue = args[6] if len(args) > 6 else None
 
     # Reconstruct config in child process
     config = new_parser()
@@ -2278,7 +2280,7 @@ def record_worker(args):
         cookies_file = find_cookies_file(config)
 
     # Setup logging
-    logger = setup_child_logging(root_path, channel_key)
+    logger = setup_child_logging(root_path, channel_key, log_queue)
     parsed = parse_channel_key(channel_entry)
     if parsed is None:
         logger.error(

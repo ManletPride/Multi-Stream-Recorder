@@ -24,6 +24,24 @@ class FormatterTests(unittest.TestCase):
         self.assertRegex(err, r"^\d\d:\d\d:\d\d \[ERROR\] disk full$")
         self.assertEqual([lv.line_level(x) for x in (info, warn, err)], ["INFO", "WARNING", "ERROR"])
 
+    def test_a_worker_line_names_the_channel_and_keeps_the_level_tag_first(self):
+        fmt = lv.GuiFormatter("%(asctime)s %(message)s", datefmt="%H:%M:%S")
+        warn = record(logging.WARNING, "remux 92%")
+        warn.channel = "vimp"
+        warn.process = 1166311
+        warn_text = fmt.format(warn)
+        info = record(logging.INFO, "Worker STARTED")
+        info.channel = "vimp"
+        info.process = 5
+        info_text = fmt.format(info)
+        self.assertRegex(warn_text, r"^\d\d:\d\d:\d\d \[WARNING\] \[PID 1166311\] \[vimp\] remux 92%$")
+        self.assertRegex(info_text, r"^\d\d:\d\d:\d\d \[PID 5\] \[vimp\] Worker STARTED$")
+        self.assertEqual(lv.line_level(warn_text), "WARNING")
+        self.assertEqual(lv.line_level(info_text), "INFO")
+        self.assertTrue(lv.matches(info_text, lv.split_query("vimp started")))
+        self.assertFalse(lv.matches(info_text, [], lv.LEVEL_WARNING))
+        self.assertTrue(lv.matches(warn_text, lv.split_query("vimp"), lv.LEVEL_WARNING))
+
     def test_a_tag_typed_in_the_message_is_not_a_level(self):
         self.assertEqual(lv.line_level("12:00:00 saw [ERROR] in a title"), "INFO")
         self.assertEqual(lv.line_level(""), "INFO")

@@ -368,6 +368,9 @@ def main_gui(config):
     root.grid_columnconfigure(1, weight=1)
 
     # ── Log queue for GUI log viewer ──
+    # Main-process records are queued here directly. Worker records arrive through
+    # the same handler: StreamRecorder(log_sink=...) drains a manager queue onto it.
+    # refresh_logs still inserts at most 50 lines per tick.
     log_queue = stdlib_queue.Queue(maxsize=2000)
     gui_log_handler = QueueLogHandler(log_queue)
     gui_log_handler.setLevel(logging.INFO)
@@ -3248,7 +3251,8 @@ def main_gui(config):
         logging.info("=" * 60)
 
         recorder = StreamRecorder(enabled, config, presence=presence_store,
-                                  watch_channels=_presence_watch_keys())
+                                  watch_channels=_presence_watch_keys(),
+                                  log_sink=gui_log_handler)
         threading.Thread(target=recorder.run, daemon=True).start()
 
         start_button.config(state=tk.DISABLED)
