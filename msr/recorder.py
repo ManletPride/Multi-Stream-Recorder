@@ -1180,8 +1180,12 @@ class StreamRecorder:
     _storage_next_check = 0.0
     _fallback_next_scan = 0.0
     _fallback_thread = None
+    # GUI log forwarding. Headless leaves both None; a bare test instance too.
+    log_sink = None
+    log_queue = None
+    _log_bridge = None
 
-    def __init__(self, channels, config, presence=None, watch_channels=None):
+    def __init__(self, channels, config, presence=None, watch_channels=None, log_sink=None):
         self.channels = channels
         self.config = config
         # Presence-only roster keys (disabled channels). Never recorded.
@@ -1210,6 +1214,12 @@ class StreamRecorder:
 
         self.manager = mp.Manager()
         self.status_queue = self.manager.Queue()
+        # Worker log copies for the Logs tab. Only the GUI passes a sink; the
+        # queue lives in the manager so a killed worker cannot wedge a pipe.
+        # Headless keeps writing the file from each worker and does not allocate one.
+        self.log_sink = log_sink
+        self.log_queue = self.manager.Queue(maxsize=2000) if log_sink is not None else None
+        self._log_bridge = None
         self.status_dict = {}
 
         # Shared runtime settings that workers re-read every poll cycle.
@@ -1618,9 +1628,43 @@ class StreamRecorder:
                 self._spawning.discard(channel_name)
 
     def stop(self):
+        """Stop workers. The log bridge is joined even when this raises, so a later
+        ``manager.shutdown()`` cannot block on a drain still inside the queue."""
         if not self.is_running:
+            self._stop_log_bridge()
             return
         self.is_running = False
+        try:
+            self._stop_processes()
+        finally:
+            self._stop_log_bridge()
+
+    def _start_log_bridge(self):
+        """Begin forwarding worker records to ``log_sink``. Failure leaves file logging intact."""
+        if self.log_sink is None or self.log_queue is None:
+            return
+        try:
+            from msr.logbridge import LogBridge
+            bridge = LogBridge(self.log_queue, self.log_sink)
+            bridge.start()
+            self._log_bridge = bridge
+        except Exception:
+            logging.exception(
+                "Worker log forwarding did not start; the log file is unaffected")
+            self._log_bridge = None
+
+    def _stop_log_bridge(self):
+        """Join the drain thread. Bounded; a stuck queue cannot hold shutdown."""
+        bridge = self._log_bridge
+        if bridge is None:
+            return
+        self._log_bridge = None
+        try:
+            bridge.stop(timeout=2.0)
+        except Exception:
+            logging.debug("Worker log forwarding did not stop cleanly", exc_info=True)
+
+    def _stop_processes(self):
         logging.info("Stop requested — shutting down processes...")
         self.should_stop.set()
         # Abort a startup leftover cleanup that is still running in the
@@ -1838,7 +1882,7 @@ class StreamRecorder:
 
     def _spawn_worker(self, ch, config_dict):
         worker_args = (ch, config_dict, self.should_stop, self.status_queue,
-                       self._get_wake_event(ch), self.runtime)
+                       self._get_wake_event(ch), self.runtime, self.log_queue)
         proc = mp.Process(target=record_worker, args=(worker_args,))
         proc.daemon = True
         proc.start()
@@ -1948,6 +1992,7 @@ class StreamRecorder:
         )
         self.is_running = True
         self.should_stop.clear()
+        self._start_log_bridge()
 
         # Snapshot the leftover .ts files from previous sessions NOW (before
         # any recorder exists), but do not process them yet: recording must
