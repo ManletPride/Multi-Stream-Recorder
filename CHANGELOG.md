@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- CI (Windows): Chocolatey exits 0 when the community feed times out and installs nothing, so the ffmpeg step stayed green while ffmpeg was missing. A subscribe test then received `health_problem` ("ffmpeg is not installed") on the line where it expected the server's bye. The install step retries and fails unless `ffmpeg -version` runs. The test reads until that bye, within 10 seconds, and still requires `{"type": "bye", "reason": "server stopping"}`.
 - Health checks: the bottom-bar test uses a yt-dlp version dated today. A fixed `2026.10.30` aged past 14 days and the bar no longer said Health OK.
 - Logs tab: lines from the per-channel worker processes (live checks, recording, split, remux progress) show up as they are written. The level filter and the text filter apply to them the same way as to lines from the window. Each line is still written to `stream_recorder.log` once, in the same format. Headless and `msr_ctl logs` are unchanged (they read that file). A worker killed while logging cannot stall shutdown.
 - Space no longer opens another Clip Editor, or presses Clip Now, Screenshot, Clips or Streams, while an editor is open. Those status-row buttons ignore Space. Opening an editor takes the keyboard, so Space plays and pauses that editor. Clicking DVR (or Shift+click on Clip Now) still opens another one. The channel list's Space toggle is unchanged.
