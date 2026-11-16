@@ -4,7 +4,7 @@ A Windows-first desktop app (Python + Tkinter) that watches a list of live chann
 
 Supported: **Kick**, **Twitch**, **YouTube**, **Rumble**, **TikTok**, and custom URLs (any site yt-dlp supports, or a direct `.m3u8`).
 
-This README describes **v3.1.3**. Full history: [CHANGELOG.md](CHANGELOG.md).
+This README describes **v3.1.4**. Full history: [CHANGELOG.md](CHANGELOG.md).
 
 ![Status tab: five channels recording at once](screenshots/main.png)
 
@@ -29,6 +29,9 @@ This README describes **v3.1.3**. Full history: [CHANGELOG.md](CHANGELOG.md).
 </details>
 
 ## What's new in 3.1
+
+- **3.1.4 Clip Now stays on the live edge** of a long recording, on every OS. Space plays the open Clip Editor instead of opening another one. The Logs tab shows worker lines such as remux progress. The Library overview scrolls, and on Linux old lowercase recording folders are counted and reused.
+- **3.1.4 Linux**: Clip Editor sound through PipeWire (`pw-play`) or PulseAudio, with real-time playback if neither is installed. Tooltips no longer flash, and the tray can dock on Hyprland when PyGObject is installed (Linux-only; Windows and macOS skip it). Menus and tooltips stay the size Tk posted once the Hyprland float rule in this README is in place.
 
 - **3.1.3 Twitch sign-in stays valid**: instant alerts no longer drop off after a few hours with "sign-in is no longer valid".
 
