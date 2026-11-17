@@ -4,6 +4,7 @@
 
 ### Fixed
 - CI (Linux): the clip-audio pause test read the process state immediately after SIGSTOP, before the kernel had stopped the process. It now polls until the state is stopped, and until it has left that state after resume, for up to 5 seconds.
+- Status header disk rate on Linux no longer sits at 0 MB/s between page-cache flushes. The device write counter is averaged over 45 s (oldest sample to newest), long enough to cover write-back, and while recordings are growing the figure stays at least the recording file growth. A single flush no longer paints the meter busy. Windows still uses the one-second counter delta. The tooltip says the Linux rate is averaged.
 
 ## v3.1.5 (2026-11-16)
 
