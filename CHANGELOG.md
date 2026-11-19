@@ -4,7 +4,11 @@
 
 ### Fixed
 - CI (Linux): the clip-audio pause test read the process state immediately after SIGSTOP, before the kernel had stopped the process. It now polls until the state is stopped, and until it has left that state after resume, for up to 5 seconds.
+- Library: when the same recording is linked into both `processed` and `Processed`, both folders are remembered. Previously the folder that directory listing returned second was dropped, so the Recordings list could open only one of them. Which one depended on the order the disk returned the names.
 - Status header disk rate on Linux no longer sits at 0 MB/s between page-cache flushes. The device write counter is averaged over 45 s (oldest sample to newest), long enough to cover write-back, and while recordings are growing the figure stays at least the recording file growth. A single flush no longer paints the meter busy. Windows still uses the one-second counter delta. The tooltip says the Linux rate is averaged.
+
+### Tests
+- Checks for edit mistakes that had already landed more than once: the version lives only in `msr/__init__.py` (README, CHANGELOG and the release-notes filename must match; agent notes must not copy it), release notes stay under `docs/release_notes/`, the Windows folder-case answer is tested on Linux, a drive-letter PATH is not joined on `os.pathsep` without an OS check, tests do not read `/proc` or `time.monotonic` too soon, there is one tooltip window and it does not fight the compositor's resize, and a Linux-only pip line needs `sys_platform == "linux"`.
 
 ## v3.1.5 (2026-11-16)
 

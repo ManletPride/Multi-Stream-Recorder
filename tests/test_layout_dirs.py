@@ -10,7 +10,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from msr.util import channel_record_dirs, layout_bases, prefer_dir, recorded_scan_bases, reuse_dir, reuse_path
+from msr.util import (
+    channel_record_dirs, layout_bases, linux_reuses_dir_case, prefer_dir,
+    read_layout_paths, recorded_scan_bases, reuse_dir, reuse_path,
+)
 
 
 def _sensitive(folder: Path) -> bool:
@@ -94,7 +97,7 @@ class ReuseTests(unittest.TestCase):
             return
         (self.root / "recorded").mkdir()
         if not sys.platform.startswith("linux"):
-            # recorded_scan_bases follows the real platform, not the reuse= flag
+            # The default follows this OS. reuse=False is the Windows answer on every OS.
             self.assertEqual(len(recorded_scan_bases(str(self.root), str(self.root / "Recorded"))), 1)
             return
         found = recorded_scan_bases(str(self.root), str(self.root / "Recorded"))
@@ -113,6 +116,36 @@ class ReuseTests(unittest.TestCase):
         self.assertEqual(os.path.basename(recorded), "recorded")
         self.assertEqual(os.path.basename(processed), "processed")
         self.assertEqual(os.path.basename(pending), "PendingDeletion")
+
+    def test_windows_answer_ignores_a_second_spelling(self):
+        """reuse=False is what Windows does. It has to pass on Linux too.
+
+        The first cut of the Linux folder change (PR #9) failed Windows CI:
+        a case-sensitive assertion. Passing the flag here checks the Windows
+        answer where this file is written, which is usually Linux."""
+        if not _sensitive(self.root):
+            self.skipTest("this volume cannot hold two spellings of one name")
+        (self.root / "Recorded").mkdir()
+        (self.root / "recorded").mkdir()
+        (self.root / "processed" / "kick").mkdir(parents=True)
+        primary = str(self.root / "Recorded")
+        self.assertEqual(
+            recorded_scan_bases(str(self.root), primary, reuse=False), [primary])
+        self.assertEqual(
+            {os.path.basename(p) for p in recorded_scan_bases(str(self.root), primary, reuse=True)},
+            {"Recorded", "recorded"})
+        spelled = os.path.join(str(self.root), "Processed", "kick")
+        self.assertEqual(
+            read_layout_paths(str(self.root), "Processed", "kick", reuse=False), [spelled])
+        self.assertEqual(
+            read_layout_paths(str(self.root), "Processed", "kick", reuse=True),
+            [str(self.root / "processed" / "kick")])
+
+    def test_platform_argument_is_the_windows_switch(self):
+        self.assertFalse(linux_reuses_dir_case("win32"))
+        self.assertFalse(linux_reuses_dir_case("darwin"))
+        self.assertTrue(linux_reuses_dir_case("linux"))
+        self.assertEqual(linux_reuses_dir_case(), sys.platform.startswith("linux"))
 
 
 if __name__ == "__main__":
