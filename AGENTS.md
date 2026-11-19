@@ -2,7 +2,7 @@
 
 Read this before changing code. The project is **not** a single-file script anymore. Several clip and GUI bugs were already fixed; reintroducing the old approaches will regress them.
 
-**Ship status (2026-10-29):** `release/3.0` prepares **v3.0.0** (Clip Editor, Library, themes, agent control, own `.venv`, Updates dialog, app icon, hardening); the last public release is v2.1.0. `__version__` is `3.0.0`; release date TBD.
+The app version is `__version__` in `msr/__init__.py`. That is the only copy. The README line `This README describes **vX.Y.Z**`, the first released CHANGELOG heading and `docs/release_notes/RELEASE_NOTES_vX.Y.Z.md` must name it. `tests/test_version_sync.py` fails when they do not. Do not write the number in this file.
 
 Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 
@@ -47,7 +47,7 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 | `msr/library_manage.py` | `Manager` + the **PendingDeletion** and **Clean up** tabs (Clean up = suggestions + the tickable file list, `Manager.files`; Channels > Files... jumps there); `ManageContext` is what `gui.py` hands over (busy callback, log paths, openers) |
 | `msr/preview_state.py` | Preview strip memory, **no tkinter**: per-channel `last_ok`, the working seek `LADDER` rung (retry a shorter one every 10 good grabs), back-off after failed grabs (4, 8, 16, 32, 60 s), the age / `ended` text and the tile / pane colours (theme tokens only). Tested in `tests/test_preview_state.py` |
 | `msr/iometer.py` | Status-header disk write / NIC download rates (`IoSampler`) |
-| `msr/__init__.py` | `__version__` (currently `3.0.0`; the only version string, read by the updater, `--version`, About and `msr_ctl ping`) |
+| `msr/__init__.py` | `__version__`, the only copy (updater, `--version`, About, `msr_ctl ping`). `tests/test_version_sync.py` checks the README, CHANGELOG and release notes against it |
 | `msr/paths.py` | `--data-dir` / `MSR_HOME`: resolves and activates the data folder (chdir) |
 | `msr/about.py` | The About text (Tk-free): tools, packages, environment, folders, msr_ctl pointer, responsibility notice |
 | `msr/venv.py` | MSR's own `.venv` (stdlib only, imported by `run_msr.pyw` before any package exists): check / create / install / rebuild, opt-out (`MSR_NO_VENV`, `[Advanced] use_venv`), first-run progress window, `in_venv()` |
