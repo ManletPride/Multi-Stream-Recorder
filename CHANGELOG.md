@@ -5,6 +5,9 @@
 ### Fixed
 - CI (Linux): the clip-audio pause test read the process state immediately after SIGSTOP, before the kernel had stopped the process. It now polls until the state is stopped, and until it has left that state after resume, for up to 5 seconds.
 
+### Tests
+- Checks for edit mistakes that had already landed more than once: the version lives only in `msr/__init__.py` (README, CHANGELOG and the release-notes filename must match; agent notes must not copy it), release notes stay under `docs/release_notes/`, the Windows folder-case answer is tested on Linux, a drive-letter PATH is not joined on `os.pathsep` without an OS check, tests do not read `/proc` or `time.monotonic` too soon, there is one tooltip window and it does not fight the compositor's resize, and a Linux-only pip line needs `sys_platform == "linux"`.
+
 ## v3.1.5 (2026-11-16)
 
 Release notes: [docs/release_notes/RELEASE_NOTES_v3.1.5.md](docs/release_notes/RELEASE_NOTES_v3.1.5.md).

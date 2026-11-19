@@ -6,6 +6,23 @@ The app version is `__version__` in `msr/__init__.py`. That is the only copy. Th
 
 Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 
+## What enforces a rule
+
+When a check exists, follow the file it names. The notes further down are for behavior a test cannot decide.
+
+| Rule | What enforces it |
+| --- | --- |
+| One app version, in `msr/__init__.py`. README, the first released CHANGELOG heading and the release-notes filename match it. This file does not state a version. | `tests/test_version_sync.py` |
+| Release notes only as `docs/release_notes/RELEASE_NOTES_vX.Y.Z.md` | `tests/test_release_notes_home.py` |
+| Windows keeps the spelled recordings folder. Linux reuses an existing different case. | `linux_reuses_dir_case(platform)` and `reuse=` on `recorded_scan_bases` / `read_layout_paths`. `tests/test_layout_dirs.py` runs both answers on every OS |
+| A test that joins a drive-letter path on `os.pathsep` also checks `os.name` or `sys.platform` | `tests/test_os_guards.py` |
+| Tests do not read `/proc` the moment they signal a process, patch `time.monotonic` with a finite list, leave the Twitch validate-401 test on process uptime, or pin the Health bar's yt-dlp date | `tests/test_timing_guards.py` (`_wait_proc_state`, `msr.iometer._monotonic`, `_last_validate`, `datetime.date.today`) |
+| One override-redirect window: `msr.tooltip.popup` with `class_=POPUP_WM_CLASS`. No `<Configure>` handler calls `wm_geometry` | `tests/test_popup_guard.py` |
+| A Linux-only pip line (PyGObject, or a comment that says Linux only) has `; sys_platform == "linux"` | `tests/test_requirements_markers.py` |
+| No colour literal outside `msr/themes.py` and `msr/theme_palettes.py` | `tests/test_theme_guard.py` (the failure says to add a token in `msr/themes.py`) |
+| No native popup without `parent=`, no Toplevel that skips the themed caption | `tests/test_chrome_guards.py` (`msr.dialogs`) |
+| Every child process is launched with `no_window_kwargs()` | `tests/test_no_console.py` |
+
 ## Layout
 
 | Path | Role |
@@ -24,7 +41,7 @@ Fully quit and relaunch after Python edits — the GUI does not reload `msr/`.
 | `msr/update.py` | GitHub zipball download + allowlisted extract for in-app update. `plan_app_update` picks the action first: zip for a normal install (the dialog's `releases/latest` tag and zipball, still checked with `zipball_url_is_allowed`), `git pull --ff-only` then restart when `application_dir()` is a clean checkout whose branch tracks origin, an explanation plus the command otherwise (never a zip over a `.git` dir or file), and a restart when `msr/__init__.py` on disk is already newer than the running version. A missing tag re-checks; a refusal is shown and logged |
 | `msr/apply_update.py` | Temp helper: wait for PID, copy staged files, relaunch (no `msr` import) |
 | `msr/config.py` | `Config` / `config.ini` defaults (`default_streams_dir()`, coerce invalid numbers). **Every `ConfigParser` comes from `new_parser()` (`interpolation=None`)**: a `%` in a password or filename pattern is data. A file that does not parse never stops the start: `_read_existing` falls back to defaults (`load_problem`, a secret-free warning) and `_write_startup` refuses to overwrite it; `_backup_broken_file` saves `config.ini.broken-<stamp>` once before the first real rewrite |
-| `msr/deps.py` | `HAS_*` flags, tool versions, optional `psutil` / tray / plyer imports. On Linux, `prefer_linux_tray_backend()` sets `PYSTRAY_BACKEND=appindicator` before pystray is imported when PyGObject plus AyatanaAppIndicator3 or AppIndicator3 import (a value the user already set is kept). `requirements.txt` installs `PyGObject>=3.50` only when `sys_platform == "linux"` (source build; Ubuntu CI installs the girepository-2.0 and cairo headers first). No working tray, or an XEmbed icon that cannot dock, leaves `HAS_TRAY` false and `TRAY_NOTE` set; the GUI logs that once and never withdraws into a missing tray. `configure_ffmpeg(path)` re-points `HAS_FFMPEG` / `FFMPEG_VERSION` at `[Advanced] ffmpeg_path` (called by `validate_startup` and `main()`); read them as `deps.HAS_FFMPEG`, never copy them with `from msr.deps import` |
+| `msr/deps.py` | `HAS_*` flags, tool versions, optional `psutil` / tray / plyer imports. On Linux, `prefer_linux_tray_backend()` sets `PYSTRAY_BACKEND=appindicator` before pystray is imported when PyGObject plus AyatanaAppIndicator3 or AppIndicator3 import (a value the user already set is kept). `requirements.txt` installs `PyGObject>=3.50` only when `sys_platform == "linux"` (`tests/test_requirements_markers.py`; source build; Ubuntu CI installs the girepository-2.0 and cairo headers first). No working tray, or an XEmbed icon that cannot dock, leaves `HAS_TRAY` false and `TRAY_NOTE` set; the GUI logs that once and never withdraws into a missing tray. `configure_ffmpeg(path)` re-points `HAS_FFMPEG` / `FFMPEG_VERSION` at `[Advanced] ffmpeg_path` (called by `validate_startup` and `main()`); read them as `deps.HAS_FFMPEG`, never copy them with `from msr.deps import` |
 | `msr/wheel.py` | Mouse-wheel notches (`wheel_steps`, `wheel_delta`, `bind_wheel` / `unbind_wheel`). X11 Button-4 is +1 notch and Button-5 is -1; Windows/macOS stay `int(delta/120)`. Options, the roster badge strip and the Clip Editor timeline use it. Text and Treeview already bind Button-4/5 in Tk, so Library, Logs and the list dialogs do not |
 | `msr/context_menu.py` | `bind_context_menu`: X11 right-click menus open on `<ButtonRelease-3>` so the release that posted the menu cannot invoke the item under the pointer. Windows and macOS stay on `<Button-3>`. Used by the channel list, the status list, and the Library channel, file, and recordings menus. Esc and a click outside still close the menu (`tk_popup`) |
 | `msr/tooltip.py` | The tooltip window (`Tooltip`, `popup`). Built withdrawn, theme background, window class `TkTooltip`, X11 `-type tooltip`, packed, `update_idletasks()`, full `WxH+X+Y`, then `deiconify`. `TkTooltip` is what a Hyprland/Omarchy float rule matches (menus are already class `Menu`, combobox lists `ComboboxPopdown`; see README). No `update()`. `tests/test_popup_guard.py` rejects another `wm_overrideredirect(True)` window and a `<Configure>` handler that calls `wm_geometry` |
