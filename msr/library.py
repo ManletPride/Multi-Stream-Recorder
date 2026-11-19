@@ -536,6 +536,13 @@ def scan_library(roots: Roots, progress: Callable[[int, int, str], None] | None 
             ch.raw_bytes += size
             ch.raw_files += 1
 
+    def _names_under(parts: tuple) -> tuple[str, str]:
+        if len(parts) >= 2:
+            return parts[0], "/".join(parts[1:])
+        if len(parts) == 1:
+            return parts[0], UNSORTED
+        return UNSORTED, UNSORTED
+
     def _fresh(st) -> bool:
         """False when this file was already counted (another case variant, or a hard link)."""
         ino = getattr(st, "st_ino", 0)
@@ -602,6 +609,16 @@ def scan_library(roots: Roots, progress: Callable[[int, int, str], None] | None 
                             stack.append((entry.path, depth + 1, parts + (entry.name,)))
                         continue
                     if not _fresh(st):
+                        # Bytes were already counted: this is a hard link, or the same
+                        # inode reached through the other case variant. The folder this
+                        # copy sits in still has to be remembered. Otherwise the tree
+                        # scandir returns second never lands in all_paths, and which
+                        # spelling that is depends on directory order.
+                        if not attribute:
+                            platform, channel = _names_under(parts)
+                            stat = stats.channels.get((platform.lower(), channel.lower()))
+                            if stat is not None:
+                                stat.note_folder(category, path, 0)
                         continue
                     # The top folder's own spelling keeps `processed/...` and `Processed/...`
                     # from sharing one cache key when both trees exist.
@@ -609,12 +626,7 @@ def scan_library(roots: Roots, progress: Callable[[int, int, str], None] | None 
                     if attribute:
                         _handle_extra(entry, st, parts, path, rel_key)
                         continue
-                    if len(parts) >= 2:
-                        platform, channel = parts[0], "/".join(parts[1:])
-                    elif len(parts) == 1:
-                        platform, channel = parts[0], UNSORTED
-                    else:
-                        platform, channel = UNSORTED, UNSORTED
+                    platform, channel = _names_under(parts)
                     handle_file(entry, st, category, platform, channel, path, rel_key)
 
     def _handle_extra(entry, st, parts, folder, rel_key: str) -> None:

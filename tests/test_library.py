@@ -440,6 +440,40 @@ def stat_mode(st):
     return st.st_mode
 
 
+def _scan_in_name_order(root: Path, reverse: bool):
+    """Scan with directory entries sorted by name, so the result cannot depend on readdir order."""
+    real = os.scandir
+
+    def scandir(path=".", *args, **kwargs):
+        it = real(path, *args, **kwargs)
+
+        class Sorted:
+            def __init__(self):
+                try:
+                    entries = list(it)
+                finally:
+                    it.close()
+                entries.sort(key=lambda entry: entry.name, reverse=reverse)
+                self._iter = iter(entries)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self._iter)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return Sorted()
+
+    with mock.patch("os.scandir", scandir):
+        return lib.scan_library(lib.Roots(str(root)), collect_files=True)
+
+
 def _case_sensitive(folder: Path) -> bool:
     low, high = folder / "case_a", folder / "case_A"
     low.mkdir()
@@ -479,19 +513,26 @@ class CaseMergeTests(Tree):
         except OSError:
             linked = False
         before = _snapshot(self.root)
-        s = lib.scan_library(lib.Roots(str(self.root)), collect_files=True)
-        self.assertEqual(_snapshot(self.root), before)
-        self.assertEqual(s.channels[("kick", "alice")].rec_bytes, 30)
-        self.assertEqual(s.channels[("kick", "alice")].raw_bytes, 70)
-        self.assertEqual(s.channels[("kick", "alice")].clip_bytes, 12)
-        # a.mp4 and b.mp4. A hard link of a.mp4 under the other tree is the same file.
-        self.assertEqual(s.cat("processed"), (30, 2))
-        self.assertEqual(linked, bool(link.exists()) and os.path.samefile(src, link))
-        self.assertEqual(s.cat("clips"), (12, 2))
-        self.assertEqual(len([c for c in s.channels if c[0] == "kick"]), 1)
-        self.assertTrue(s.roots_found["Processed"] and s.roots_found["Recorded"] and s.roots_found["Clips"])
-        # both trees are remembered, so the Recordings list can open either
-        self.assertEqual(len(s.channels[("kick", "alice")].all_paths["processed"]), 2)
+        # Directory order is not stable. Capitalized names sort first, and that is
+        # the order that used to remember only one processed folder: the hard link
+        # was counted there, then a.mp4 was skipped and its folder was never noted.
+        for reverse in (False, True):
+            s = _scan_in_name_order(self.root, reverse)
+            self.assertEqual(_snapshot(self.root), before)
+            self.assertEqual(s.channels[("kick", "alice")].rec_bytes, 30)
+            self.assertEqual(s.channels[("kick", "alice")].raw_bytes, 70)
+            self.assertEqual(s.channels[("kick", "alice")].clip_bytes, 12)
+            # a.mp4 and b.mp4. A hard link of a.mp4 under the other tree is the same file.
+            self.assertEqual(s.cat("processed"), (30, 2))
+            self.assertEqual(linked, bool(link.exists()) and os.path.samefile(src, link))
+            self.assertEqual(s.cat("clips"), (12, 2))
+            self.assertEqual(len([c for c in s.channels if c[0] == "kick"]), 1)
+            self.assertTrue(s.roots_found["Processed"] and s.roots_found["Recorded"] and s.roots_found["Clips"])
+            # both trees are remembered, so the Recordings list can open either
+            alice = s.channels[("kick", "alice")]
+            self.assertEqual(len(alice.all_paths["processed"]), 2, alice.all_paths)
+            self.assertEqual(len(alice.all_paths["recorded"]), 2, alice.all_paths)
+            self.assertEqual(len(alice.all_paths["clips"]), 2, alice.all_paths)
 
     def test_only_lowercase_and_only_capitalized(self):
         put(self.root / "processed/fishtank/cameraman/cam_20260201_000000.mp4", 756)
