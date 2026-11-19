@@ -10,10 +10,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from msr.iometer import (
     BUSY_HOT,
     BUSY_WARN,
+    POSIX_DISK_WINDOW_S,
     IoSampler,
     IoSnapshot,
     delta_rate,
     disk_key_candidates,
+    displayed_posix_disk_bps,
     format_header,
     format_mb_s,
     format_mbps,
@@ -21,12 +23,52 @@ from msr.iometer import (
     meter_severity,
     msr_write_bps,
     posix_disk_counter_key,
+    posix_disk_window,
     stream_mbps_from_detail,
     sum_stream_mbps,
     volume_label,
     windows_physical_drive_key,
 )
 
+
+# Measured on an ntfs3 volume while three streams were recording: write_bytes
+# stayed put, then the page cache flushed about every 15 s. Mean over 45 s
+# was 1.8 MB/s. Each flush also looks ~90% busy if you only look at that second.
+_WRITEBACK_BURSTS = {15: 21_000_000, 30: 10_700_000, 45: 49_200_000}
+_WRITEBACK_BUSY_MS = 900.0
+
+
+def _writeback_rows(seconds=45):
+    write = 0
+    busy = 0.0
+    rows = []
+    for t in range(0, seconds + 1):
+        if t in _WRITEBACK_BURSTS:
+            write += _WRITEBACK_BURSTS[t]
+            busy += _WRITEBACK_BUSY_MS
+        rows.append((float(t), write, busy))
+    return rows
+
+
+def _disk_header(snap):
+    """The disk half of the header, without the NIC figure."""
+    return format_header(snap).split("\u2193")[0]
+
+
+def _replay(os_name, rows, size_at=None):
+    """Run IoSampler over synthetic ``(t, write_bytes, busy_ms)`` rows."""
+    ticks = [row[0] for row in rows]
+    disks = [("sdb", row[1], row[2]) for row in rows]
+    with mock.patch("msr.iometer.os.name", os_name), \
+            mock.patch("msr.iometer._monotonic", side_effect=_clock(*ticks)), \
+            mock.patch("msr.iometer.read_disk_write", side_effect=disks), \
+            mock.patch("msr.iometer.read_net_recv_bytes", side_effect=[0] * len(rows)):
+        sampler = IoSampler("/data/streams")
+        snaps = []
+        for i, row in enumerate(rows):
+            sizes = None if size_at is None else size_at(i, row[0])
+            snaps.append(sampler.sample(msr_sizes=sizes))
+        return snaps
 
 
 def _clock(*ticks):
@@ -268,6 +310,197 @@ class SamplerTests(unittest.TestCase):
             sampler.sample(msr_sizes={"ch": 1_000_000})
         last = sampler.sample(msr_sizes={"ch": 6_000_000})
         self.assertAlmostEqual(last.msr_write_bps, 1_000_000.0)
+
+
+_WINDOWS_TOOLTIP = (
+    "E:  18.2 MB/s write  ·  72% busy\n"
+    "NIC  100 Mbps down\n"
+    "(whole disk / whole NIC)\n"
+    "\n"
+    "This app\n"
+    "  recordings  12.1 MB/s\n"
+    "  streams     97.0 Mbps"
+)
+
+
+class WritebackWindowTests(unittest.TestCase):
+    """Linux page-cache flushes are bursts. The header averages them.
+
+    The same counter series on Windows stays a one-second delta.
+    """
+
+    def test_window_constant_covers_a_writeback_interval(self):
+        # dirty_expire_centisecs is often 30 s and writeback is often 15 s.
+        self.assertGreaterEqual(POSIX_DISK_WINDOW_S, 45.0)
+        self.assertLessEqual(POSIX_DISK_WINDOW_S, 60.0)
+
+    def test_bursty_counters_average_oldest_to_newest(self):
+        rows = _writeback_rows(45)
+        rate, busy = posix_disk_window(rows)
+        total = sum(_WRITEBACK_BURSTS.values())
+        self.assertAlmostEqual(rate, total / 45.0)
+        self.assertAlmostEqual(rate, 1_797_777.777, delta=1.0)
+        # Three 900 ms flushes spread over 45 s, not a hot one-second spike.
+        self.assertAlmostEqual(busy, (3 * _WRITEBACK_BUSY_MS) / 1000.0 / 45.0)
+        self.assertEqual(meter_severity(busy), "ok")
+        self.assertEqual(format_mb_s(rate), "1.8 MB/s")
+
+    def test_quiet_second_inside_the_window_is_not_zero(self):
+        # t=16 is the second after the 21 MB flush. A one-second delta is 0.
+        rows = _writeback_rows(16)
+        rate, busy = posix_disk_window(rows)
+        self.assertAlmostEqual(rate, 21_000_000 / 16.0)
+        self.assertGreater(rate, 50_000)  # format_mb_s would not round this to 0
+        self.assertAlmostEqual(busy, _WRITEBACK_BUSY_MS / 1000.0 / 16.0)
+        self.assertEqual(meter_severity(busy), "ok")
+
+    def test_flush_after_quiet_history_does_not_warn(self):
+        rows = _writeback_rows(15)
+        _rate, busy = posix_disk_window(rows)
+        self.assertAlmostEqual(busy, 0.9 / 15.0)
+        self.assertLess(busy, BUSY_WARN)
+        self.assertEqual(meter_severity(busy), "ok")
+
+    def test_sustained_busy_still_warns(self):
+        rows = [(float(t), t * 1_000_000, t * _WRITEBACK_BUSY_MS) for t in range(0, 11)]
+        _rate, busy = posix_disk_window(rows)
+        self.assertAlmostEqual(busy, 0.9)
+        self.assertEqual(meter_severity(busy), "hot")
+
+    def test_sleep_gap_drops_samples_before_it(self):
+        rows = [
+            (0.0, 0, 0.0),
+            (1.0, 0, 0.0),
+            (10.0, 5_000_000, 0.0),  # 9 s gap
+            (11.0, 6_000_000, 0.0),
+        ]
+        rate, _busy = posix_disk_window(rows)
+        self.assertAlmostEqual(rate, 1_000_000.0)
+
+    def test_backwards_counter_restarts_the_window(self):
+        rows = [(0.0, 100.0, 0.0), (1.0, 50.0, 0.0), (2.0, 80.0, 0.0)]
+        rate, _busy = posix_disk_window(rows)
+        self.assertAlmostEqual(rate, 30.0)
+        self.assertIsNone(posix_disk_window([(0.0, 100.0, 0.0), (1.0, 50.0, 0.0)])[0])
+
+    def test_sample_older_than_the_window_is_the_baseline_only(self):
+        # The burst at t=1 is outside a 10 s window ending at t=21, so it is
+        # not part of the delta. The bytes after the oldest kept sample are.
+        rows = [
+            (0.0, 0, 0.0),
+            (1.0, 100_000_000, 0.0),
+            (20.0, 100_000_000, 0.0),
+            (21.0, 121_000_000, 0.0),
+        ]
+        rate, _busy = posix_disk_window(rows, window_s=10, max_gap=30)
+        self.assertAlmostEqual(rate, 21_000_000.0)
+
+    def test_bursts_that_aged_out_of_the_window_read_as_zero(self):
+        rows = _writeback_rows(45)
+        write, busy = rows[-1][1], rows[-1][2]
+        for t in range(46, 91):
+            rows.append((float(t), write, busy))
+        rate, busy_frac = posix_disk_window(rows)
+        self.assertAlmostEqual(rate, 0.0)
+        self.assertAlmostEqual(busy_frac, 0.0)
+
+    def test_header_floor_uses_the_larger_of_device_and_file_growth(self):
+        self.assertIsNone(displayed_posix_disk_bps(None, 1_800_000))
+        self.assertEqual(displayed_posix_disk_bps(0.0, None), 0.0)
+        self.assertEqual(displayed_posix_disk_bps(0.0, 0.0), 0.0)
+        self.assertEqual(displayed_posix_disk_bps(0.0, 1_800_000), 1_800_000)
+        self.assertEqual(displayed_posix_disk_bps(5_000_000, 1_800_000), 5_000_000)
+
+    def test_posix_sampler_shows_the_window_not_the_flush(self):
+        snaps = _replay("posix", _writeback_rows(45))
+        self.assertIsNone(snaps[0].disk_write_bps)
+        self.assertFalse(snaps[0].ready)
+        # Quiet second after the first flush: still the running average.
+        self.assertAlmostEqual(snaps[16].disk_write_bps, 21_000_000 / 16.0)
+        self.assertNotIn("0 MB/s", _disk_header(snaps[16]))
+        self.assertEqual(meter_severity(snaps[15].disk_busy_frac), "ok")
+        total = sum(_WRITEBACK_BURSTS.values())
+        self.assertAlmostEqual(snaps[45].disk_write_bps, total / 45.0)
+        self.assertIn("1.8 MB/s", _disk_header(snaps[45]))
+        self.assertEqual(meter_severity(snaps[45].disk_busy_frac), "ok")
+
+    def test_posix_header_stays_up_while_files_grow_and_the_disk_is_quiet(self):
+        # No flush yet: the device counter is flat, the recording is not.
+        rows = [(float(t), 1_000, 0.0) for t in range(0, 6)]
+
+        def growing(_i, t):
+            return {"a.ts": 1_000_000 + int(t) * 1_800_000}
+
+        snaps = _replay("posix", rows, size_at=growing)
+        self.assertAlmostEqual(snaps[1].msr_write_bps, 1_800_000.0)
+        self.assertAlmostEqual(snaps[1].disk_write_bps, 1_800_000.0)
+        self.assertIn("1.8 MB/s", _disk_header(snaps[1]))
+        self.assertNotIn("0 MB/s", _disk_header(snaps[1]))
+        # A busier disk still wins over the file-growth floor.
+        fast = [(float(t), t * 5_000_000, 0.0) for t in range(0, 6)]
+
+        def slower(_i, t):
+            return {"a.ts": 1_000_000 + int(t) * 1_000_000}
+
+        fast_snaps = _replay("posix", fast, size_at=slower)
+        self.assertAlmostEqual(fast_snaps[5].disk_write_bps, 5_000_000.0)
+        self.assertAlmostEqual(fast_snaps[5].msr_write_bps, 1_000_000.0)
+
+    def test_windows_path_is_the_one_second_delta(self):
+        snaps = _replay("nt", _writeback_rows(45))
+        self.assertIsNone(snaps[0].disk_write_bps)
+        self.assertFalse(snaps[0].ready)
+        # The flush second is the whole burst, and the next second is 0.
+        self.assertAlmostEqual(snaps[15].disk_write_bps, 21_000_000.0)
+        self.assertAlmostEqual(snaps[15].disk_busy_frac, 0.9)
+        self.assertEqual(meter_severity(snaps[15].disk_busy_frac), "hot")
+        self.assertIn("21.0 MB/s", _disk_header(snaps[15]))
+        self.assertAlmostEqual(snaps[16].disk_write_bps, 0.0)
+        self.assertAlmostEqual(snaps[16].disk_busy_frac, 0.0)
+        self.assertIn("0 MB/s", _disk_header(snaps[16]))
+        self.assertEqual(meter_severity(snaps[16].disk_busy_frac), "ok")
+        self.assertAlmostEqual(snaps[30].disk_write_bps, 10_700_000.0)
+        self.assertAlmostEqual(snaps[44].disk_write_bps, 0.0)
+        self.assertAlmostEqual(snaps[45].disk_write_bps, 49_200_000.0)
+        self.assertIn("49.2 MB/s", _disk_header(snaps[45]))
+        # File growth does not lift a quiet Windows sample.
+        rows = [(float(t), 1_000, 0.0) for t in range(0, 4)]
+
+        def growing(_i, t):
+            return {"a.ts": 1_000_000 + int(t) * 1_800_000}
+
+        quiet = _replay("nt", rows, size_at=growing)
+        self.assertAlmostEqual(quiet[2].msr_write_bps, 1_800_000.0)
+        self.assertAlmostEqual(quiet[2].disk_write_bps, 0.0)
+        self.assertIn("0 MB/s", _disk_header(quiet[2]))
+
+    def test_windows_tooltip_text_is_unchanged(self):
+        snap = IoSnapshot(
+            ready=True, disk_label="E:", disk_write_bps=18_200_000,
+            disk_busy_frac=0.72, net_recv_bps=12_500_000,
+            msr_write_bps=12_100_000, msr_stream_mbps=97.0,
+        )
+        with mock.patch("msr.iometer.os.name", "nt"):
+            tip = format_tooltip(snap)
+        self.assertEqual(tip, _WINDOWS_TOOLTIP)
+        self.assertNotIn("average", tip.lower())
+
+    def test_posix_tooltip_says_the_disk_rate_is_averaged(self):
+        snap = IoSnapshot(
+            ready=True, disk_label="E:", disk_write_bps=18_200_000,
+            disk_busy_frac=0.72, net_recv_bps=12_500_000,
+            msr_write_bps=12_100_000, msr_stream_mbps=97.0,
+        )
+        with mock.patch("msr.iometer.os.name", "posix"):
+            tip = format_tooltip(snap)
+        self.assertIn(
+            f"Linux: disk rate is a {int(POSIX_DISK_WINDOW_S)} s average "
+            "(page-cache write-back).",
+            tip,
+        )
+        self.assertIn("(whole disk / whole NIC)", tip)
+        self.assertIn("This app", tip)
+        self.assertIn("12.1 MB/s", tip)
 
 
 if __name__ == "__main__":

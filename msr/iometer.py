@@ -2,6 +2,11 @@
 
 Uses ``psutil`` counters (the same optional dependency as process cleanup).
 The GUI shows machine-wide rates; MSR-only totals belong in the tooltip.
+
+Windows reports the one-second counter delta. Linux (and other POSIX) averages
+the disk write counter over :data:`POSIX_DISK_WINDOW_S`, because the page cache
+flushes in bursts and a one-second delta is 0 between them. While recordings
+are growing, that figure is at least the recording file growth.
 """
 from __future__ import annotations
 
@@ -14,6 +19,12 @@ from msr.deps import HAS_PSUTIL, psutil
 
 # Ignore a sample if the previous one is this old (sleep / debugger pause).
 MAX_SAMPLE_GAP_S = 5.0
+
+# Linux dirty pages are flushed on a timer (dirty_writeback_centisecs is often
+# 15 s, dirty_expire_centisecs 30 s): write_bytes sits still, then jumps.
+# Average the device counters from the oldest sample in this window to the
+# newest, which covers more than one expire interval. Windows does not use it.
+POSIX_DISK_WINDOW_S = 45.0
 
 # Write-busy fraction of wall time. Windows write_time is milliseconds spent
 # in write I/O; Linux busy_time (when present) is preferred over write_time.
@@ -290,6 +301,116 @@ def delta_rate(prev, curr, dt: float, max_gap: float = MAX_SAMPLE_GAP_S):
     return (curr_f - prev_f) / dt
 
 
+def posix_disk_window(samples, window_s: float = POSIX_DISK_WINDOW_S,
+                      max_gap: float = MAX_SAMPLE_GAP_S):
+    """Device write rate and busy fraction over a POSIX sample window.
+
+    *samples* is chronological ``(t, write_bytes, busy_ms)``. ``busy_ms`` may
+    be omitted or None. The rate is ``(newest - oldest) / (t_newest - t_oldest)``
+    for the samples still inside *window_s* of the newest timestamp.
+
+    A gap longer than *max_gap* (sleep, pause) drops everything before it, the
+    same rule as :func:`delta_rate`. A write counter that goes backwards drops
+    everything before that reset. Either value is None when fewer than two
+    usable samples remain.
+
+    The busy fraction uses the longest suffix whose busy counter does not go
+    backwards, so one flush is spread over the quiet seconds around it. A
+    disk that stays busy still crosses :data:`BUSY_WARN`.
+    """
+    rows = []
+    for row in samples or ():
+        if not row or len(row) < 2:
+            continue
+        try:
+            t = float(row[0])
+            write_bytes = float(row[1])
+        except (TypeError, ValueError):
+            continue
+        busy_ms = None
+        if len(row) >= 3 and row[2] is not None:
+            try:
+                busy_ms = float(row[2])
+            except (TypeError, ValueError):
+                busy_ms = None
+        rows.append((t, write_bytes, busy_ms))
+    if len(rows) < 2:
+        return None, None
+
+    start = 0
+    for i in range(1, len(rows)):
+        gap = rows[i][0] - rows[i - 1][0]
+        if gap <= 0 or gap > max_gap:
+            start = i
+    rows = rows[start:]
+    if len(rows) < 2:
+        return None, None
+
+    cutoff = rows[-1][0] - float(window_s)
+    rows = [row for row in rows if row[0] >= cutoff]
+    if len(rows) < 2:
+        return None, None
+
+    start = 0
+    for i in range(1, len(rows)):
+        if rows[i][1] < rows[i - 1][1]:
+            start = i
+    rows = rows[start:]
+    if len(rows) < 2:
+        return None, None
+
+    t0, b0, _busy0 = rows[0]
+    t1, b1, _busy1 = rows[-1]
+    span = t1 - t0
+    if span <= 0 or b1 < b0:
+        return None, None
+    return (b1 - b0) / span, _window_busy_frac(rows)
+
+
+def _window_busy_frac(rows):
+    end_t, _write, end_busy = rows[-1]
+    if end_busy is None:
+        return None
+    start_t = end_t
+    start_busy = end_busy
+    for t, _write, busy in reversed(rows[:-1]):
+        if busy is None or busy > start_busy:
+            break
+        start_t = t
+        start_busy = busy
+    span = end_t - start_t
+    if span <= 0:
+        return None
+    return min(1.0, max(0.0, (end_busy - start_busy) / 1000.0 / span))
+
+
+def displayed_posix_disk_bps(device_bps, msr_bps):
+    """Header disk rate on non-Windows.
+
+    *device_bps* is the windowed device write rate, or None when that rate is
+    not ready (first sample, or a sleep gap). A ready rate of 0 is real: the
+    counter did not move. Recording bytes can sit in the page cache for a
+    whole expire interval, so while files are growing the header shows at
+    least *msr_bps*. The larger of the two is the figure, so other writers on
+    the disk still show up.
+    """
+    if device_bps is None:
+        return None
+    try:
+        device = float(device_bps)
+    except (TypeError, ValueError):
+        return None
+    if msr_bps is None:
+        return device
+    try:
+        msr = float(msr_bps)
+    except (TypeError, ValueError):
+        return device
+    if msr <= 0 or device >= msr:
+        return device
+    return msr
+
+
 def msr_write_bps(prev_sizes: dict, curr_sizes: dict, dt: float) -> float | None:
     """Recording-file growth rate. New or split files do not count as negative."""
     if dt <= 0 or dt > MAX_SAMPLE_GAP_S:
@@ -373,6 +494,11 @@ def format_tooltip(snap: IoSnapshot) -> str:
         lines[0] += f"  ·  {snap.disk_busy_frac * 100:.0f}% busy"
     lines.append(f"NIC  {net_s} down")
     lines.append("(whole disk / whole NIC)")
+    if os.name != "nt":
+        lines.append(
+            f"Linux: disk rate is a {int(POSIX_DISK_WINDOW_S)} s average "
+            "(page-cache write-back)."
+        )
     lines.append("")
     lines.append("This app")
     msr_w = format_mb_s(snap.msr_write_bps or 0.0)
@@ -396,7 +522,13 @@ def _monotonic():
 
 
 class IoSampler:
-    """Pair consecutive OS / file-size samples into rates."""
+    """Pair OS / file-size samples into rates.
+
+    Windows keeps the previous counter and reports the one-second delta.
+    Other systems keep a sliding window of disk counters
+    (:data:`POSIX_DISK_WINDOW_S`) and report the oldest-to-newest rate, then
+    raise it to the recording file growth while a recording is getting larger.
+    """
 
     def __init__(self, path: str = ""):
         self.path = path or ""
@@ -405,6 +537,8 @@ class IoSampler:
         self._busy_ms = None
         self._recv_bytes = None
         self._msr_sizes = None
+        # POSIX only: (t, write_bytes, busy_ms) inside POSIX_DISK_WINDOW_S.
+        self._disk_window = []
         # key -> (size, monotonic t of last size change) so 5s worker
         # size_bytes updates still yield a correct bytes/sec, not a 1s spike.
         self._msr_meta = {}
@@ -435,21 +569,32 @@ class IoSampler:
 
         if disk is not None:
             label, write_bytes, busy_ms = disk
-            write_bps = delta_rate(self._write_bytes, write_bytes, dt or -1)
-            if busy_ms is not None and self._busy_ms is not None and dt and 0 < dt <= MAX_SAMPLE_GAP_S:
-                busy_delta_s = (busy_ms - self._busy_ms) / 1000.0
-                if busy_delta_s >= 0:
-                    busy_frac = min(1.0, busy_delta_s / dt)
-            self._write_bytes = write_bytes
-            self._busy_ms = busy_ms
+            if os.name == "nt":
+                # One-second delta. Do not window this: Windows write_bytes
+                # moves as the data is written, and this branch's outputs stay
+                # the pre-window figures.
+                write_bps = delta_rate(self._write_bytes, write_bytes, dt or -1)
+                if busy_ms is not None and self._busy_ms is not None and dt and 0 < dt <= MAX_SAMPLE_GAP_S:
+                    busy_delta_s = (busy_ms - self._busy_ms) / 1000.0
+                    if busy_delta_s >= 0:
+                        busy_frac = min(1.0, busy_delta_s / dt)
+                self._write_bytes = write_bytes
+                self._busy_ms = busy_ms
+            else:
+                self._disk_window.append((now, write_bytes, busy_ms))
+                self._trim_disk_window(now)
+                write_bps, busy_frac = posix_disk_window(self._disk_window)
         else:
             self._write_bytes = None
             self._busy_ms = None
+            self._disk_window.clear()
 
         recv_bps = delta_rate(self._recv_bytes, recv, dt or -1)
         self._recv_bytes = recv
 
         msr_bps = self._msr_rate_from_status(sizes, now)
+        if os.name != "nt":
+            write_bps = displayed_posix_disk_bps(write_bps, msr_bps)
         self._msr_sizes = sizes
         self._t = now
 
@@ -464,6 +609,12 @@ class IoSampler:
             msr_stream_mbps=float(msr_stream_mbps or 0.0),
         )
         return self.last
+
+    def _trim_disk_window(self, now: float) -> None:
+        cutoff = now - POSIX_DISK_WINDOW_S
+        window = self._disk_window
+        if window and window[0][0] < cutoff:
+            self._disk_window = [row for row in window if row[0] >= cutoff]
 
     def _msr_rate_from_status(self, sizes, now):
         """Bytes/sec from worker ``size_bytes``, which may only move every few seconds."""
