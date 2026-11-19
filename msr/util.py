@@ -46,10 +46,15 @@ _UNSAFE_NAME_CHARS = set(' \t\n\r<>"|?*:/\\')
 _DIR_WEIGHT_CAP = 2000
 
 
-def linux_reuses_dir_case() -> bool:
+def linux_reuses_dir_case(platform: str | None = None) -> bool:
     """Linux creates a second folder when only the case differs. Windows (and the
-    usual macOS volume) does not, so the spelled path is already the existing one."""
-    return sys.platform.startswith("linux")
+    usual macOS volume) does not, so the spelled path is already the existing one.
+
+    ``platform`` defaults to this process. Tests pass ``"win32"`` so the Windows
+    answer is checked on Linux too."""
+    if platform is None:
+        platform = sys.platform
+    return platform.startswith("linux")
 
 
 def _split_parts(parts) -> list[str]:
@@ -195,13 +200,18 @@ def channel_record_dirs(root: str, platform: str, username_dir: str, *,
             reuse_path(pending, platform, username_dir, reuse=reuse))
 
 
-def recorded_scan_bases(root: str, primary: str) -> list[str]:
+def recorded_scan_bases(root: str, primary: str, *, reuse: bool | None = None) -> list[str]:
     """Raw-file folders to read. Windows: ``primary`` only. Linux: ``primary`` and every
-    other case variant of ``Recorded`` that exists. Nothing is created."""
+    other case variant of ``Recorded`` that exists. Nothing is created.
+
+    ``reuse=False`` is the Windows answer and ``reuse=True`` is the Linux answer.
+    The default follows :func:`linux_reuses_dir_case`."""
+    if reuse is None:
+        reuse = linux_reuses_dir_case()
     ordered = []
     seen = set()
     candidates = [primary] if primary else []
-    if root and linux_reuses_dir_case():
+    if root and reuse:
         candidates.extend(matching_dirs(root, "Recorded"))
     for path in candidates:
         if not path:
@@ -214,17 +224,22 @@ def recorded_scan_bases(root: str, primary: str) -> list[str]:
     return ordered
 
 
-def read_layout_paths(root: str, *parts: str) -> list[str]:
+def read_layout_paths(root: str, *parts: str, reuse: bool | None = None) -> list[str]:
     """Existing directories matching ``parts`` case-insensitively.
 
     Windows returns the single spelled path (the volume has one folder either way), which
     is what callers already joined. Linux returns every real match so a lowercase tree is
-    not invisible, or the spelled path when nothing is there yet. Nothing is created."""
+    not invisible, or the spelled path when nothing is there yet. Nothing is created.
+
+    ``reuse=False`` is the Windows answer and ``reuse=True`` is the Linux answer.
+    The default follows :func:`linux_reuses_dir_case`."""
     flat = _split_parts(parts)
     spelled = os.path.join(root, *flat) if root else ""
     if not root:
         return []
-    if not linux_reuses_dir_case():
+    if reuse is None:
+        reuse = linux_reuses_dir_case()
+    if not reuse:
         return [spelled]
     current = [root]
     for piece in flat:
