@@ -268,7 +268,7 @@ Or leave the password out and set the `MSR_FISHTANK_PASSWORD` environment variab
 | `Control/enabled` | true | Local control channel for `msr_ctl.py` |
 | `Telegram/enabled` | false | Upload each finished recording to one Telegram forum topic. Needs Telethon |
 | `Telegram/api_id`, `chat_id`, `topic_id`, `owner_id` | (blank) | From my.telegram.org, the topic link, and your user id. Not secrets |
-| `Telegram/api_hash`, `bot_token` | (blank) | Secrets. Encrypted on Windows; leave the field blank in Options to keep the saved value |
+| `Telegram/api_hash`, `bot_token` | (blank) | Secrets. Encrypted at rest (Windows DPAPI, or a user-only key on Linux). Leave the field blank in Options to keep the saved value |
 | `Telegram/delete_after_upload` | false | Remove the local file only after every part is confirmed |
 | `Library/extra_dirs` | (blank) | More folders for the Library tab |
 | `GUI/theme` | PowerShell Blue | Colour theme (set from the **Theme...** button) |
@@ -293,6 +293,8 @@ What you set up on Telegram:
 **Send test message** posts one sentence in the topic and checks those three. `msr_ctl.py telegram status` shows the queue; `msr_ctl.py telegram test` sends the same sentence.
 
 **Delete the local file after Telegram confirms every part** is off unless you tick it. A failed or partial upload keeps the file. The warning in Options is the one to read before turning it on.
+
+The api hash, the bot token and the Telethon session file are encrypted at rest. On Windows that is DPAPI. On Linux the ciphertext is in `config.ini` and `telegram_session.json`, and the key is `~/.config/multi-stream-recorder/secret.key` (mode 0600, or `$XDG_CONFIG_HOME`), not in the data folder. A copied `config.ini` does not reveal them. The session file is owner-only as well.
 
 Install Telethon if this copy of MSR does not have it yet (`pip install "Telethon>=1.36,<2"`, or let `run_msr.pyw` install `requirements.txt`). Without it the section is greyed out and nothing is uploaded. Restart MSR after installing.
 

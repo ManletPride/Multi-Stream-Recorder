@@ -362,9 +362,10 @@ class OptionsPanel:
             self.vars[("Telegram", key)] = var
             self.tip(entry, {
                 "api_id": "The number from my.telegram.org → API development tools. Not a secret.",
-                "api_hash": "From the same page. Encrypted in config.ini on Windows; never logged.",
+                "api_hash": "From the same page. Encrypted at rest (Windows DPAPI, or a key\n"
+                            "private to your user on Linux). Never logged.",
                 "bot_token": "BotFather gives this. The bot is added to your group as an admin.\n"
-                             "MSR does not log in with your phone number.",
+                             "MSR does not log in with your phone number. Encrypted at rest, same as the api hash.",
                 "chat_id": "From a topic link t.me/c/1234567890/55 the group id is -1001234567890.",
                 "topic_id": "The number after the last slash in that link (55 in the example). General is often 1.",
                 "owner_id": "Your numeric Telegram user id. Uploads are refused if this user is not in the group.",

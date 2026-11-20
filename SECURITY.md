@@ -23,8 +23,8 @@ All of this stays on **your machine**. MSR does not phone home except a GitHub â
 | `config.ini` `[Fishtank]` email/password | Windows: password encrypted with DPAPI (`password_dpapi`, only your user can decrypt it); plain text elsewhere. Login is the reliable auth method; cookies only work for about 15 minutes after export. |
 | `channels.json` | Who you record. |
 | `twitch_token.json` | Twitch push sign-in. DPAPI-encrypted on Windows. |
-| `config.ini` `[Telegram]` `api_hash`, `bot_token` | Bot credentials. DPAPI-encrypted on Windows (`api_hash_dpapi`, `bot_token_dpapi`); plain text, user-only file permissions, elsewhere. The api id, group id, topic id and your user id are not secrets. |
-| `telegram_session.json` | The bot's MTProto session. Same protection as the Twitch token. Not a login to your personal account. |
+| `config.ini` `[Telegram]` `api_hash`, `bot_token` | Bot credentials. Not stored in the clear. Windows: DPAPI (`api_hash_dpapi`, `bot_token_dpapi`). Linux and other systems: `api_hash_box` / `bot_token_box`, unlocked by `~/.config/multi-stream-recorder/secret.key` (mode 0600, outside the data folder). The api id, group id, topic id and your user id are not secrets. |
+| `telegram_session.json` | The bot's MTProto session, encrypted the same way (DPAPI or the user key). Mode 0600. Not a login to your personal account. |
 | `msr_control.json` | Control port and token, readable only by your user; removed when MSR quits. |
 | `stream_recorder.log` | Commands and URLs; JWTs and Cookie headers are redacted, but do not paste raw logs in public. |
 | Recordings / clips | Copyrighted and possibly adult content you chose to save. |

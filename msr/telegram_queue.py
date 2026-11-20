@@ -597,28 +597,23 @@ def _write_private(path: str, data: bytes) -> None:
             pass
 
 
-_session_noted = False
-
-
 def session_path(data_dir: str) -> str:
     return os.path.join(data_dir or ".", SESSION_FILE)
 
 
 def save_session(data_dir: str, session: str, fp: str) -> None:
-    """The Telethon session string, DPAPI-encrypted on Windows, mode 0600 elsewhere.
+    """The Telethon session string, encrypted, mode 0600.
 
-    Same pattern as the Twitch token. The bot token itself is not written here.
+    Windows uses DPAPI. Elsewhere the same user-key envelope as the bot token
+    (``msr/filecrypt.py``). The file never holds the session in the clear, and
+    it does not hold the bot token.
     """
-    global _session_noted
     payload = json.dumps({"v": 1, "fp": fp, "session": session})
     if dpapi.available():
         body = json.dumps({"v": 1, "dpapi": dpapi.encrypt_text(payload)}).encode("utf-8")
     else:
-        if not _session_noted:
-            _session_noted = True
-            logging.info("Telegram: no DPAPI on this system — the bot session file is stored unencrypted, "
-                         "readable by this user only")
-        body = payload.encode("utf-8")
+        from msr import filecrypt
+        body = json.dumps({"v": 1, "box": filecrypt.encrypt_text(payload)}).encode("utf-8")
     path = session_path(data_dir)
     _write_private(path, body)
     if os.name == "nt":
@@ -639,6 +634,7 @@ def load_session(data_dir: str, fp: str) -> str | None:
         return None
     if not isinstance(doc, dict):
         return None
+    plain_file = False
     if "dpapi" in doc:
         if not dpapi.available():
             logging.info("Telegram: the saved bot session is encrypted for Windows and cannot be read here")
@@ -648,10 +644,28 @@ def load_session(data_dir: str, fp: str) -> str | None:
         except Exception:
             logging.warning("Telegram: the saved bot session cannot be decrypted; the bot will sign in again")
             return None
+    elif "box" in doc:
+        from msr import filecrypt
+        try:
+            doc = json.loads(filecrypt.decrypt_text(doc["box"]))
+        except Exception:
+            logging.warning("Telegram: the saved bot session cannot be decrypted; the bot will sign in again")
+            return None
+    else:
+        plain_file = True
     if not isinstance(doc, dict) or doc.get("fp") != fp:
         return None
     text = doc.get("session")
-    return text if isinstance(text, str) and text else None
+    if not isinstance(text, str) or not text:
+        return None
+    if plain_file:
+        try:
+            save_session(data_dir, text, fp)
+        except Exception:
+            logging.warning("Telegram: could not encrypt the session file; it was removed")
+            clear_session(data_dir)
+            return None
+    return text
 
 
 def clear_session(data_dir: str) -> None:

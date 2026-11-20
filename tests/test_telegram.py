@@ -225,7 +225,8 @@ class SecretTests(unittest.TestCase):
             control.validate_setting("Telegram", "bot_token", "not-a-token")
 
     def test_config_get_masks_the_token(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"MSR_SECRET_DIR": os.path.join(tmp, "keys")}):
             cfg = Config(os.path.join(tmp, "config.ini"))
             app = control.HeadlessApp(cfg, lambda keys: None)
             self.addCleanup(app.close)
@@ -236,23 +237,67 @@ class SecretTests(unittest.TestCase):
             shown = ctl.handle("config_get", {"section": "Telegram", "key": "bot_token"})
             self.assertEqual(shown["result"]["settings"]["Telegram"]["bot_token"], "<set>")
             self.assertNotIn("bot_token_dpapi", shown["result"]["settings"]["Telegram"])
+            self.assertNotIn("bot_token_box", shown["result"]["settings"]["Telegram"])
             with open(cfg.config_file, encoding="utf-8") as fh:
                 text = fh.read()
+            self.assertNotIn(TOKEN, text)
             if dpapi.available():
-                self.assertNotIn(TOKEN, text)
+                self.assertIn("bot_token_dpapi", text)
+            else:
+                self.assertIn("bot_token_box", text)
 
     def test_session_file_round_trip_and_mode(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"MSR_SECRET_DIR": os.path.join(tmp, "keys")}), \
+                mock.patch.object(dpapi, "available", return_value=False):
             save_session(tmp, "session-secret", "fp1")
             path = os.path.join(tmp, "telegram_session.json")
             text = open(path, encoding="utf-8").read()
+            self.assertNotIn("session-secret", text)
             self.assertNotIn(TOKEN, text)
-            if not dpapi.available():
-                self.assertIn("session-secret", text)
-                mode = stat.S_IMODE(os.stat(path).st_mode)
-                self.assertEqual(mode, 0o600)
+            self.assertIn("box", text)
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(os.stat(path).st_mode) & 0o777, 0o600)
+                key = os.path.join(tmp, "keys", "secret.key")
+                self.assertEqual(stat.S_IMODE(os.stat(key).st_mode) & 0o777, 0o600)
+                self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(key)).st_mode) & 0o777, 0o700)
             self.assertEqual(load_session(tmp, "fp1"), "session-secret")
             self.assertIsNone(load_session(tmp, "other-bot"))
+
+    def test_plaintext_session_is_rewritten_encrypted(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"MSR_SECRET_DIR": os.path.join(tmp, "keys")}), \
+                mock.patch.object(dpapi, "available", return_value=False):
+            path = os.path.join(tmp, "telegram_session.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({"v": 1, "fp": "fp1", "session": "session-secret"}, fh)
+            self.assertEqual(load_session(tmp, "fp1"), "session-secret")
+            text = open(path, encoding="utf-8").read()
+            self.assertNotIn("session-secret", text)
+
+    def test_linux_config_encrypts_the_token_and_the_hash(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"MSR_SECRET_DIR": os.path.join(tmp, "keys")}), \
+                mock.patch.object(dpapi, "available", return_value=False):
+            path = os.path.join(tmp, "config.ini")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(f"[Telegram]\napi_hash = {'c' * 32}\nbot_token = {TOKEN}\nchat_id = {CHAT}\n")
+            cfg = Config(path)
+            from msr.config import read_secret
+            self.assertEqual(read_secret(cfg, "Telegram", "bot_token"), TOKEN)
+            self.assertEqual(read_secret(cfg, "Telegram", "api_hash"), "c" * 32)
+            text = open(path, encoding="utf-8").read()
+            self.assertNotIn(TOKEN, text)
+            self.assertNotIn("c" * 32, text)
+            self.assertIn("bot_token_box", text)
+            self.assertIn("api_hash_box", text)
+            self.assertIn(CHAT, text)
+            # a flipped ciphertext byte does not come back as the token
+            cfg.config.set("Telegram", "bot_token_box", "AAAA")
+            self.assertEqual(read_secret(cfg, "Telegram", "bot_token"), "")
+            if os.name != "nt":
+                key = os.path.join(tmp, "keys", "secret.key")
+                self.assertEqual(stat.S_IMODE(os.stat(key).st_mode) & 0o777, 0o600)
 
     def test_session_file_is_ciphertext_when_dpapi_is_on(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -323,6 +368,9 @@ class UploadTests(unittest.TestCase):
         self.streams = os.path.join(self.tmp.name, "streams")
         self.clock = Clock()
         self.transport = FakeTransport()
+        self._env = mock.patch.dict(os.environ, {"MSR_SECRET_DIR": os.path.join(self.tmp.name, "keys")})
+        self._env.start()
+        self.addCleanup(self._env.stop)
 
     def recording(self, payload, name="alice.mp4"):
         folder = os.path.join(self.streams, "Processed", "kick", "alice")

@@ -366,9 +366,13 @@ def apply_setting(config, section, key, value, recording=False, live=None) -> st
     type/range checks, save (secrets DPAPI-encrypted by Config.save), then ``live(value)``
     for settings a running session takes at once. Returns the stored value."""
     section, key = str(section or ""), str(key or "").lower()
-    # before the known-key check: the _dpapi copy only exists in config.ini on Windows
-    if key.endswith("_dpapi") and ((section, key[:-6]) in SECRET_KEYS or known_setting(config, section, key)):
-        raise ControlError(f"Set {section}.{key[:-6]} instead; the encrypted copy is managed by MSR.", "invalid")
+    # before the known-key check: the encrypted copy is managed by MSR
+    for suffix in ("_dpapi", "_box"):
+        if key.endswith(suffix) and ((section, key[:-len(suffix)]) in SECRET_KEYS
+                                     or known_setting(config, section, key)):
+            raise ControlError(
+                f"Set {section}.{key[:-len(suffix)]} instead; the encrypted copy is managed by MSR.",
+                "invalid")
     if not known_setting(config, section, key):
         raise ControlError(f"Unknown setting {section}.{key}.", "not_found")
     if (section, key) == ("Paths", "streams_dir") and recording:
@@ -381,6 +385,7 @@ def apply_setting(config, section, key, value, recording=False, live=None) -> st
     config.config.set(section, key, value)
     if (section, key) in SECRET_KEYS and not value.strip():  # clearing also drops the encrypted copy
         config.config.remove_option(section, key + "_dpapi")
+        config.config.remove_option(section, key + "_box")
     if not config.save():
         raise ControlError("config.ini could not be written (see the log).", "write_failed")
     if live is not None and (section, key) in LIVE_SETTINGS:
@@ -1346,7 +1351,7 @@ class Controller:
             if section and s.lower() != str(section).lower():
                 continue
             values = {k: masked(k, v) for k, v in cfg.items(s)
-                      if (not key or k == key) and not k.endswith("_dpapi")}
+                      if (not key or k == key) and not k.endswith("_dpapi") and not k.endswith("_box")}
             for sec, k in SECRET_KEYS:  # encrypted credentials count as set
                 if sec.lower() == s.lower() and k in values:
                     values[k] = masked(k, read_secret(cfg, s, k))
