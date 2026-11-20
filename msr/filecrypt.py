@@ -45,19 +45,26 @@ def _tighten(path: str, mode: int) -> None:
         pass
 
 
-def load_key() -> bytes:
-    """The user key, created on first use. Owner-only."""
+def load_key(*, create: bool = True) -> bytes:
+    """The user key. Owner-only.
+
+    Created on first encrypt. A decrypt never creates one: a missing key stays
+    missing, so a copied config can be tried again after the key file is restored.
+    """
     folder = key_dir()
-    os.makedirs(folder, mode=0o700, exist_ok=True)
-    _tighten(folder, 0o700)
     path = _key_path()
     if os.path.isfile(path):
+        _tighten(folder, 0o700)
         _tighten(path, 0o600)
         with open(path, "rb") as fh:
             key = fh.read()
         if len(key) != 32:
             raise CryptoError("the secret key file is not usable")
         return key
+    if not create:
+        raise CryptoError("the secret key file is missing")
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    _tighten(folder, 0o700)
     key = os.urandom(32)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     try:
@@ -99,7 +106,7 @@ def encrypt(data: bytes) -> bytes:
 def decrypt(blob: bytes) -> bytes:
     if not blob or blob[0:1] != b"\x01" or len(blob) < 1 + 16 + 32 + 1:
         raise CryptoError("not an encrypted secret")
-    key = load_key()
+    key = load_key(create=False)
     nonce, mac, cipher = blob[1:17], blob[17:49], blob[49:]
     mac_key = hmac.new(key, b"msr-filecrypt-mac", hashlib.sha256).digest()
     expect = hmac.new(mac_key, b"\x01" + nonce + cipher, hashlib.sha256).digest()

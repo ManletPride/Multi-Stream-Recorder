@@ -118,7 +118,7 @@ GROUPS = (
     ("Fishtank login", False, (
         row("Fishtank", "email", "Email", "text", "", width=28),
         row("Fishtank", "password", "Password", "password", "", width=20,
-            tip="Encrypted in config.ini on Windows (DPAPI), plain elsewhere; never logged.\n"
+            tip="Encrypted in config.ini (Windows DPAPI, or a user-only key on Linux); never logged.\n"
                 "MSR_FISHTANK_PASSWORD, if set, wins and keeps it out of the file."),
     )),
     ("Other", False, (

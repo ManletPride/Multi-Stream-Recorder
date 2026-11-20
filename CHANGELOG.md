@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Changed
+- On Linux and other non-Windows systems the Fishtank password and the Twitch sign-in are encrypted at rest with the same user key as the Telegram secrets (`~/.config/multi-stream-recorder/secret.key`, mode 0600, or `$XDG_CONFIG_HOME`). The ciphertext is `password_box` in `config.ini` and a `box` field in `twitch_token.json`. An existing plaintext value is encrypted on the next start. If the key file is missing or damaged, MSR does not delete the saved value and does not crash: a ciphertext it cannot open asks you to enter it again, and a plaintext value it cannot encrypt is left as it is. Windows still uses DPAPI only (`password_dpapi`, `{"v": 2, "dpapi": ...}`).
+
 ### Added
 - Optional Telegram upload of a finished recording into one forum topic (**Options > Telegram**, off by default). A background queue runs after the remux, retries on network errors and FloodWait, and resumes after a restart. The bot signs in with its token over MTProto (Telethon); MSR never logs in as the user. The hosted Bot API's 50 MB cap is not used. Parts stay under Telegram's 2,097,152,000-byte MTProto limit and are split with stream-copy, named `part n/m`, with a caption. **Delete the local file after every part is confirmed** is off unless you turn it on; a partial failure keeps the file. The api hash, bot token and session file are encrypted at rest: DPAPI on Windows, and on Linux a ciphertext plus a key in the user config directory (mode 0600), never the secret in the clear. `msr_ctl.py telegram status` / `telegram test` report the queue and send the test message. Without Telethon the section is greyed out and recording is unchanged.
 

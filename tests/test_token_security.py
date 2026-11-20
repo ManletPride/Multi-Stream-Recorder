@@ -1,6 +1,8 @@
-"""Twitch token at rest (DPAPI), reconnect/verification URL checks, cookie sync warning."""
+"""Twitch token at rest (DPAPI on Windows, user key elsewhere), reconnect checks."""
 import json
+import logging
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -19,7 +21,8 @@ class TempData(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.d = self.tmp.name
-        p = mock.patch.dict(os.environ, {"MSR_DATA": self.d})
+        self.keys = os.path.join(self.d, "keys")
+        p = mock.patch.dict(os.environ, {"MSR_DATA": self.d, "MSR_SECRET_DIR": self.keys})
         p.start()
         self.addCleanup(p.stop)
         te._noted.clear()
@@ -56,13 +59,97 @@ class TestDpapi(TempData):
 
 
 class TestNonWindows(TempData):
-    def test_plaintext_fallback(self):
-        with mock.patch.object(te, "dpapi_available", return_value=False):
-            with self.assertLogs(level="INFO") as cm:
-                te.save_token(self.d, FAKE)
+    def _linux(self):
+        return mock.patch.object(te, "dpapi_available", return_value=False)
+
+    def test_round_trip_is_encrypted(self):
+        with self._linux():
+            with self.assertLogs(level="DEBUG") as cm:
+                logging.getLogger().debug("token-save")
+                self.assertTrue(te.save_token(self.d, FAKE))
             self.assertNotIn("fake-at", "".join(cm.output))
-            self.assertEqual(json.loads(self.raw()), FAKE)
+            self.assertNotIn("fake-rt", "".join(cm.output))
+            doc = json.loads(self.raw())
+            self.assertEqual(doc["v"], 2)
+            self.assertIn("box", doc)
+            self.assertNotIn("dpapi", doc)
+            self.assertNotIn("fake-at", self.raw())
             self.assertEqual(te.load_token(self.d), FAKE)
+
+    def test_plaintext_is_migrated(self):
+        with self._linux():
+            with open(te.token_path(self.d), "w", encoding="utf-8") as f:
+                json.dump(FAKE, f)
+            with self.assertLogs(level="INFO") as cm:
+                self.assertEqual(te.load_token(self.d), FAKE)
+            self.assertIn("now encrypted", "".join(cm.output))
+            self.assertNotIn("fake-at", "".join(cm.output))
+            self.assertIn("box", json.loads(self.raw()))
+            self.assertNotIn("fake-at", self.raw())
+            self.assertEqual(te.load_token(self.d), FAKE)
+
+    def test_copied_file_without_the_key_cannot_decrypt(self):
+        with self._linux():
+            te.save_token(self.d, FAKE)
+            blob = json.loads(self.raw())["box"]
+            os.environ["MSR_SECRET_DIR"] = os.path.join(self.d, "other-keys")
+            with self.assertLogs(level="INFO") as cm:
+                self.assertIsNone(te.load_token(self.d))
+            self.assertIn("Connect Twitch", "".join(cm.output))
+            self.assertNotIn("fake-at", "".join(cm.output))
+            self.assertEqual(json.loads(self.raw())["box"], blob)
+            self.assertFalse(os.path.isfile(os.path.join(self.d, "other-keys", "secret.key")))
+
+    def test_corrupt_key_keeps_the_plaintext_token(self):
+        with self._linux():
+            os.makedirs(self.keys)
+            with open(os.path.join(self.keys, "secret.key"), "wb") as fh:
+                fh.write(b"short")
+            with open(te.token_path(self.d), "w", encoding="utf-8") as f:
+                json.dump(FAKE, f)
+            with self.assertLogs(level="WARNING") as cm:
+                self.assertEqual(te.load_token(self.d), FAKE)
+            blob = "".join(cm.output)
+            self.assertTrue("left unchanged" in blob or "not lost" in blob)
+            self.assertNotIn("fake-at", blob)
+            self.assertEqual(te.load_token(self.d)["access_token"], "fake-at")
+            with open(os.path.join(self.keys, "secret.key"), "rb") as fh:
+                self.assertEqual(fh.read(), b"short")
+
+    def test_token_file_mode(self):
+        with self._linux():
+            te.save_token(self.d, FAKE)
+            if os.name == "nt":
+                return
+            self.assertEqual(stat.S_IMODE(os.stat(te.token_path(self.d)).st_mode) & 0o777, 0o600)
+            key = os.path.join(self.keys, "secret.key")
+            self.assertEqual(stat.S_IMODE(os.stat(key).st_mode) & 0o777, 0o600)
+            self.assertEqual(stat.S_IMODE(os.stat(self.keys).st_mode) & 0o777, 0o700)
+
+    def test_windows_dpapi_path_is_unchanged(self):
+        def crypt(data, protect):
+            if protect:
+                return b"W:" + data
+            if not data.startswith(b"W:"):
+                raise OSError("DPAPI call failed")
+            return data[2:]
+
+        with mock.patch.object(te, "dpapi_available", return_value=True), \
+                mock.patch.object(te, "_dpapi", side_effect=crypt):
+            te.save_token(self.d, FAKE)
+            doc = json.loads(self.raw())
+            self.assertEqual(set(doc), {"v", "dpapi"})
+            self.assertEqual(doc["v"], 2)
+            self.assertNotIn("fake-at", self.raw())
+            self.assertNotIn("box", doc)
+            self.assertEqual(te.load_token(self.d), FAKE)
+            with open(te.token_path(self.d), "w", encoding="utf-8") as f:
+                json.dump(FAKE, f)
+            with self.assertLogs(level="INFO"):
+                self.assertEqual(te.load_token(self.d), FAKE)
+            self.assertIn("dpapi", json.loads(self.raw()))
+            self.assertNotIn("box", json.loads(self.raw()))
+            self.assertNotIn("fake-at", self.raw())
 
     def test_garbage_never_crashes(self):
         with open(te.token_path(self.d), "w", encoding="utf-8") as f:

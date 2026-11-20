@@ -45,7 +45,7 @@ This README describes **v3.1.5**. Full history: [CHANGELOG.md](CHANGELOG.md).
 - **Library > Recordings**: each channel's recordings with title and length, and the clips cut from each one.
 - **First-time setup window** shows each step and a live log.
 - **More agent control**: Twitch sign-in, every Options setting, sound tests, Health check, Recordings browsing and a live event stream (`subscribe`). See [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md).
-- **Safer secrets**: the Twitch token and Fishtank password are encrypted on Windows; the control file is readable only by you.
+- **Safer secrets**: the Twitch token and Fishtank password are encrypted at rest (Windows DPAPI, or a user-only key on Linux). The control file is readable only by you.
 - **Options**: Manage on Twitch button, and a warning when `cookies.txt` sits in a synced folder.
 
 ## What's new in 3.0
@@ -236,7 +236,7 @@ The indicator under the roster shows whether cookies were found and when auth co
 email = you@example.com
 password = ...
 ```
-Or leave the password out and set the `MSR_FISHTANK_PASSWORD` environment variable. On Windows MSR encrypts the password on first start (stored as `password_dpapi`); an older MSR version then sees it as blank. The Options tab warns if `cookies.txt` is in a synced folder. Camera names, season aliases and stream ids: [docs/fishtank.md](docs/fishtank.md).
+Or leave the password out and set the `MSR_FISHTANK_PASSWORD` environment variable. MSR encrypts the password on first start: `password_dpapi` on Windows, `password_box` elsewhere (unlocked by `~/.config/multi-stream-recorder/secret.key`, mode 0600, not in the data folder). A copied `config.ini` does not reveal it, and an older MSR version sees the password as blank. The Options tab warns if `cookies.txt` is in a synced folder. Camera names, season aliases and stream ids: [docs/fishtank.md](docs/fishtank.md).
 
 ## Configuration
 
@@ -294,7 +294,7 @@ What you set up on Telegram:
 
 **Delete the local file after Telegram confirms every part** is off unless you tick it. A failed or partial upload keeps the file. The warning in Options is the one to read before turning it on.
 
-The api hash, the bot token and the Telethon session file are encrypted at rest. On Windows that is DPAPI. On Linux the ciphertext is in `config.ini` and `telegram_session.json`, and the key is `~/.config/multi-stream-recorder/secret.key` (mode 0600, or `$XDG_CONFIG_HOME`), not in the data folder. A copied `config.ini` does not reveal them. The session file is owner-only as well.
+The api hash, the bot token and the Telethon session file are encrypted at rest. On Windows that is DPAPI. On Linux the ciphertext is in `config.ini` and `telegram_session.json`, and the key is `~/.config/multi-stream-recorder/secret.key` (mode 0600, or `$XDG_CONFIG_HOME`), not in the data folder. The Fishtank password and the Twitch sign-in use that same key. A copied `config.ini` does not reveal them. The session file and `twitch_token.json` are owner-only as well.
 
 Install Telethon if this copy of MSR does not have it yet (`pip install "Telethon>=1.36,<2"`, or let `run_msr.pyw` install `requirements.txt`). Without it the section is greyed out and nothing is uploaded. Restart MSR after installing.
 

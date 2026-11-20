@@ -105,7 +105,7 @@ Credentials are `config set` (`Telegram.api_hash`, `Telegram.bot_token` via `--s
 ```
 python msr_ctl.py config set Recording.min_disk_space_gb 50
 ```
-Unknown keys, bad values and a recordings folder change while recording are refused. Secrets are stored encrypted and never shown; pass them with `--stdin`.
+Unknown keys, bad values and a recordings folder change while recording are refused. Secrets are stored encrypted on every OS (Windows DPAPI, or a user-only key elsewhere) and never shown; pass them with `--stdin`.
 
 **Recordings tab and clips**
 ```

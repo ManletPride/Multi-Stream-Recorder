@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -18,6 +19,9 @@ class SettingsParityTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        env = mock.patch.dict(os.environ, {"MSR_SECRET_DIR": os.path.join(self.tmp.name, "keys")})
+        env.start()
+        self.addCleanup(env.stop)
         self.data, self.streams = make_data(self.tmp.name, ["kickone"])
         self.config = Config(os.path.join(self.data, "config.ini"))
         self.app = control.HeadlessApp(self.config, FakeRecorder)
@@ -72,14 +76,20 @@ class SettingsParityTests(unittest.TestCase):
         self.assertEqual(reply["result"]["value"], "<set>")
         with open(self.config.config_file, encoding="utf-8") as fh:
             text = fh.read()
-        if dpapi.available():
-            self.assertNotIn("n3w-SECRET", text)
-            self.assertIn("password_dpapi", text)
+        self.assertNotIn("n3w-SECRET", text)
         self.assertNotIn(SECRET_PASSWORD, text)
+        if dpapi.available():
+            self.assertIn("password_dpapi", text)
+            self.assertNotIn("password_box", text)
+        else:
+            self.assertIn("password_box", text)
+            self.assertNotIn("password_dpapi", text)
         self.assertEqual(read_secret(Config(self.config.config_file).config, "Fishtank", "password"), "n3w-SECRET")
         got = self.ctl.handle("config_get", {"section": "Fishtank"})["result"]["settings"]["Fishtank"]
         self.assertEqual(got["password"], "<set>")
         self.assertNotIn("password_dpapi", got)
+        self.assertNotIn("password_box", got)
+        self.assertNotIn("n3w-SECRET", str(got))
 
     def test_clearing_a_secret_drops_the_encrypted_copy(self):
         self.ctl.handle("config_set", {"section": "Fishtank", "key": "password", "value": "abc"})
@@ -87,6 +97,7 @@ class SettingsParityTests(unittest.TestCase):
         fresh = Config(self.config.config_file)
         self.assertEqual(read_secret(fresh.config, "Fishtank", "password"), "")
         self.assertFalse(fresh.config.has_option("Fishtank", "password_dpapi"))
+        self.assertFalse(fresh.config.has_option("Fishtank", "password_box"))
 
     def test_gui_options_and_control_hooks_use_the_shared_function(self):
         with open(os.path.join(ROOT, "msr", "gui.py"), encoding="utf-8") as fh:

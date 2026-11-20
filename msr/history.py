@@ -67,7 +67,12 @@ def strip_secrets(data: bytes) -> bytes:
 
 
 def fill_secrets(data: bytes, current: bytes | None) -> bytes:
-    """Put the current file's values back where a history copy has ``KEPT_OUT`` (else blank)."""
+    """Put the current file's values back where a history copy has ``KEPT_OUT`` (else blank).
+
+    A snapshot taken before a secret moved into ``*_dpapi`` / ``*_box`` does not
+    have that line. The current encrypted copy is written back with the secret,
+    so restoring that snapshot does not drop a password that now lives there.
+    """
     if KEPT_OUT.encode() not in data:
         return data
     known = {}
@@ -76,12 +81,44 @@ def fill_secrets(data: bytes, current: bytes | None) -> bytes:
             if key:
                 known[(section, key)] = value
     out = []
+    seen = set()
+    filled = []
     for line, section, key, prefix, value in _ini_lines(data.decode("utf-8", errors="replace")):
+        if key:
+            seen.add((section, key))
         if key and value.strip() == KEPT_OUT:
             ending = line[len(line.rstrip("\r\n")):]
             line = f"{prefix}{known.get((section, key), '')}{ending}"
-        out.append(line)
-    return "".join(out).encode("utf-8")
+            filled.append((section, key, ending or "\n"))
+        out.append((section, line))
+    extra = {}
+    for section, key, ending in filled:
+        base = key
+        for suffix in ("_dpapi", "_box"):
+            if base.endswith(suffix):
+                base = base[:-len(suffix)]
+                break
+        for suffix in ("_dpapi", "_box"):
+            sibling = base + suffix
+            if (section, sibling) in seen:
+                continue
+            value = known.get((section, sibling), "")
+            if not str(value).strip():
+                continue
+            seen.add((section, sibling))
+            extra.setdefault(section, []).append(f"{sibling} = {value}{ending}")
+    if not extra:
+        return "".join(line for _section, line in out).encode("utf-8")
+    rendered = []
+    pending = dict(extra)
+    for index, (section, line) in enumerate(out):
+        rendered.append(line)
+        nxt = out[index + 1][0] if index + 1 < len(out) else None
+        if section in pending and nxt != section:
+            rendered.extend(pending.pop(section))
+    for lines in pending.values():
+        rendered.extend(lines)
+    return "".join(rendered).encode("utf-8")
 
 
 def _history_bytes(path: Path, data: bytes) -> bytes:

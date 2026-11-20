@@ -363,7 +363,7 @@ def setting_applies(section, key) -> str:
 
 def apply_setting(config, section, key, value, recording=False, live=None) -> str:
     """The one write path for a setting (Options tab and config_set): known key, guards,
-    type/range checks, save (secrets DPAPI-encrypted by Config.save), then ``live(value)``
+    type/range checks, save (secrets encrypted by Config.save), then ``live(value)``
     for settings a running session takes at once. Returns the stored value."""
     section, key = str(section or ""), str(key or "").lower()
     # before the known-key check: the encrypted copy is managed by MSR

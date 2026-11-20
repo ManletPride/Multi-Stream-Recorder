@@ -3,7 +3,7 @@
 password = yourpassword
 ```
 
-A free account is sufficient. The program handles authentication automatically — it logs in, obtains a stream token, and refreshes it as needed. No manual cookie export is required.
+A free account is sufficient. The program handles authentication automatically — it logs in, obtains a stream token, and refreshes it as needed. No manual cookie export is required. MSR encrypts that password the next time it saves `config.ini` (Windows DPAPI, or a user-only key on Linux) and leaves the `password` line blank.
 
 ## Adding cameras
 
