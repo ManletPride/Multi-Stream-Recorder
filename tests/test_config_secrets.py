@@ -211,6 +211,25 @@ class TestNonWindows(Base):
             self.assertEqual(stat.S_IMODE(os.stat(key).st_mode) & 0o777, 0o600)
             self.assertEqual(stat.S_IMODE(os.stat(self.keys).st_mode) & 0o777, 0o700)
 
+    def test_key_round_trips_when_it_contains_newlines(self):
+        # Windows text-mode writes turn \\n / Ctrl+Z in the key into a
+        # different file. The next decrypt must still see those 32 bytes.
+        from msr import filecrypt
+        nasty = bytes(range(32))
+        real = filecrypt.os.urandom
+
+        def urandom(n, real=real):
+            return nasty if n == 32 else real(n)
+
+        with self._linux(), mock.patch.object(filecrypt.os, "urandom", urandom):
+            self.write_plain()
+            c = cm.Config(self.path)
+            self.assertEqual(cm.fishtank_password(c), FAKE_PW)
+            key = os.path.join(self.keys, "secret.key")
+            with open(key, "rb") as fh:
+                self.assertEqual(fh.read(), nasty)
+            self.assertEqual(cm.fishtank_password(cm.Config(self.path)), FAKE_PW)
+
     def test_windows_dpapi_path_is_unchanged(self):
         with mock.patch.object(cm.dpapi, "available", return_value=True), \
                 mock.patch.object(cm.dpapi, "encrypt_text", return_value="DPAPICIPHER"), \

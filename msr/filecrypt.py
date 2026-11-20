@@ -45,6 +45,31 @@ def _tighten(path: str, mode: int) -> None:
         pass
 
 
+def _write_new(path: str, data: bytes) -> None:
+    """Create ``path`` containing exactly ``data``.
+
+    On Windows ``os.open`` is text mode unless ``O_BINARY`` is set, so a key
+    byte of ``\\n`` or Ctrl+Z would be rewritten and the file would no longer
+    be 32 bytes. Mode 0o600 is also skipped there: Python 3.14 turns it into
+    an ACL that later opens cannot read. DPAPI is what Windows uses instead.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    mode = 0o600
+    if os.name == "nt":
+        flags |= getattr(os, "O_BINARY", 0)
+        mode = 0o666
+    fd = os.open(path, flags, mode)
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("could not write the secret key file")
+            view = view[written:]
+    finally:
+        os.close(fd)
+
+
 def load_key(*, create: bool = True) -> bytes:
     """The user key. Owner-only.
 
@@ -63,18 +88,14 @@ def load_key(*, create: bool = True) -> bytes:
         return key
     if not create:
         raise CryptoError("the secret key file is missing")
-    os.makedirs(folder, mode=0o700, exist_ok=True)
+    # 0o700 on Windows (Python 3.14) becomes an ACL that denies later reads.
+    os.makedirs(folder, mode=0o777 if os.name == "nt" else 0o700, exist_ok=True)
     _tighten(folder, 0o700)
     key = os.urandom(32)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     try:
-        fd = os.open(path, flags, 0o600)
+        _write_new(path, key)
     except FileExistsError:
         return load_key()
-    try:
-        os.write(fd, key)
-    finally:
-        os.close(fd)
     _tighten(path, 0o600)
     return key
 
