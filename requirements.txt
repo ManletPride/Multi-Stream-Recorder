@@ -32,6 +32,11 @@ colorama>=0.4.6           # Colored console/log output (Windows terminal support
 # (one info line, no traceback) and recording still runs.
 PyGObject>=3.50; sys_platform == "linux"
 
+# Optional: upload a finished recording to one Telegram forum topic (MTProto, up to
+# 2000 MB per file). MSR runs without it; Options > Telegram stays off until it is
+# installed. Bot token only — never a personal account.
+Telethon>=1.36,<2
+
 # ── External tools (not pip-installable) ──────────
 # ffmpeg — required for remuxing .ts → .mp4
 #   Download: https://www.gyan.dev/ffmpeg/builds/ (Windows)

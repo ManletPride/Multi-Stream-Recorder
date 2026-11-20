@@ -72,6 +72,30 @@ class BackgroundCleaner:
             except Exception as e:
                 logging.debug(f"cleanup hook: {e}")
 
+    def _note_telegram(self, path, platform, username_dir):
+        """Queue a remux that this cleaner finished. The worker queues the ones it finishes itself."""
+        try:
+            from msr.telegram_queue import note_ready, upload_enabled
+            if not upload_enabled(self.config):
+                return
+            channel, title, started = username_dir, "", ""
+            meta = os.path.splitext(path)[0] + ".meta.json"
+            try:
+                with open(meta, encoding="utf-8") as fh:
+                    doc = json.load(fh)
+                if isinstance(doc, dict):
+                    channel = doc.get("channel") or channel
+                    title = doc.get("stream_title") or ""
+                    started = doc.get("recording_started") or doc.get("recorded_at") or ""
+            except (OSError, ValueError):
+                pass
+            note_ready(os.environ.get("MSR_HOME") or os.getcwd(), True, {
+                "path": path, "channel": channel, "platform": platform,
+                "title": title, "recorded_at": started,
+            })
+        except Exception:
+            logging.debug("telegram: could not queue %s", os.path.basename(path), exc_info=True)
+
     def start(self):
         if self._thread and self._thread.is_alive():
             return
@@ -341,6 +365,7 @@ class BackgroundCleaner:
                             shutil.move(raw_file, pending_path)
                             logging.info(f"Cleanup: Successfully processed {mp4_filename}")
                             self._report("finished", platform, username_dir, mp4_file, ok=True)
+                            self._note_telegram(mp4_file, platform, username_dir)
                             moved = True
                             break
                         except PermissionError:
@@ -1227,6 +1252,11 @@ class StreamRecorder:
         self.runtime = self.manager.dict()
         self.runtime['poll_interval_minutes'] = config.getfloat(
             'Timeouts', 'poll_interval_minutes', fallback=3.0)
+        try:
+            from msr.telegram_queue import upload_enabled
+            self.runtime['telegram_upload'] = bool(upload_enabled(config))
+        except Exception:
+            self.runtime['telegram_upload'] = False
 
         # Per-channel wake events.  Setting one snaps that worker out of its
         # offline/error sleep so it checks the stream immediately ("Check Now").
@@ -1602,12 +1632,8 @@ class StreamRecorder:
             sv["fast"].pop(channel_name, None)
             sv["restart_at"].pop(channel_name, None)
 
-            # Build config dict the same way run() does
-            config_dict = {section: dict(self.config.config.items(section))
-                           for section in self.config.config.sections()}
-            cookies_file = find_cookies_file(self.config)
-            if cookies_file:
-                config_dict.setdefault('Paths', {})['cookies_file'] = cookies_file
+            # Build config dict the same way run() does (no Telegram secrets).
+            config_dict = self._worker_config()
 
             # Initialize status
             self.status_dict[channel_name] = {
@@ -1880,6 +1906,15 @@ class StreamRecorder:
                       "carrying on", exc_info=exc)
         entry[0], entry[1] = now, 0
 
+    def _worker_config(self):
+        """Config handed to a worker process. The Telegram bot token and api hash stay in this process."""
+        from msr.telegram_queue import config_for_worker
+        out = config_for_worker(self.config)
+        cookies_file = find_cookies_file(self.config)
+        if cookies_file:
+            out.setdefault('Paths', {})['cookies_file'] = cookies_file
+        return out
+
     def _spawn_worker(self, ch, config_dict):
         worker_args = (ch, config_dict, self.should_stop, self.status_queue,
                        self._get_wake_event(ch), self.runtime, self.log_queue)
@@ -2002,13 +2037,9 @@ class StreamRecorder:
 
         logging.info(f"Launching {len(self.channels)} recording processes")
 
-        config_dict = {section: dict(self.config.config.items(section))
-                       for section in self.config.config.sections()}
-
-        # Resolve cookies file path and pass it through config
-        cookies_file = find_cookies_file(self.config)
+        config_dict = self._worker_config()
+        cookies_file = config_dict.get('Paths', {}).get('cookies_file')
         if cookies_file:
-            config_dict.setdefault('Paths', {})['cookies_file'] = cookies_file
             logging.info(f"Using cookies file: {cookies_file}")
 
         for ch in self.channels:

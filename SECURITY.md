@@ -23,6 +23,8 @@ All of this stays on **your machine**. MSR does not phone home except a GitHub â
 | `config.ini` `[Fishtank]` email/password | Windows: password encrypted with DPAPI (`password_dpapi`, only your user can decrypt it); plain text elsewhere. Login is the reliable auth method; cookies only work for about 15 minutes after export. |
 | `channels.json` | Who you record. |
 | `twitch_token.json` | Twitch push sign-in. DPAPI-encrypted on Windows. |
+| `config.ini` `[Telegram]` `api_hash`, `bot_token` | Bot credentials. DPAPI-encrypted on Windows (`api_hash_dpapi`, `bot_token_dpapi`); plain text, user-only file permissions, elsewhere. The api id, group id, topic id and your user id are not secrets. |
+| `telegram_session.json` | The bot's MTProto session. Same protection as the Twitch token. Not a login to your personal account. |
 | `msr_control.json` | Control port and token, readable only by your user; removed when MSR quits. |
 | `stream_recorder.log` | Commands and URLs; JWTs and Cookie headers are redacted, but do not paste raw logs in public. |
 | Recordings / clips | Copyrighted and possibly adult content you chose to save. |
@@ -47,4 +49,5 @@ This is a same-user desktop app. Someone with your Windows account can already r
 
 1. A hostile livestream playlist must not pull `file://` paths into a recording.
 2. A malicious `channels.json` must not write outside the recordings folder.
-3. Sharing a log or screenshot should not leak JWTs or session cookies.
+3. Sharing a log or screenshot should not leak JWTs, session cookies, or a Telegram bot token.
+4. A Telegram upload goes only to the one group topic in config, from a bot login. MSR does not read group messages and does not log in as the user. The local file is deleted only when that option is on and every part was confirmed.

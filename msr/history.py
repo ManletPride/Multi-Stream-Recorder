@@ -28,11 +28,11 @@ from pathlib import Path
 KEEP = 20
 HISTORY_DIRNAME = "msr_history"
 _STAMP = "%Y%m%d-%H%M%S-%f"
-_SENSITIVE = re.compile(r"pass|secret|token|cookie|e-?mail|auth|key|session|login", re.IGNORECASE)
+_SENSITIVE = re.compile(r"pass|secret|token|cookie|e-?mail|auth|key|session|login|hash", re.IGNORECASE)
 MASK = "\u2022\u2022\u2022\u2022"
 # Values never copied into history: a restore takes them from the current file.
 KEPT_OUT = "<not kept in history>"
-_SECRET_KEY = re.compile(r"pass|secret|token|cookie", re.IGNORECASE)
+_SECRET_KEY = re.compile(r"pass|secret|token|cookie|hash", re.IGNORECASE)
 _INI_SECTION = re.compile(r"^\s*\[([^\]]+)\]\s*$")
 _INI_VALUE = re.compile(r"^(\s*([^=:#;\s][^=:]*?)\s*[=:][ \t]*)(.*)$")
 

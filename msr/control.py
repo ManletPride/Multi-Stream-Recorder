@@ -340,6 +340,12 @@ def validate_setting(section, key, value) -> str:
     if (section, key) in (("Paths", "streams_dir"), ("Recording", "filename_pattern"),
                           ("Advanced", "ffmpeg_path")) and not value:
         raise ControlError(f"{section}.{key} cannot be empty.", "invalid")
+    if section == "Telegram" and key not in ("enabled", "delete_after_upload"):
+        from msr.telegram_queue import SettingError, normalize_setting
+        try:
+            return normalize_setting(key, value)
+        except SettingError as exc:
+            raise ControlError(str(exc), "invalid") from None
     if "\n" in value or "\r" in value:
         raise ControlError("A setting cannot contain a line break.", "invalid")
     return value
@@ -347,6 +353,8 @@ def validate_setting(section, key, value) -> str:
 
 def setting_applies(section, key) -> str:
     if (section, key) in LIVE_SETTINGS or (section, key) in NOW_SETTINGS:
+        return "now"
+    if section == "Telegram":
         return "now"
     if section == "Control":
         return "restart"
@@ -555,6 +563,12 @@ class HeadlessApp(AppAdapter):
     def records(self):
         return self.roster.records()
 
+    def settings_changed(self, section, key) -> None:
+        if section == "Telegram":
+            uploads = getattr(self, "uploads", None)
+            if uploads is not None:
+                uploads.sync()
+
     def mutate(self, fn):
         def work():
             result = self.roster.mutate(fn)
@@ -762,6 +776,15 @@ def live_status(app) -> dict:
         "channels": rows,
         "update": app.update_info(),
     }
+    try:
+        uploads = getattr(app, "uploads", None)
+        if uploads is not None:
+            out["telegram"] = uploads.status()
+        else:
+            from msr.telegram_upload import disk_status
+            out["telegram"] = disk_status(app.config, app.data_dir)
+    except Exception:
+        logging.debug("telegram status", exc_info=True)
     tracker = app.tracker
     if tracker is not None:
         out["finished"] = tracker.recent_finished()
@@ -1539,6 +1562,34 @@ class Controller:
             out["note"] = ("Twitch was unreachable: the token was deleted here; remove MSR's access at "
                            "https://www.twitch.tv/settings/connections.")
         return out
+
+    # -------------------------------------------------- Telegram uploads (Options > Telegram)
+    def _uploads(self):
+        return getattr(self.app, "uploads", None)
+
+    def cmd_telegram_status(self, args):
+        """Upload queue: waiting / uploading / paused. No token, no paths."""
+        uploads = self._uploads()
+        if uploads is not None:
+            return uploads.status()
+        from msr.telegram_upload import disk_status
+        return disk_status(self.app.config, self.app.data_dir)
+
+    def cmd_telegram_test(self, args):
+        """Send one plain test message to the configured topic. Checks the bot, the group and the user id."""
+        uploads = self._uploads()
+        if uploads is not None:
+            result = uploads.test(timeout=float(args.get("timeout") or 90))
+        else:
+            from msr.telegram_upload import Uploader
+            probe = Uploader(self.app.config, self.app.data_dir)
+            try:
+                result = probe.test_inline()
+            finally:
+                probe.stop()
+        if not result.get("ok"):
+            raise ControlError(result.get("error") or "Telegram test failed.", "failed")
+        return {"sent": True}
 
     # -------------------------------------------------- logs
     def cmd_logs(self, args):

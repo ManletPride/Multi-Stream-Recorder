@@ -107,6 +107,8 @@ CATALOG = {
     "twitch status": ("read", ["twitch status", "twitch status --online"]),
     "twitch connect": ("write", ["twitch connect", "twitch connect --wait", "twitch connect --cancel"]),
     "twitch disconnect": ("write", ["twitch disconnect"]),
+    "telegram status": ("read", ["telegram status"]),
+    "telegram test": ("write", ["telegram test"]),
     "call": ("depends on the command", ["call ping"]),
 }
 # Window feature -> CLI commands (help --json "gui_features"; a test checks every name exists).
@@ -119,6 +121,8 @@ GUI_FEATURES = {
     "Options tab: settings (folders, clips, cleanup, timing, Fishtank login, ffmpeg)": ["config get", "config set",
                                                                                          "config reload"],
     "Options tab: Twitch connect / disconnect": ["twitch status", "twitch connect", "twitch disconnect"],
+    "Options tab: Telegram uploads (enable, credentials, test message)": ["telegram status", "telegram test",
+                                                                          "config get", "config set"],
     "Options tab: Sounds (checkboxes = config set Sounds.*, Test button)": ["config set", "sound-test"],
     "Health line and details": ["health", "config set"],
     "Library tab, PendingDeletion / Clean up (Add folder / Remove folder is config set Library.extra_dirs)":
@@ -318,6 +322,11 @@ def build_parser():
     t.add_argument("--for", dest="wait_for", type=float, default=600.0, help="seconds to wait (max 1800)")
     tsub.add_parser("disconnect", help="revoke at Twitch and delete the saved sign-in")
 
+    p = sub.add_parser("telegram", help="upload finished recordings to a Telegram topic")
+    g = p.add_subparsers(dest="action", required=True)
+    g.add_parser("status", help="queue: waiting, uploading, paused (no token, no paths)")
+    g.add_parser("test", help="send one test message to the configured topic")
+
     p = sub.add_parser("call", help="send any protocol command with JSON args")
     p.add_argument("cmd")
     p.add_argument("args", nargs="?", default="{}")
@@ -444,6 +453,8 @@ def to_request(a):
                 return "twitch_connect", {"cancel": True}
             return "twitch_connect", {"wait": True, "timeout": a.wait_for} if a.wait else {}
         return "twitch_disconnect", {}
+    if c == "telegram":
+        return ("telegram_status", {}) if a.action == "status" else ("telegram_test", {})
     if c == "call":
         return a.cmd, json.loads(a.args)
     raise SystemExit(f"unknown command {c}")
@@ -634,6 +645,12 @@ def human(cmd, reply):
         if res.get("connecting"):
             text += f"\nWaiting for approval: {res['verification_url']} code {res['user_code']}"
         return text + f"\ninstant alerts: {'on' if res.get('push_enabled') else 'off'}"
+    if cmd == "telegram_status":
+        line = res.get("line") or res.get("state") or ""
+        extra = f" ({res['pending']} waiting)" if res.get("pending") else ""
+        return f"Telegram: {line}{extra}"
+    if cmd == "telegram_test":
+        return "Test message sent to the configured topic."
     if cmd == "wait":
         return f"#{res['seq']} {res['at']} {res['event']} {res['channel']}" + (
             f" {res['path']}" if res.get("path") else "") + (f" {res['error']}" if res.get("error") else "")

@@ -2100,6 +2100,8 @@ def main_gui(config):
         except _control.ControlError as e:
             raise ValueError(str(e)) from None
         _reflect_setting(section, key)
+        if section == "Telegram":
+            _telegram_sync()
         logging.info(f"Setting {section}.{key} changed in Options")
         return value
 
@@ -2108,10 +2110,34 @@ def main_gui(config):
         if tw is not None:
             threading.Thread(target=tw.restart, daemon=True, name="twitch-push-restart").start()
 
+    _telegram_uploads = [None]
+
+    def _telegram_sync():
+        up = _telegram_uploads[0]
+        if up is not None:
+            try:
+                up.sync()
+            except Exception:
+                logging.debug("telegram sync", exc_info=True)
+
+    def _telegram_status():
+        up = _telegram_uploads[0]
+        if up is None:
+            return {"enabled": False, "line": "Off", "state": "off"}
+        return up.status()
+
+    def _telegram_test():
+        up = _telegram_uploads[0]
+        if up is None:
+            return {"ok": False, "error": "Uploader is not running."}
+        return up.test()
+
     options_panel = _options_panel.OptionsPanel(
         notebook, config, library_data_dir, _options_apply_setting,
         on_twitch_changed=_options_twitch_changed, tooltip=Tooltip, sound_test=sounds.test,
-        open_updates=lambda: _open_updates())
+        open_updates=lambda: _open_updates(),
+        on_telegram_changed=_telegram_sync, telegram_status=_telegram_status,
+        telegram_test=_telegram_test)
     notebook.add(options_panel.frame, text="  Options  ")
 
     def _options_tab_opened(_event=None):
@@ -3669,6 +3695,11 @@ def main_gui(config):
         """
         # 0. No more commands; msr_status.json says "not running"
         try:
+            if _telegram_uploads[0] is not None:
+                _telegram_uploads[0].stop()
+        except Exception:
+            pass
+        try:
             if _control_service[0] is not None:
                 _control_service[0].stop()
         except Exception:
@@ -3775,6 +3806,8 @@ def main_gui(config):
         value = _control.apply_setting(config, section, key, value,
                                        recording=bool(recorder and recorder.is_running))
         _reflect_setting(section, key)
+        if section == "Telegram":
+            _telegram_sync()
         return value
 
     def _control_twitch_changed():
@@ -3788,7 +3821,11 @@ def main_gui(config):
         _reload_channels_from_disk()
         return len(channels)
 
-    _control_service[0] = _control.Service.start_for(_control_exec.GuiBridge(config, _control_jobs, {
+    from msr.telegram_upload import Uploader
+    _telegram_uploads[0] = Uploader(config, library_data_dir, get_recorder=lambda: recorder)
+    _telegram_uploads[0].sync()
+
+    _control_bridge = _control_exec.GuiBridge(config, _control_jobs, {
         "get_recorder": lambda: recorder,
         "get_presence": lambda: presence_store,
         "channels": lambda: channels,
@@ -3804,7 +3841,9 @@ def main_gui(config):
         "health_check_now": health_ctl.check_now,
         "sound_test": sounds.test,
         "update_tag": lambda: _update_tag[0],
-    }))
+    })
+    _control_bridge.uploads = _telegram_uploads[0]
+    _control_service[0] = _control.Service.start_for(_control_bridge)
 
     # ── Apply theme and start refresh loops ──
     apply_theme()

@@ -87,6 +87,8 @@ def _coerce_specs():
         ("Sounds", "problems", "bool", False, None, None),
         ("Sounds", "clip_saved", "bool", False, None, None),
         ("Sounds", "quiet_while_locked", "bool", True, None, None),
+        ("Telegram", "enabled", "bool", False, None, None),
+        ("Telegram", "delete_after_upload", "bool", False, None, None),
         ("Advanced", "verbose", "bool", False, None, None),
         ("Advanced", "streamlink_debug", "bool", False, None, None),
         ("GUI", "dark_mode", "bool", True, None, None),
@@ -100,7 +102,13 @@ FISHTANK_PASSWORD_ENV = "MSR_FISHTANK_PASSWORD"
 
 # Credentials kept DPAPI-encrypted on Windows as ``<key>_dpapi`` with ``<key>`` left blank,
 # so older MSR versions just see no password. Elsewhere they stay plaintext.
-SECRET_KEYS = (("Fishtank", "password"),)
+SECRET_KEYS = (
+    ("Fishtank", "password"),
+    # api_hash (my.telegram.org) and the BotFather token. api id, group id,
+    # topic id and owner id are not secrets and stay in config.ini.
+    ("Telegram", "api_hash"),
+    ("Telegram", "bot_token"),
+)
 _noted = set()
 
 
@@ -248,6 +256,19 @@ class Config:
             'minimize_to_tray': 'true',
             'notifications': 'true',
             'window_state_file': 'window_state.json',
+        },
+        'Telegram': {
+            # Optional upload of a finished recording into one forum topic.
+            # Off until the user fills this in. api_hash and bot_token are
+            # DPAPI-encrypted on Windows (blank here, ``*_dpapi`` beside them).
+            'enabled': 'false',
+            'api_id': '',
+            'api_hash': '',
+            'bot_token': '',
+            'chat_id': '',       # supergroup id, starts with -100
+            'topic_id': '',      # forum topic (the last number in a t.me/c/… link)
+            'owner_id': '',      # the user's numeric id; uploads are refused if they are not in the group
+            'delete_after_upload': 'false',  # remove the local file only after every part is confirmed
         },
         'Fishtank': {
             # Email and password for fishtank.live login.

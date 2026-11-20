@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Optional Telegram upload of a finished recording into one forum topic (**Options > Telegram**, off by default). A background queue runs after the remux, retries on network errors and FloodWait, and resumes after a restart. The bot signs in with its token over MTProto (Telethon); MSR never logs in as the user. The hosted Bot API's 50 MB cap is not used. Parts stay under Telegram's 2,097,152,000-byte MTProto limit and are split with stream-copy, named `part n/m`, with a caption. **Delete the local file after every part is confirmed** is off unless you turn it on; a partial failure keeps the file. The api hash, bot token and session file are stored like the other credentials (DPAPI on Windows). `msr_ctl.py telegram status` / `telegram test` report the queue and send the test message. Without Telethon the section is greyed out and recording is unchanged.
+
 ### Fixed
 - CI (Linux): the clip-audio pause test read the process state immediately after SIGSTOP, before the kernel had stopped the process. It now polls until the state is stopped, and until it has left that state after resume, for up to 5 seconds.
 - Library: when the same recording is linked into both `processed` and `Processed`, both folders are remembered. Previously the folder that directory listing returned second was dropped, so the Recordings list could open only one of them. Which one depended on the order the disk returned the names.
