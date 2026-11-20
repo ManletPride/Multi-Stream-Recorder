@@ -165,6 +165,9 @@ def driver(self):
         mode["fail"] = True
         clock[0] += 30
         tick_now()
+        # The age is painted on the next preview tick. Under a busy runner that
+        # tick can land after the 0.5 s pause inside tick_now.
+        wait_for(lambda: tile_label() and "\u00b7" in str(tile_label().cget("text")), 3.0)
         tile, big = tile_label(), big_label()
         out["stale_text"] = tile.cget("text")
         out["stale_border"] = tile.master.cget("highlightbackground")
@@ -175,6 +178,7 @@ def driver(self):
         mode["fail"] = False
         clock[0] += 5
         tick_now()
+        wait_for(lambda: tile_label() and tile_label().cget("text") == "alice", 3.0)
         tile = tile_label()
         out["recovered_text"] = tile.cget("text") if tile else None
         out["recovered_border"] = tile.master.cget("highlightbackground") if tile else None
