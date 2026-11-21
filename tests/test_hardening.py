@@ -184,6 +184,17 @@ class HistorySecretTests(unittest.TestCase):
         self.assertIn("password = current-FAKE", text)
         self.assertNotIn(history.KEPT_OUT, text)
 
+    def test_restore_keeps_an_encrypted_copy_the_snapshot_never_had(self):
+        history.snapshot(self.ini)
+        write(self.ini, self.INI.replace(
+            "password = hunter2-FAKE", "password =\npassword_box = CIPHERTEXT"))
+        version = history.list_versions(self.ini)[0]
+        history.restore(self.ini, version)
+        text = read(self.ini)
+        self.assertIn("password_box = CIPHERTEXT", text)
+        self.assertNotIn("hunter2-FAKE", text)
+        self.assertNotIn(history.KEPT_OUT, text)
+
     def test_the_summary_does_not_report_the_kept_out_value(self):
         history.snapshot(self.ini)
         version = history.list_versions(self.ini)[0]

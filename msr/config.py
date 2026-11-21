@@ -100,10 +100,11 @@ def _coerce_specs():
 FISHTANK_PASSWORD_ENV = "MSR_FISHTANK_PASSWORD"
 
 
-# Credentials kept DPAPI-encrypted on Windows as ``<key>_dpapi`` with ``<key>`` left blank,
-# so older MSR versions just see no password. Fishtank stays plaintext off Windows
-# (that contract is tested). Telegram secrets do not: off Windows they are stored
-# as ``<key>_box`` (msr/filecrypt.py), never in the clear.
+# Credentials are not stored in the clear. Windows: ``<key>_dpapi`` (DPAPI), and
+# ``<key>`` left blank so an older MSR just sees no password. Elsewhere:
+# ``<key>_box`` (msr/filecrypt.py). The key file is outside the data folder, so a
+# copied config.ini does not decrypt. A value that cannot be encrypted is left
+# as it was; it is never deleted.
 SECRET_KEYS = (
     ("Fishtank", "password"),
     # api_hash (my.telegram.org) and the BotFather token. api id, group id,
@@ -111,7 +112,6 @@ SECRET_KEYS = (
     ("Telegram", "api_hash"),
     ("Telegram", "bot_token"),
 )
-TELEGRAM_BOX_KEYS = (("Telegram", "api_hash"), ("Telegram", "bot_token"))
 _noted = set()
 
 
@@ -129,8 +129,9 @@ def _decrypt_box(blob: str):
 def read_secret(config, section, key):
     """Plaintext value if set, else the decrypted copy ('' if missing or unreadable).
 
-    Windows stores ``<key>_dpapi``. Other systems store Telegram secrets as
-    ``<key>_box``. A value saved on the other kind of machine does not decrypt.
+    Windows stores ``<key>_dpapi``. Other systems store ``<key>_box``. A value
+    saved on the other kind of machine does not decrypt. A failure leaves the
+    stored copy in place and asks for the value again.
     """
     plain = str(config.get(section, key, fallback='') or '')
     if plain.strip():
@@ -285,7 +286,8 @@ class Config:
         'Telegram': {
             # Optional upload of a finished recording into one forum topic.
             # Off until the user fills this in. api_hash and bot_token are not
-            # stored in the clear: ``*_dpapi`` on Windows, ``*_box`` elsewhere.
+            # stored in the clear: ``*_dpapi`` on Windows, ``*_box`` elsewhere
+            # (the same user key as the Fishtank password).
             'enabled': 'false',
             'api_id': '',
             'api_hash': '',
@@ -304,6 +306,7 @@ class Config:
             # Leave blank to fall back to cookie-jar auth (requires fresh cookies).
             # The password can instead be set in the MSR_FISHTANK_PASSWORD environment
             # variable, which wins over this file and keeps it out of config.ini.
+            # On disk it is ``password_dpapi`` (Windows) or ``password_box`` (elsewhere).
             'email': '',
             'password': '',
         },
@@ -385,17 +388,13 @@ class Config:
         return [(s, k) for s, k in SECRET_KEYS
                 if str(self.get(s, k, fallback='') or '').strip()]
 
-    def _plain_telegram(self):
-        return [(s, k) for s, k in TELEGRAM_BOX_KEYS
-                if str(self.get(s, k, fallback='') or '').strip()]
-
     def _protect_secrets(self):
         """Move plaintext credentials out of the file that is about to be written.
 
-        Windows: DPAPI blob in ``<key>_dpapi`` for every secret. Elsewhere: Telegram
-        api hash and bot token become ``<key>_box`` (the key stays in the user config
-        directory). A value that cannot be encrypted is dropped instead of written
-        in the clear. The Fishtank password is left as it was off Windows.
+        Windows: DPAPI blob in ``<key>_dpapi`` for every secret. Elsewhere: every
+        secret becomes ``<key>_box`` (the key stays in the user config directory).
+        A value that cannot be encrypted is left in place. It is not deleted and
+        not replaced with a blank.
         """
         if dpapi.available():
             for section, key in self._plain_secrets():
@@ -407,14 +406,15 @@ class Config:
                 self.config.set(section, key + '_dpapi', enc)
                 self.config.set(section, key, '')
             return
-        for section, key in self._plain_telegram():
+        from msr import filecrypt
+        for section, key in self._plain_secrets():
             try:
-                from msr import filecrypt
                 enc = filecrypt.encrypt_text(self.get(section, key))
             except Exception:
-                logging.error(f"Telegram: {section}.{key} was not saved "
-                              "(could not encrypt it). It was not written in the clear.")
-                self.config.set(section, key, '')
+                logging.warning(
+                    f"{section}.{key} could not be encrypted and was left unchanged. "
+                    "The secret key file is missing or not usable; enter it again in "
+                    "Options once that file is fixed.")
                 continue
             self.config.set(section, key + '_box', enc)
             self.config.set(section, key, '')
@@ -526,10 +526,8 @@ class Config:
                             value = default_streams_dir()
                         self.config.set(section, key, value)
                         updated = True
-            if dpapi.available() and self._plain_secrets():
-                updated = True  # migrate plaintext credentials
-            elif self._plain_telegram():
-                updated = True  # encrypt Telegram secrets that were still in the clear
+            if self._plain_secrets():
+                updated = True  # encrypt plaintext credentials (DPAPI or the user key)
             if updated:
                 self._write_startup()
         else:

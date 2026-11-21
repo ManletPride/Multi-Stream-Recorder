@@ -879,9 +879,8 @@ def load_session(data_dir: str, fp: str) -> str | None:
         try:
             save_session(data_dir, text, fp)
         except Exception:
-            logging.warning("Telegram: could not encrypt the session file; it was removed")
-            clear_session(data_dir)
-            return None
+            # Keep the file. Deleting it would drop a session that still works.
+            logging.warning("Telegram: could not encrypt the session file; it was left unchanged")
     return text
 
 

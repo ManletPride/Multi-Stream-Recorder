@@ -20,10 +20,10 @@ All of this stays on **your machine**. MSR does not phone home except a GitHub â
 | File | Sensitivity |
 | --- | --- |
 | `cookies.txt` | **Your site logins.** Treat it like a password. |
-| `config.ini` `[Fishtank]` email/password | Windows: password encrypted with DPAPI (`password_dpapi`, only your user can decrypt it); plain text elsewhere. Login is the reliable auth method; cookies only work for about 15 minutes after export. |
+| `config.ini` `[Fishtank]` email/password | Password encrypted at rest. Windows: DPAPI (`password_dpapi`). Linux and other systems: `password_box`, unlocked by `~/.config/multi-stream-recorder/secret.key` (mode 0600, outside the data folder). The email is not a secret and stays in the file. Login is the reliable auth method; cookies only work for about 15 minutes after export. |
 | `channels.json` | Who you record. |
-| `twitch_token.json` | Twitch push sign-in. DPAPI-encrypted on Windows. |
-| `config.ini` `[Telegram]` `api_hash`, `bot_token` | Bot credentials. Not stored in the clear. Windows: DPAPI (`api_hash_dpapi`, `bot_token_dpapi`). Linux and other systems: `api_hash_box` / `bot_token_box`, unlocked by `~/.config/multi-stream-recorder/secret.key` (mode 0600, outside the data folder). The api id, group id, topic id and your user id are not secrets. |
+| `twitch_token.json` | Twitch push sign-in. Windows: DPAPI. Elsewhere: the same user key as the other secrets (`box`). Mode 0600 on Linux. |
+| `config.ini` `[Telegram]` `api_hash`, `bot_token` | Bot credentials. Not stored in the clear. Windows: DPAPI (`api_hash_dpapi`, `bot_token_dpapi`). Linux and other systems: `api_hash_box` / `bot_token_box`, unlocked by the same `secret.key` as the Fishtank password (mode 0600, outside the data folder). The api id, group id, topic id and your user id are not secrets. |
 | `telegram_session.json` | The bot's MTProto session, encrypted the same way (DPAPI or the user key). Mode 0600. Not a login to your personal account. |
 | `msr_control.json` | Control port and token, readable only by your user; removed when MSR quits. |
 | `stream_recorder.log` | Commands and URLs; JWTs and Cookie headers are redacted, but do not paste raw logs in public. |
