@@ -7,8 +7,11 @@ Incoming updates are not collected.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import logging
+import threading
 import urllib.parse
 import urllib.request
 
@@ -79,32 +82,76 @@ def _reply_ids(message):
 
 
 class BotSession:
-    """One Telethon client on the upload thread. Bot token only; updates off."""
+    """One Telethon client. Bot token only; updates off.
+
+    Telethon's methods are coroutines unless ``telethon.sync`` has patched
+    them. MSR does not import that module (it rewrites the library for every
+    caller). This session owns an asyncio loop on the thread that uses it and
+    runs each call to completion. The upload thread, the test thread and
+    ``msr_ctl`` each call in on their own thread; a thread change starts a
+    fresh client, because Telethon will not follow a new loop.
+    """
 
     def __init__(self):
         self._client = None
         self._fp = None
+        self._loop = None
+        self._owner = None
         self.username = ""
+
+    def _prepare_loop(self) -> asyncio.AbstractEventLoop:
+        ident = threading.get_ident()
+        if self._loop is not None and not self._loop.is_closed() and self._owner == ident:
+            asyncio.set_event_loop(self._loop)
+            return self._loop
+        if self._owner is not None and self._owner != ident:
+            # The previous loop belongs to another thread. Leave it; drop the client.
+            logging.debug("Telegram: the calling thread changed; signing in again on this thread")
+            self._client = None
+            self._fp = None
+        elif self._loop is not None and not self._loop.is_closed():
+            self._loop.close()
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._owner = ident
+        return self._loop
+
+    def _run(self, value):
+        """Execute a Telethon result. A coroutine is run on this thread's loop; anything else is returned."""
+        if not inspect.isawaitable(value):
+            return value
+        loop = self._prepare_loop()
+        return loop.run_until_complete(value)
 
     def close(self) -> None:
         client = self._client
         self._client = None
         self._fp = None
-        if client is None:
-            return
-        try:
-            client.disconnect()
-        except Exception:
-            logging.debug("Telegram: disconnect", exc_info=True)
+        own_loop = (self._loop is not None and not self._loop.is_closed()
+                    and self._owner == threading.get_ident())
+        if client is not None and own_loop:
+            try:
+                self._run(client.disconnect())
+            except Exception:
+                logging.debug("Telegram: disconnect", exc_info=True)
+        if own_loop:
+            try:
+                self._loop.close()
+            except Exception:
+                pass
+            self._loop = None
 
     def _ensure(self, settings, session: str | None):
         if not installed():
             raise NotInstalled("Telethon is not installed. pip install Telethon, then restart MSR.")
+        self._prepare_loop()
         fp = settings.credential_fp()
         if self._client is not None and self._fp == fp:
             return self._client
         self.close()
+        self._prepare_loop()
         logging.getLogger("telethon").setLevel(logging.WARNING)
+        # Do not import telethon.sync. It patches every client in the process.
         from telethon import TelegramClient
         from telethon.sessions import StringSession
         client = TelegramClient(
@@ -117,20 +164,20 @@ class BotSession:
         # default Markdown parser would treat those as formatting.
         client.parse_mode = None
         try:
-            client.start(bot_token=settings.bot_token)
-        except Exception as exc:
+            self._run(client.start(bot_token=settings.bot_token))
+            me = self._run(client.get_me())
+        except Exception:
             try:
-                client.disconnect()
+                self._run(client.disconnect())
             except Exception:
                 pass
             raise
-        me = client.get_me()
         if not getattr(me, "bot", False):
             try:
-                client.disconnect()
+                self._run(client.disconnect())
             except Exception:
                 pass
-            raise AuthRejected("Telegram signed in as a user account. MSR only uses a bot token.")
+            raise AuthRejected("Telegram signed in as a user account. MSR only logs in with a bot token.")
         self._client = client
         self._fp = fp
         return client
@@ -138,15 +185,16 @@ class BotSession:
     def connect(self, settings, session: str | None) -> str:
         """Sign in if needed. Returns the session string to store. Never a phone login."""
         client = self._ensure(settings, session)
-        me = client.get_me()
+        me = self._run(client.get_me())
         self.username = getattr(me, "username", "") or ""
         return client.session.save()
 
     def _entity(self, client, settings):
         from telethon import utils
         try:
-            entity = client.get_entity(settings.chat_id)
+            entity = self._run(client.get_entity(settings.chat_id))
         except Exception as exc:
+            logging.warning("Telegram: could not open the group (%s)", type(exc).__name__)
             raise DestinationRejected(
                 "The group id could not be opened. Add the bot to the group as an admin. "
                 + type(exc).__name__) from None
@@ -162,16 +210,18 @@ class BotSession:
         if landed_in_topic(peer, reply_msg, reply_top, settings.chat_id, settings.topic_id):
             return int(message.id)
         try:
-            client.delete_messages(settings.chat_id, [message.id])
-        except Exception:
-            logging.warning("Telegram: a message landed outside the configured topic and could not be deleted")
+            self._run(client.delete_messages(settings.chat_id, [message.id]))
+        except Exception as exc:
+            logging.warning("Telegram: a message landed outside the configured topic and could not be deleted (%s)",
+                            type(exc).__name__)
         raise DestinationRejected(
             "The message did not land in the configured topic. The local file was kept.")
 
     def send_text(self, settings, session: str | None, text: str) -> dict:
         client = self._ensure(settings, session)
         entity = self._entity(client, settings)
-        message = client.send_message(entity, text, reply_to=int(settings.topic_id), parse_mode=None)
+        message = self._run(client.send_message(
+            entity, text, reply_to=int(settings.topic_id), parse_mode=None))
         return {"message_id": self._check_landed(message, settings, client),
                 "session": client.session.save()}
 
@@ -185,7 +235,7 @@ class BotSession:
             except Exception:
                 pass
 
-        message = client.send_file(
+        message = self._run(client.send_file(
             entity,
             path,
             caption=caption,
@@ -194,6 +244,6 @@ class BotSession:
             allow_cache=False,
             parse_mode=None,
             progress_callback=_progress,
-        )
+        ))
         return {"message_id": self._check_landed(message, settings, client),
                 "session": client.session.save()}

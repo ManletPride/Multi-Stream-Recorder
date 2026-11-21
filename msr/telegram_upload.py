@@ -619,13 +619,12 @@ class Uploader:
             log.warning("Telegram: waiting %ss before the next upload (%s)", err.seconds, job.get("name"))
             return
         if isinstance(err, AuthRejected):
-            text = ("The bot token was rejected. Check it in Options. Uploads are paused; "
-                    "recordings stay on disk.")
+            text = scrub(str(err), *settings.secrets())
             self._blocked = {"kind": "auth", "fp": settings.credential_fp(), "until": 0, "message": text}
             clear_session(self.data_dir)
             job["error"] = text
             self._set("paused", text, text)
-            log.error("Telegram: %s", text)
+            log.error("Telegram: sign-in failed (%s)", type(exc).__name__)
             return
         if isinstance(err, (DestinationRejected, NotInstalled)):
             text = message or "Telegram refused the group or topic. The recording stays on disk."
@@ -725,16 +724,15 @@ class Uploader:
                 self._busy = False
         except Exception as exc:
             err = classify_failure(exc)
+            settings = read_settings(self.config)
+            message = scrub(str(err), *settings.secrets())
             if isinstance(err, AuthRejected):
-                text = "The bot token was rejected. Check it in Options."
-                self._blocked = {"kind": "auth", "fp": read_settings(self.config).credential_fp(),
-                                 "until": 0, "message": text}
+                self._blocked = {"kind": "auth", "fp": settings.credential_fp(),
+                                 "until": 0, "message": message}
                 clear_session(self.data_dir)
-                message = text
-            else:
-                message = scrub(str(err), *read_settings(self.config).secrets())
             self._set("paused", message, message)
-            log.warning("Telegram: test message failed: %s", message)
+            # Class name only. The exception text can quote the token or the api hash.
+            log.warning("Telegram: test message failed (%s)", type(exc).__name__)
             box.put({"ok": False, "error": message})
             return
         self._blocked = None

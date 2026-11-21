@@ -75,11 +75,15 @@ class NotInstalled(TelegramError):
     kind = "missing"
 
 
-_AUTH_NAMES = (
-    "AccessTokenInvalid", "AccessTokenExpired", "AuthKey", "ApiIdInvalid",
-    "SessionRevoked", "SessionExpired", "UserDeactivated", "TokenInvalid",
-    "Unauthorized", "BotToken",
+# Matched on the exception class name only. The message text can quote a secret, so it is not used.
+_API_ID_NAMES = ("ApiIdInvalid", "ConnectionApiIdInvalid")
+_TOKEN_NAMES = (
+    "AccessTokenInvalid", "AccessTokenExpired", "AuthKey", "SessionRevoked",
+    "SessionExpired", "UserDeactivated", "TokenInvalid", "Unauthorized", "BotToken",
 )
+_TOKEN_MESSAGE = ("The bot token was rejected. Check it in Options. "
+                  "Uploads are paused; recordings stay on disk.")
+_API_ID_MESSAGE = "The Telegram api id or api hash was rejected. Check them in Options."
 _CONFIG_NAMES = (
     "ChatWriteForbidden", "ChannelPrivate", "PeerIdInvalid", "ChatAdminRequired",
     "TopicDeleted", "MessageIdInvalid", "ChannelInvalid", "UserBannedInChannel",
@@ -88,18 +92,25 @@ _CONFIG_NAMES = (
 
 
 def classify_failure(exc: BaseException) -> TelegramError:
-    """Map a Telethon (or fake) exception onto one queue decision."""
+    """Map a Telethon (or fake) exception onto one queue decision.
+
+    The user-facing text for a sign-in failure is chosen from the exception
+    class name. The original message is not copied: Telethon sometimes quotes
+    the token or the api hash.
+    """
     if isinstance(exc, TelegramError):
         return exc
     name = type(exc).__name__
     if "Flood" in name or "SlowMode" in name:
         seconds = getattr(exc, "seconds", None)
         return Flood(30 if seconds is None else seconds, str(exc))
-    if any(bit in name for bit in _AUTH_NAMES):
-        return AuthRejected(str(exc)[:300])
+    if any(bit in name for bit in _API_ID_NAMES):
+        return AuthRejected(_API_ID_MESSAGE)
+    if any(bit in name for bit in _TOKEN_NAMES):
+        return AuthRejected(_TOKEN_MESSAGE)
     if any(bit in name for bit in _CONFIG_NAMES):
-        return DestinationRejected(str(exc)[:300])
-    return TelegramError(f"{name}: {exc}"[:300])
+        return DestinationRejected(scrub(f"{name}: {exc}"))
+    return TelegramError(scrub(f"{name}: {exc}"))
 
 
 def backoff_seconds(attempts: int) -> int:

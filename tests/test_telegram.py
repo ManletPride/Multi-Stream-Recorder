@@ -490,6 +490,35 @@ class UploadTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(path))
         self.assertNotIn(TOKEN, json.dumps(up.status()))
 
+    def test_an_api_hash_error_is_not_reported_as_a_bad_token(self):
+        class ApiIdInvalidError(Exception):
+            pass
+
+        path = self.recording(b"x" * 2048)
+        self.transport.fail.append(ApiIdInvalidError("api_hash=" + ("a" * 32)))
+        up = self.uploader()
+        note_ready(self.tmp.name, True, {"path": path, "channel": "alice", "platform": "kick"})
+        with self.assertLogs("msr.telegram_upload", level="ERROR") as logs:
+            drain(up)
+        text = json.dumps(up.status())
+        self.assertIn("api id or api hash", text)
+        self.assertNotIn("bot token was rejected", text)
+        self.assertNotIn("a" * 32, text)
+        self.assertTrue(any("ApiIdInvalidError" in line for line in logs.output))
+        self.assertFalse(any("a" * 32 in line for line in logs.output))
+        self.assertTrue(os.path.isfile(path))
+
+    def test_a_user_account_login_is_not_reported_as_a_bad_token(self):
+        path = self.recording(b"x" * 2048)
+        self.transport.fail.append(AuthRejected(
+            "Telegram signed in as a user account. MSR only logs in with a bot token."))
+        up = self.uploader()
+        note_ready(self.tmp.name, True, {"path": path, "channel": "alice", "platform": "kick"})
+        drain(up)
+        text = up.status()["line"]
+        self.assertIn("user account", text)
+        self.assertNotIn("bot token was rejected", text)
+
     def test_changing_the_group_after_a_part_stops_the_upload(self):
         path = self.recording(b"x" * 5000)
         cfg = Cfg()
