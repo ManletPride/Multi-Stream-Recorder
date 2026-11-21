@@ -145,10 +145,19 @@ class DeleteChannelTests(ManageCase):
         win = self.make(manage_ctx=self.ctx(), activate=False)
         win.mgr.delete_channels([lib.ChannelStat("kick", "alice")])
         self.assertIn("not been scanned", self.infos[-1])
-        win.activate()
-        win.mgr.delete_channels([lib.ChannelStat("kick", "alice")])  # scan still running
+
+        class _Alive:
+            def is_alive(self):
+                return True
+
+            def cancel(self):
+                return None
+
+        # A real scan can finish before the next line on a fast runner, so the
+        # "still running" refusal is checked against a job that is still alive.
+        win.job = _Alive()
+        win.mgr.delete_channels([lib.ChannelStat("kick", "alice")])
         self.assertIn("still running", self.infos[-1])
-        self.pump(lambda: not win.busy)
 
     def test_refuses_when_the_log_cannot_be_written(self):
         win = self.managed(log_path=str(self.data))  # a folder: cannot be a log file
