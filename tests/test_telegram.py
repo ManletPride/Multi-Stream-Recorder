@@ -24,6 +24,9 @@ from msr.telegram_queue import (
     config_for_worker,
     deletion_allowed,
     format_status,
+    progress_log_due,
+    upload_progress_line,
+    upload_start_line,
     guard_recording,
     landed_in_topic,
     load_session,
@@ -179,6 +182,22 @@ class ChannelChoiceTests(unittest.TestCase):
             self.assertEqual(record, {"name": "bob", "enabled": True})
             with self.assertRaises(SettingError):
                 apply_channel_telegram(record, topic="nope")
+
+    def test_progress_logs_are_throttled_and_the_status_line_is_short(self):
+        self.assertFalse(progress_log_due(4, 1.0, 0, 0.0))
+        self.assertTrue(progress_log_due(10, 1.0, 0, 0.0))
+        self.assertTrue(progress_log_due(4, 11.0, 0, 0.0))
+        self.assertFalse(progress_log_due(12, 12.0, 10, 11.0))
+        self.assertFalse(progress_log_due(10, 30.0, 10, 0.0))
+        start = upload_start_line("show.mp4", 1, 1, 20 * 1024 * 1024, 77)
+        self.assertIn("part 1/1", start)
+        self.assertIn("20.0 MB", start)
+        self.assertIn("topic 77", start)
+        line = upload_progress_line("show.mp4", 9 * 1024 * 1024, 20 * 1024 * 1024, 10)
+        self.assertIn("45%", line)
+        self.assertIn("9.0 MB/20.0 MB", line)
+        self.assertIn("0.9 MB/s", line)
+        self.assertIn("ETA", line)
 
     def test_status_line_names_the_queue(self):
         text = format_status({"line": "Uploading a.mp4, 40%, 11 waiting", "pending": 12,
@@ -678,6 +697,36 @@ class UploadTests(unittest.TestCase):
         self.assertEqual([row["path"] for row in self.transport.sent], paths)
         self.assertEqual(self.transport.max_inflight, 1)
         self.assertEqual(restarted.status()["pending"], 0)
+
+    def test_an_upload_logs_when_it_starts_and_shows_percent_in_the_status(self):
+        path = self.recording(b"x" * (5 * 1024 * 1024))
+        note_ready(self.tmp.name, True, {"path": path, "channel": "alice", "platform": "kick"})
+        clock = {"t": 1000.0}
+        seen = []
+        up = self.uploader(limit=10_000_000)
+
+        def send(settings, session, file_path, caption, progress):
+            progress(1 * 1024 * 1024, 5 * 1024 * 1024)  # 20%
+            seen.append(up.status()["line"])
+            clock["t"] = 1001.0
+            progress(int(1.2 * 1024 * 1024), 5 * 1024 * 1024)  # 24%, inside 10 s and under 10 points
+            clock["t"] = 1012.0
+            progress(int(1.4 * 1024 * 1024), 5 * 1024 * 1024)  # 28%, 11 s later
+            self.transport.sent.append({"path": os.path.basename(file_path), "caption": caption,
+                                        "chat": settings.chat_id, "topic": settings.topic_id})
+            return {"message_id": 1, "session": self.transport.session}
+
+        self.transport.send_file = send
+        with mock.patch("msr.telegram_upload.time.monotonic", lambda: clock["t"]), \
+                self.assertLogs("msr.telegram_upload", level="INFO") as logs:
+            drain(up)
+        text = "\n".join(logs.output)
+        self.assertIn("uploading alice.mp4 part 1/1", text)
+        self.assertIn("to topic 55", text)
+        self.assertIn("5.0 MB", text)
+        self.assertEqual(seen, ["Uploading alice.mp4 20%"])
+        self.assertIn("queue", format_status({"line": seen[0], "pending": 2, "current": {"name": "alice.mp4"}}))
+        self.assertEqual(text.count("MB/s"), 2)
 
     def test_a_channel_topic_overrides_the_global_one(self):
         path = self.recording(b"x" * 2048)

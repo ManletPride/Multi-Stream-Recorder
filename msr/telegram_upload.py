@@ -34,6 +34,9 @@ from msr.telegram_queue import (
     guard_part,
     guard_recording,
     ordered_inbox,
+    progress_log_due,
+    upload_progress_line,
+    upload_start_line,
     load_session,
     plan_spans,
     read_settings,
@@ -117,6 +120,9 @@ class Uploader:
         self._error = ""
         self._part = None
         self._percent = 0
+        self._prog_started = 0.0
+        self._prog_last_pct = 0
+        self._prog_last_at = 0.0
         self._blocked = None
         self._member_fp = ""
         self._member_until = 0.0
@@ -436,25 +442,14 @@ class Uploader:
             return {"kind": "upload", "job_id": job["id"], "part": idx}
         return {"kind": "split", "job_id": job["id"], "part": idx}
 
-    def _behind(self) -> int:
-        """Recordings still queued after the one being sent."""
-        waiting = 0
-        for job in self.store.jobs:
-            if job.get("state") in ("pending", "uploading"):
-                waiting += 1
-        return max(0, waiting - 1)
-
     def _progress_line(self) -> str:
+        """Short status text. The queue count is added by ``format_status``."""
         cur = self._part or {}
         name = cur.get("name") or "recording"
+        percent = int(cur.get("percent") or 0)
         if int(cur.get("parts") or 1) > 1:
-            line = f"Uploading {name}, part {cur.get('part')}/{cur.get('parts')}, {cur.get('percent') or 0}%"
-        else:
-            line = f"Uploading {name}, {cur.get('percent') or 0}%"
-        behind = self._behind()
-        if behind:
-            line += f", {behind} waiting"
-        return line
+            return f"Uploading {name} part {cur.get('part')}/{cur.get('parts')} {percent}%"
+        return f"Uploading {name} {percent}%"
 
     def _perform(self, action) -> str:
         kind = action.get("kind")
@@ -583,9 +578,22 @@ class Uploader:
             settings.delete_local)
         caption = build_caption(job.get("channel") or "", job.get("platform") or "",
                                 job.get("title") or "", job.get("recorded_at") or "", part["n"], part["m"])
-        self._part = {"name": job.get("name") or "", "part": part["n"], "parts": part["m"], "percent": 0}
+        try:
+            size = int(part.get("size") or 0) or os.path.getsize(part["path"])
+        except OSError:
+            size = int(part.get("size") or 0)
+        name = job.get("name") or "recording"
+        now = time.monotonic()
+        self._prog_started = now
+        self._prog_last_pct = 0
+        self._prog_last_at = now
+        self._part = {"name": name, "part": part["n"], "parts": part["m"], "percent": 0}
         with self._lock:
             self._set("uploading", self._progress_line())
+        # The upload thread logs through the root logger. The GUI's handler
+        # queues that line; this callback never touches Tk.
+        log.info("Telegram: %s", upload_start_line(
+            name, part["n"], part["m"], size, job["dest"]["topic_id"]))
         try:
             self._ensure_member(send)
             session = load_session(self.data_dir, send.credential_fp())
@@ -612,12 +620,29 @@ class Uploader:
         log.info("Telegram: uploaded %s part %s/%s", job.get("name"), part["n"], part["m"])
 
     def _on_progress(self, sent: int, total: int) -> None:
+        """Telethon calls this on the upload thread, often many times a second.
+
+        The status line updates every time (the window reads it once a second).
+        The log line is throttled. ``log.info`` is how it reaches the GUI log
+        queue; the handler is thread-safe and the Tk side drains that queue.
+        """
+        sent = int(sent or 0)
+        total = int(total or 0)
         percent = int(100 * sent / total) if total else 0
+        now = time.monotonic()
         with self._lock:
             if self._part is not None:
                 self._part["percent"] = percent
                 self._percent = percent
                 self._line = self._progress_line()
+            name = (self._part or {}).get("name") or "recording"
+        if percent >= 100 or not progress_log_due(
+                percent, now, self._prog_last_pct, self._prog_last_at):
+            return
+        self._prog_last_pct = percent
+        self._prog_last_at = now
+        log.info("Telegram: %s", upload_progress_line(
+            name, sent, total, max(0.001, now - self._prog_started)))
 
     def _ensure_member(self, settings: Settings) -> None:
         fp = settings.credential_fp() + settings.dest_fp()
