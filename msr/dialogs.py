@@ -176,7 +176,9 @@ def center_over(win: tk.Toplevel, parent: tk.Misc | None) -> None:
         rect = (0, 0, win.winfo_screenwidth(), win.winfo_screenheight())
     area = work_area(win, rect[0] + rect[2] // 2, rect[1] + rect[3] // 2)
     x, y = centered_position(rect, size, area)
-    wanted = f"+{x}+{y}"
+    # Width and height, not only the place. A position-only geometry leaves the
+    # size to the compositor, and Hyprland opens that as a large empty window.
+    wanted = format_geometry(size[0], size[1], x, y)
     if stored:
         wanted = format_geometry(stored[0], stored[1], *( (stored[2], stored[3]) if stored[2] is not None else (x, y) ))
     win.geometry(wanted)
