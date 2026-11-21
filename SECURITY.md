@@ -19,17 +19,23 @@ All of this stays on **your machine**. MSR does not phone home except a GitHub â
 
 | File | Sensitivity |
 | --- | --- |
-| `cookies.txt` | **Your site logins.** Treat it like a password. |
+| `cookies.txt` | **Your site logins.** Treat it like a password. Left as a Netscape jar on purpose: yt-dlp and streamlink read it themselves, and MSR never rewrites it. |
 | `config.ini` `[Fishtank]` email/password | Password encrypted at rest. Windows: DPAPI (`password_dpapi`). Linux and other systems: `password_box`, unlocked by `~/.config/multi-stream-recorder/secret.key` (mode 0600, outside the data folder). The email is not a secret and stays in the file. Login is the reliable auth method; cookies only work for about 15 minutes after export. |
 | `channels.json` | Who you record. |
 | `twitch_token.json` | Twitch push sign-in. Windows: DPAPI. Elsewhere: the same user key as the other secrets (`box`). Mode 0600 on Linux. |
 | `config.ini` `[Telegram]` `api_hash`, `bot_token` | Bot credentials. Not stored in the clear. Windows: DPAPI (`api_hash_dpapi`, `bot_token_dpapi`). Linux and other systems: `api_hash_box` / `bot_token_box`, unlocked by the same `secret.key` as the Fishtank password (mode 0600, outside the data folder). The api id, group id, topic id and your user id are not secrets. |
 | `telegram_session.json` | The bot's MTProto session, encrypted the same way (DPAPI or the user key). Mode 0600. Not a login to your personal account. |
-| `msr_control.json` | Control port and token, readable only by your user; removed when MSR quits. |
+| `msr_control.json` | Control port and token, readable only by your user; removed when MSR quits. Not encrypted: the client has to read it as JSON, and it does not outlive the process. |
 | `stream_recorder.log` | Commands and URLs; JWTs and Cookie headers are redacted, but do not paste raw logs in public. |
 | Recordings / clips | Copyrighted and possibly adult content you chose to save. |
 
 `.gitignore` excludes those files. Never `git add -f` them.
+
+On Linux and other non-Windows systems an existing plain Fishtank password or Twitch token is encrypted the next time MSR starts. If the key file is missing or the wrong length, a value that is still plain is left as it is, and a ciphertext MSR cannot open stays in the file and asks you to enter it again. MSR does not delete the saved value and does not crash.
+
+The user key, when it is written, is 32 random bytes in binary mode. A newline or Ctrl+Z in those bytes used to be rewritten on Windows, so the file was no longer a valid key. On Windows the key file is not created with mode 0600, because Python 3.14 turns that mode into an access list a later open cannot read. Windows still stores the secrets with DPAPI; the key file is the Linux (and other non-Windows) store.
+
+Left unencrypted on purpose: `cookies.txt`, the Fishtank email, the Twitch public client id, `MSR_FISHTANK_PASSWORD` (it is only in the environment), and the `msr_control.json` token.
 
 ## What MSR will and will not do
 
@@ -50,4 +56,4 @@ This is a same-user desktop app. Someone with your Windows account can already r
 1. A hostile livestream playlist must not pull `file://` paths into a recording.
 2. A malicious `channels.json` must not write outside the recordings folder.
 3. Sharing a log or screenshot should not leak JWTs, session cookies, or a Telegram bot token.
-4. A Telegram upload goes only to the one group topic in config, from a bot login. MSR does not read group messages and does not log in as the user. The local file is deleted only when that option is on and every part was confirmed.
+4. A Telegram upload goes only to the configured group, into the global topic or that channel's topic, from a bot login. MSR does not read group messages and does not log in as the user. The local file is deleted only when that option is on and every part was confirmed.

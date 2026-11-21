@@ -45,7 +45,7 @@ This README describes **v3.1.5**. Full history: [CHANGELOG.md](CHANGELOG.md).
 - **Library > Recordings**: each channel's recordings with title and length, and the clips cut from each one.
 - **First-time setup window** shows each step and a live log.
 - **More agent control**: Twitch sign-in, every Options setting, sound tests, Health check, Recordings browsing and a live event stream (`subscribe`). See [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md).
-- **Safer secrets**: the Twitch token and Fishtank password are encrypted at rest (Windows DPAPI, or a user-only key on Linux). The control file is readable only by you.
+- **Safer secrets**: the Twitch sign-in, the Fishtank password, and the Telegram api hash, bot token and session are encrypted at rest (Windows DPAPI, or a user-only key on Linux). `cookies.txt`, the Fishtank email, and the Twitch app client id stay as you saved them. The control file is readable only by you and is removed when MSR quits.
 - **Options**: Manage on Twitch button, and a warning when `cookies.txt` sits in a synced folder.
 
 ## What's new in 3.0
@@ -266,7 +266,7 @@ Or leave the password out and set the `MSR_FISHTANK_PASSWORD` environment variab
 | `Advanced/verbose` | false | Very noisy; only for diagnosing a failure |
 | `Updates/daily_check` | true | Daily background check for package updates |
 | `Control/enabled` | true | Local control channel for `msr_ctl.py` |
-| `Telegram/enabled` | false | Upload each finished recording to one Telegram forum topic. Needs Telethon |
+| `Telegram/enabled` | false | Global switch. A channel is uploaded only when this is on and that channel opted in. Needs Telethon |
 | `Telegram/api_id`, `chat_id`, `topic_id`, `owner_id` | (blank) | From my.telegram.org, the topic link, and your user id. Not secrets |
 | `Telegram/api_hash`, `bot_token` | (blank) | Secrets. Encrypted at rest (Windows DPAPI, or a user-only key on Linux). Leave the field blank in Options to keep the saved value |
 | `Telegram/delete_after_upload` | false | Remove the local file only after every part is confirmed |
@@ -278,9 +278,11 @@ Output layout: `streams_dir\Recorded\<platform>\<channel>\` (raw `.ts` while rec
 
 ### Telegram uploads (optional)
 
-For a machine with little disk, MSR can post a finished recording into one topic of a Telegram group you run. It is off until you turn it on under **Options > Telegram** (or `[Telegram] enabled = true`) **and** tick **Upload finished recordings from this channel** (right-click the channel, **Telegram…**, or `msr_ctl.py edit <channel> --telegram-upload on`). Existing channels stay off. A topic id on the channel overrides the one in Options; leave it blank to use that one. The group and the bot stay the ones in Options. Recording and the window are not held up: a background queue uploads after the remux, one file at a time, oldest first, retries with a pause, and resumes after a restart. The Status tab and `msr_ctl.py telegram status` show the queue and the file being sent.
+For a machine with little disk, MSR can post a finished recording into one topic of a Telegram group you run. Both switches have to be on: **Options > Telegram > Upload finished recordings** (or `[Telegram] enabled = true`) and **Upload finished recordings from this channel** (right-click the channel, **Telegram…**, or `msr_ctl.py edit <channel> --telegram-upload on`). Existing channels stay off. A topic id on the channel overrides the one in Options; leave it blank to use that one. The group and the bot stay the ones in Options.
 
-The hosted Bot API only accepts about **50 MB** per file. MSR does not use that for the video. It signs the bot in over MTProto (Telethon: api id, api hash, bot token) and sends documents of up to **2,097,152,000 bytes** (4000 × 512 KiB, Telegram's non-Premium cap). A larger file is split with ffmpeg stream-copy — no re-encode — into parts named `name.part01of03.mp4`, each with a caption (channel, title, date, part n/m).
+Recording is not held up. The queue starts within a few seconds of the remux (there is no extra wait for the file to sit still). It sends one recording at a time, oldest first, retries with a pause, honours FloodWait, and resumes after a restart. While a file is moving, the log names the part, its size and the topic, then percent, megabytes, speed and ETA about every 10% or 10 seconds. The Status tab and `msr_ctl.py telegram status` show `Uploading name 45%` and how many are still queued.
+
+The hosted Bot API only accepts about **50 MB** per file. MSR does not use that for the video. It signs the bot in over MTProto (Telethon: api id, api hash, bot token) and sends documents of up to **2,097,152,000 bytes** (4000 × 512 KiB, about 2000 MB, Telegram's non-Premium cap). A larger file is split with ffmpeg stream-copy — no re-encode — into parts named `name.part01of03.mp4`, each with a caption (channel, title, date, part n/m).
 
 What you set up on Telegram:
 
@@ -290,11 +292,20 @@ What you set up on Telegram:
 4. Add the bot to the group and make it an admin so it can post in the topic and see members.
 5. **Your user id** (a bot such as `@userinfobot` tells you). MSR refuses to upload unless that user is in the group, so a wrong group id does not send the recordings somewhere else.
 
-**Send test message** posts one sentence in the topic and checks those three. `msr_ctl.py telegram status` shows the queue; `msr_ctl.py telegram test` sends the same sentence.
+**Send test message** posts one sentence in the topic and checks the bot, the group and your user id. The same actions from the command line:
+
+```
+python msr_ctl.py telegram status
+python msr_ctl.py telegram test
+python msr_ctl.py edit knut --telegram-upload on --telegram-topic 55
+python msr_ctl.py edit knut --telegram-upload off --telegram-topic ""
+```
 
 **Delete the local file after Telegram confirms every part** is off unless you tick it. A failed or partial upload keeps the file. The warning in Options is the one to read before turning it on.
 
-The api hash, the bot token and the Telethon session file are encrypted at rest. On Windows that is DPAPI. On Linux the ciphertext is in `config.ini` and `telegram_session.json`, and the key is `~/.config/multi-stream-recorder/secret.key` (mode 0600, or `$XDG_CONFIG_HOME`), not in the data folder. The Fishtank password and the Twitch sign-in use that same key. A copied `config.ini` does not reveal them. The session file and `twitch_token.json` are owner-only as well.
+The api hash, the bot token and the Telethon session file are encrypted at rest. On Windows that is DPAPI. On Linux the ciphertext is in `config.ini` and `telegram_session.json`, and the key is `~/.config/multi-stream-recorder/secret.key` (mode 0600, or `$XDG_CONFIG_HOME`), not in the data folder. The key file is written in binary mode. On Windows, if a key file is created at all, it is not given mode 0600: Python 3.14 turns that mode into an access list later opens cannot read, and a newline byte in the key used to be rewritten. Windows secrets themselves stay DPAPI. The Fishtank password and the Twitch sign-in use that same key on Linux and are encrypted on the next start if they were still plain. A copied `config.ini` does not reveal them. The session file and `twitch_token.json` are owner-only as well.
+
+Left as you saved them, on purpose: `cookies.txt` (yt-dlp and streamlink read it themselves), the Fishtank email, the Twitch public client id, `MSR_FISHTANK_PASSWORD` (environment only, never written), and the short-lived `msr_control.json` token.
 
 Install Telethon if this copy of MSR does not have it yet (`pip install "Telethon>=1.36,<2"`, or let `run_msr.pyw` install `requirements.txt`). Without it the section is greyed out and nothing is uploaded. Restart MSR after installing.
 
@@ -330,6 +341,9 @@ python msr_ctl.py clip --file "D:\...\x.mp4" --from 1:02:03 --to 1:02:48 --exact
 python msr_ctl.py wait --event finished --channel NAME --timeout 3600
 python msr_ctl.py health --check-now      # also reruns the window's Health check
 python msr_ctl.py twitch status            # or twitch connect | disconnect
+python msr_ctl.py telegram status          # queue count and "Uploading name 45%"
+python msr_ctl.py telegram test            # one test message in the configured topic
+python msr_ctl.py edit knut --telegram-upload on --telegram-topic 55
 python msr_ctl.py subscribe --for 600      # live events as JSON lines (max 8 at once)
 python msr_ctl.py recordings --since 24h
 python msr_ctl.py library suggest --free 200 --older-days 90

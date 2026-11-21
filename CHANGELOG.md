@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+Draft notes for the next release, not tagged: [docs/release_notes/RELEASE_NOTES_v3.2.0.md](docs/release_notes/RELEASE_NOTES_v3.2.0.md).
+
 ### Changed
 - On Linux and other non-Windows systems the Fishtank password and the Twitch sign-in are encrypted at rest with the same user key as the Telegram secrets (`~/.config/multi-stream-recorder/secret.key`, mode 0600, or `$XDG_CONFIG_HOME`). The ciphertext is `password_box` in `config.ini` and a `box` field in `twitch_token.json`. An existing plaintext value is encrypted on the next start. If the key file is missing or damaged, MSR does not delete the saved value and does not crash: a ciphertext it cannot open asks you to enter it again, and a plaintext value it cannot encrypt is left as it is. Windows still uses DPAPI only (`password_dpapi`, `{"v": 2, "dpapi": ...}`).
 
