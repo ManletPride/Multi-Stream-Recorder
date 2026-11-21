@@ -17,6 +17,10 @@ from tkinter import ttk
 sys.path.insert(0, sys.argv[1])
 os.chdir(sys.argv[2])
 os.environ["MSR_SMOKE_TEST"] = "1"
+# The smoke flag also exits the process after 2.5 s. Walking every theme takes
+# longer than that on a loaded Windows runner, which used to quit before the
+# result was printed (exit 0, empty stdout).
+os.environ["MSR_SMOKE_KEEP"] = "1"
 mode = sys.argv[3]
 out = {"errors": []}
 
@@ -157,15 +161,10 @@ class ThemeSmokeTests(unittest.TestCase):
             (data / "channels.json").write_text("[]", encoding="utf-8")
             if state is not None:
                 (data / "window_state.json").write_text(json.dumps(state), encoding="utf-8")
-            cmd = [sys.executable, "-c", THEME_SCRIPT, str(ROOT), str(data), mode]
-            done = subprocess.run(cmd, capture_output=True, text=True, timeout=180, cwd=str(ROOT))
-            # The hidden app has exited 0 without printing on a loaded Windows runner.
-            # One more try; a real failure still has a traceback or a second empty run.
-            if done.returncode == 0 and not (done.stdout or "").strip():
-                done = subprocess.run(cmd, capture_output=True, text=True, timeout=180, cwd=str(ROOT))
+            done = subprocess.run([sys.executable, "-c", THEME_SCRIPT, str(ROOT), str(data), mode],
+                                  capture_output=True, text=True, timeout=180, cwd=str(ROOT))
         self.assertEqual(done.returncode, 0, done.stderr[-3000:])
         self.assertNotIn("Traceback", done.stderr)
-        self.assertTrue((done.stdout or "").strip(), done.stderr[-3000:])
         return json.loads(done.stdout)
 
     def test_a_fresh_install_starts_in_powershell_blue_with_a_theme_button(self):
