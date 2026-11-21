@@ -1,6 +1,4 @@
-Draft notes for the next release. Not tagged. `__version__` is still 3.1.5 until David cuts the release.
-
-Chosen as **3.2.0** because the latest tag is v3.1.5 and this adds features (Telegram uploads, per-channel opt-in, Linux encryption of the Fishtank password and Twitch sign-in). 3.1.1 through 3.1.5 were small fix releases. It is not 4.0.0: recording without Telegram is unchanged, Windows still uses DPAPI, and an existing install migrates on the next start.
+Finished recordings can be uploaded to a Telegram topic, and on Linux the Fishtank password and the Twitch sign-in are encrypted at rest.
 
 ## Added
 
@@ -40,4 +38,4 @@ Chosen as **3.2.0** because the latest tag is v3.1.5 and this adds features (Tel
 - **Delete the local file after every part is confirmed** stays off unless you turn it on.
 - Your recordings are kept.
 
-Full list of changes: [CHANGELOG.md](https://github.com/ManletPride/Multi-Stream-Recorder/blob/main/CHANGELOG.md) (the Unreleased section, until this is tagged).
+Full list of changes: [CHANGELOG.md](https://github.com/ManletPride/Multi-Stream-Recorder/blob/v3.2.0/CHANGELOG.md).
