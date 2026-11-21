@@ -377,6 +377,23 @@ class SecretTests(unittest.TestCase):
             self.assertEqual(load_session(tmp, "fp1"), "session-secret")
             self.assertIsNone(load_session(tmp, "other-bot"))
 
+    def test_plaintext_session_is_kept_when_the_key_is_unusable(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"MSR_SECRET_DIR": os.path.join(tmp, "keys")}), \
+                mock.patch.object(dpapi, "available", return_value=False):
+            os.makedirs(os.path.join(tmp, "keys"))
+            with open(os.path.join(tmp, "keys", "secret.key"), "wb") as fh:
+                fh.write(b"short")
+            path = os.path.join(tmp, "telegram_session.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({"v": 1, "fp": "fp1", "session": "session-secret"}, fh)
+            with self.assertLogs(level="WARNING") as logs:
+                self.assertEqual(load_session(tmp, "fp1"), "session-secret")
+            text = open(path, encoding="utf-8").read()
+            self.assertIn("session-secret", text)
+            self.assertIn("left unchanged", "".join(logs.output))
+            self.assertNotIn("session-secret", "".join(logs.output))
+
     def test_plaintext_session_is_rewritten_encrypted(self):
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.dict(os.environ, {"MSR_SECRET_DIR": os.path.join(tmp, "keys")}), \

@@ -1,4 +1,8 @@
-"""Windows DPAPI (current user) for secrets at rest; callers keep plaintext elsewhere."""
+"""Windows DPAPI (current user) for secrets at rest.
+
+Other systems encrypt the same values with ``msr.filecrypt`` (a user key
+outside the data folder). This module is the Windows half only.
+"""
 import base64
 import sys
 

@@ -84,7 +84,8 @@ def token_path(data_dir):
     return os.path.join(data_dir or ".", TOKEN_FILE)
 
 
-# DPAPI (current user) on Windows; plaintext elsewhere. File: {"v": 2, "dpapi": "<base64>"}.
+# Windows: {"v": 2, "dpapi": "<base64>"} (DPAPI, current user).
+# Elsewhere: {"v": 2, "box": "<base64>"} unlocked by the user key (msr/filecrypt.py).
 
 from msr.dpapi import available as dpapi_available, crypt as _dpapi  # noqa: E402
 
@@ -92,7 +93,8 @@ from msr.dpapi import available as dpapi_available, crypt as _dpapi  # noqa: E40
 def _encode(tok):
     raw = json.dumps(tok).encode("utf-8")
     if not dpapi_available():
-        return json.dumps(tok, indent=2).encode("utf-8")
+        from msr import filecrypt
+        return json.dumps({"v": 2, "box": filecrypt.encrypt_text(raw.decode("utf-8"))}).encode("utf-8")
     return json.dumps({"v": 2, "dpapi": base64.b64encode(_dpapi(raw, True)).decode("ascii")}).encode("utf-8")
 
 
@@ -123,6 +125,16 @@ def load_token(data_dir):
         except Exception:
             _note_once("Twitch: saved sign-in can't be read by this Windows user/PC - click Connect Twitch")
             return None
+    elif "box" in doc:
+        if dpapi_available():
+            _note_once("Twitch: saved sign-in is encrypted for another computer - click Connect Twitch")
+            return None
+        try:
+            from msr import filecrypt
+            tok = json.loads(filecrypt.decrypt_text(doc["box"]))
+        except Exception:
+            _note_once("Twitch: saved sign-in can't be decrypted - click Connect Twitch")
+            return None
     else:
         tok = doc
         if tok.get("access_token") and dpapi_available():
@@ -131,16 +143,47 @@ def load_token(data_dir):
                 _note_once("Twitch: saved sign-in is now encrypted (Windows DPAPI)")
             except Exception:
                 pass
+        elif tok.get("access_token"):
+            try:
+                encrypted = save_token(data_dir, tok)  # migrate old plaintext file
+            except Exception:
+                encrypted = False
+            if encrypted:
+                _note_once("Twitch: saved sign-in is now encrypted")
+            else:
+                _note_once("Twitch: could not encrypt the saved sign-in; it was left unchanged")
     if not isinstance(tok, dict) or not tok.get("access_token"):
         return None
     return tok
 
 
 def save_token(data_dir, tok):
+    """Write the token. True when the file is encrypted. The token is never logged.
+
+    Windows stays DPAPI. Elsewhere the user-key box is used. If that key cannot
+    be used, the new token is still written (a refresh token is single-use) and
+    the return is False. An existing file is not removed on failure.
+    """
     from msr import history
-    if not dpapi_available():
-        _note_once("Twitch: no DPAPI on this system - sign-in saved unencrypted")
-    history.atomic_write(token_path(data_dir), _encode(tok))
+    encrypted = True
+    try:
+        payload = _encode(tok)
+    except Exception:
+        if dpapi_available():
+            raise
+        encrypted = False
+        logging.getLogger().warning(
+            "Twitch: could not encrypt the sign-in (the secret key file is missing or not usable). "
+            "It was saved unencrypted so the sign-in is not lost.")
+        payload = json.dumps(tok, indent=2).encode("utf-8")
+    path = token_path(data_dir)
+    history.atomic_write(path, payload)
+    if os.name != "nt":
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    return encrypted
 
 
 def clear_token(data_dir):
