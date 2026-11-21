@@ -17,19 +17,24 @@ from msr.telegram_queue import (
     DestinationRejected,
     Flood,
     QueueStore,
+    SettingError,
     TelegramError,
+    apply_channel_telegram,
     build_caption,
     config_for_worker,
     deletion_allowed,
+    format_status,
     guard_recording,
     landed_in_topic,
     load_session,
     note_ready,
     part_filename,
     plan_spans,
+    queue_if_channel,
     save_session,
     scrub,
 )
+from msr.util import coerce_channel_records
 from msr.telegram_upload import Uploader
 from msr.util import redact_for_log
 
@@ -53,6 +58,8 @@ class FakeTransport:
         self.fail = list(fail or [])
         self.session = "session-secret"
         self.closed = False
+        self.inflight = 0
+        self.max_inflight = 0
 
     def connect(self, settings, session):
         return self.session
@@ -62,12 +69,17 @@ class FakeTransport:
             raise self.fail.pop(0)
 
     def send_file(self, settings, session, path, caption, progress):
-        self._maybe_fail()
-        progress(5, 10)
-        progress(10, 10)
-        self.sent.append({"path": os.path.basename(path), "caption": caption,
-                          "chat": settings.chat_id, "topic": settings.topic_id})
-        return {"message_id": len(self.sent), "session": self.session}
+        self.inflight += 1
+        self.max_inflight = max(self.max_inflight, self.inflight)
+        try:
+            self._maybe_fail()
+            progress(5, 10)
+            progress(10, 10)
+            self.sent.append({"path": os.path.basename(path), "caption": caption,
+                              "chat": settings.chat_id, "topic": settings.topic_id})
+            return {"message_id": len(self.sent), "session": self.session}
+        finally:
+            self.inflight -= 1
 
     def send_text(self, settings, session, text):
         self._maybe_fail()
@@ -111,6 +123,69 @@ def drain(up, n=30):
         if state in ("idle", "off", "blocked", "missing", "incomplete"):
             break
     return states
+
+
+class ChannelChoiceTests(unittest.TestCase):
+    def test_an_old_list_stays_off_including_a_long_one(self):
+        loaded = [{"name": f"twitch:ch{i}", "enabled": True} for i in range(56)]
+        loaded.append("kickonly")
+        loaded.append({"name": "rumble:opted", "enabled": False, "telegram_upload": True,
+                       "telegram_topic": "77"})
+        loaded.append({"name": "badtopic", "enabled": True, "telegram_topic": "nope"})
+        records, skipped = coerce_channel_records(loaded)
+        self.assertEqual(skipped, [])
+        self.assertEqual(len(records), 59)
+        plain = [r for r in records if r["name"].startswith("twitch:")]
+        self.assertEqual(len(plain), 56)
+        self.assertTrue(all(set(r) == {"name", "enabled"} for r in plain))
+        self.assertEqual(records[-3], {"name": "kickonly", "enabled": True})
+        self.assertEqual(records[-2], {"name": "rumble:opted", "enabled": False,
+                                       "telegram_upload": True, "telegram_topic": 77})
+        self.assertEqual(records[-1]["name"], "badtopic")
+        self.assertNotIn("telegram_topic", records[-1])
+
+    def test_only_an_opted_in_channel_is_queued_and_keeps_its_topic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            roster = [
+                {"name": "alice", "enabled": True},
+                {"name": "bob", "enabled": True, "telegram_upload": True},
+                {"name": "cara", "enabled": True, "telegram_upload": True, "telegram_topic": 90},
+            ]
+            path = os.path.join(tmp, "channels.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(roster, fh)
+            folder = os.path.join(tmp, "Processed", "kick", "x")
+            os.makedirs(folder)
+            files = {}
+            for name in ("alice", "bob", "cara"):
+                dest = os.path.join(folder, name + ".mp4")
+                with open(dest, "wb") as fh:
+                    fh.write(b"x" * 2048)
+                files[name] = dest
+            self.assertIsNone(queue_if_channel(tmp, "channels.json", "alice", True,
+                                               {"path": files["alice"], "channel": "alice", "platform": "kick"}))
+            self.assertIsNone(queue_if_channel(tmp, "channels.json", "bob", False,
+                                               {"path": files["bob"], "channel": "bob", "platform": "kick"}))
+            bob = queue_if_channel(tmp, "channels.json", "bob", True,
+                                   {"path": files["bob"], "channel": "bob", "platform": "kick"})
+            cara = queue_if_channel(tmp, "channels.json", "cara", True,
+                                    {"path": files["cara"], "channel": "cara", "platform": "kick"})
+            with open(bob, encoding="utf-8") as fh:
+                self.assertNotIn("topic_id", json.load(fh))
+            with open(cara, encoding="utf-8") as fh:
+                self.assertEqual(json.load(fh)["topic_id"], 90)
+            record = {"name": "bob", "enabled": True, "telegram_upload": True, "telegram_topic": 90}
+            apply_channel_telegram(record, upload=False, topic="")
+            self.assertEqual(record, {"name": "bob", "enabled": True})
+            with self.assertRaises(SettingError):
+                apply_channel_telegram(record, topic="nope")
+
+    def test_status_line_names_the_queue(self):
+        text = format_status({"line": "Uploading a.mp4, 40%, 11 waiting", "pending": 12,
+                              "current": {"name": "a.mp4"}})
+        self.assertIn("queue 12", text)
+        self.assertIn("Uploading a.mp4", text)
+        self.assertNotIn("/tmp", text)
 
 
 class PlanTests(unittest.TestCase):
@@ -389,8 +464,8 @@ class UploadTests(unittest.TestCase):
         self._env.start()
         self.addCleanup(self._env.stop)
 
-    def recording(self, payload, name="alice.mp4"):
-        folder = os.path.join(self.streams, "Processed", "kick", "alice")
+    def recording(self, payload, name="alice.mp4", channel="alice"):
+        folder = os.path.join(self.streams, "Processed", "kick", channel)
         os.makedirs(folder, exist_ok=True)
         path = os.path.join(folder, name)
         with open(path, "wb") as fh:
@@ -567,6 +642,50 @@ class UploadTests(unittest.TestCase):
         names = [row["path"] for row in self.transport.sent]
         # part 1 was confirmed before the restart, so its filename is not sent again
         self.assertEqual(names.count(names[0]), 1)
+
+    def test_twelve_recordings_go_one_at_a_time_in_order_and_survive_a_restart(self):
+        paths = []
+        for i in range(12):
+            channel = f"c{i:02d}"
+            path = self.recording(b"x" * 2048, name=f"{channel}.mp4", channel=channel)
+            note_ready(self.tmp.name, True, {
+                "path": path, "channel": channel, "platform": "kick", "created": i + 1,
+            })
+            paths.append(os.path.basename(path))
+        up = self.uploader()
+        while len(self.transport.sent) < 3:
+            state = up.step()
+            self.assertNotIn(state, ("idle", "blocked", "error"))
+        up.step()  # the third file is sent; this step marks it finished
+        self.assertEqual([row["path"] for row in self.transport.sent], paths[:3])
+        self.assertEqual(self.transport.max_inflight, 1)
+        self.assertEqual(up.status()["pending"], 9)
+        self.assertIn("queue 9", format_status(up.status()))
+        self.transport.fail.append(Flood(30))
+        up.step()  # plan the fourth
+        up.step()  # upload it, and Telegram asks us to wait
+        self.assertEqual(len(self.transport.sent), 3)
+        self.assertIn("wait", up.status()["line"])
+        up.step()  # the rest of the queue stays behind the one that is waiting
+        self.assertEqual(len(self.transport.sent), 3)
+        up.store.save()
+        self.clock.now += 31
+        restarted = self.uploader()
+        restarted.transport = self.transport
+        drain(restarted, n=80)
+        self.assertEqual([row["path"] for row in self.transport.sent], paths)
+        self.assertEqual(self.transport.max_inflight, 1)
+        self.assertEqual(restarted.status()["pending"], 0)
+
+    def test_a_channel_topic_overrides_the_global_one(self):
+        path = self.recording(b"x" * 2048)
+        note_ready(self.tmp.name, True, {
+            "path": path, "channel": "alice", "platform": "kick", "topic_id": 77,
+        })
+        up = self.uploader()
+        drain(up)
+        self.assertEqual(self.transport.sent[0]["topic"], 77)
+        self.assertNotEqual(self.transport.sent[0]["topic"], 55)
 
     def test_uploads_stay_off_without_a_thread_until_enabled(self):
         cfg = Cfg()

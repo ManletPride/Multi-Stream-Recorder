@@ -426,6 +426,10 @@ def main_gui(config):
         except NameError:
             pass
         try:
+            tg_queue_label.configure(bg=t['bg'], fg=t['fg'])
+        except NameError:
+            pass
+        try:
             _theme_preview_strip(t)
         except NameError:
             pass
@@ -1254,6 +1258,7 @@ def main_gui(config):
         ctx_menu.add_command(label="Open stream page", command=open_channel_url)
         ctx_menu.add_command(label="Open Clips Folder", command=_open_roster_clips_dir)
         ctx_menu.add_command(label="Copy Name", command=copy_channel_name)
+        ctx_menu.add_command(label="Telegram\u2026", command=_open_channel_telegram)
         ctx_menu.add_separator()
         ctx_menu.add_command(label="Move to Top", command=_move_channels_to_top)
         ctx_menu.add_command(label="Move Up", command=_move_channel_up)
@@ -1271,6 +1276,31 @@ def main_gui(config):
             ctx_menu.tk_popup(event.x_root, event.y_root)
         finally:
             ctx_menu.grab_release()
+
+    def _open_channel_telegram():
+        """Per-channel upload and topic. Off until the user ticks it; a blank topic uses Options."""
+        names = _selected_roster_names()
+        if len(names) != 1:
+            _dialogs.show_info(root, "Telegram", "Select one channel.")
+            return
+        name = names[0]
+        idx = _index_for_name(name)
+        if idx < 0:
+            return
+        rec = channels[idx]
+        shown, plat = cp.channel_display(name)
+
+        def on_save(upload, topic_text):
+            from msr.telegram_queue import SettingError, apply_channel_telegram
+            try:
+                apply_channel_telegram(rec, upload=upload, topic=topic_text)
+            except SettingError as exc:
+                return str(exc)
+            save_channels()
+            return ""
+
+        cp.open_channel_telegram_dialog(
+            root, f"{shown} \u00b7 {plat}", rec.get("telegram_upload"), rec.get("telegram_topic"), on_save)
 
     def copy_channel_name():
         names = _selected_roster_names()
@@ -1881,6 +1911,41 @@ def main_gui(config):
         status_meter_row.pack(fill=tk.X, padx=10, pady=(0, 4), after=status_header)
         io_meter_label.pack(side=tk.RIGHT)
         Tooltip(io_meter_label, lambda: format_tooltip(_io_sampler.last))
+
+    # Queue length and the file being sent. Packed only while Telegram uploads are on,
+    # so a window that never enables them keeps the Status tab it had.
+    tg_queue_label = tk.Label(status_tab, text="", anchor="w", justify="left",
+                              font=("Segoe UI", 9))
+
+    def _paint_tg_queue():
+        t = _themes.current()
+        tg_queue_label.configure(bg=t["bg"], fg=t["fg"])
+        up = _telegram_uploads[0]
+        text = ""
+        if up is not None:
+            try:
+                st = up.status()
+            except Exception:
+                st = None
+            if st and st.get("enabled"):
+                from msr.telegram_queue import format_status
+                text = format_status(st)
+        if text:
+            tg_queue_label.configure(text=text)
+            if not tg_queue_label.winfo_ismapped():
+                anchor = status_meter_row if status_meter_row.winfo_ismapped() else status_header
+                tg_queue_label.pack(fill=tk.X, padx=10, pady=(0, 4), after=anchor)
+        elif tg_queue_label.winfo_ismapped():
+            tg_queue_label.pack_forget()
+
+    def _refresh_tg_queue():
+        try:
+            _paint_tg_queue()
+        except Exception:
+            logging.debug("Telegram queue line", exc_info=True)
+        root.after(1000, _refresh_tg_queue)
+
+    root.after(1000, _refresh_tg_queue)
 
     def _show_status_context_menu(event):
         """Show context menu on status tree with options appropriate to channel state."""

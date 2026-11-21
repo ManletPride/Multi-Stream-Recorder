@@ -72,11 +72,46 @@ class BackgroundCleaner:
             except Exception as e:
                 logging.debug(f"cleanup hook: {e}")
 
-    def _note_telegram(self, path, platform, username_dir):
-        """Queue a remux that this cleaner finished. The worker queues the ones it finishes itself."""
+    def _telegram_channel_key(self, platform, username_dir):
+        """The roster key whose recordings folder is this one, or '' when none matches."""
+        from msr.util import channel_key_to_dirs
+        from msr.telegram_queue import channels_path
+        path = channels_path(
+            os.environ.get("MSR_HOME") or os.getcwd(),
+            self.config.get("Paths", "channels_file", fallback="channels.json"))
         try:
-            from msr.telegram_queue import note_ready, upload_enabled
+            with open(path, encoding="utf-8-sig") as fh:
+                loaded = json.load(fh)
+        except (OSError, ValueError):
+            return ""
+        if not isinstance(loaded, list):
+            return ""
+        want = os.path.normpath(username_dir or "")
+        for item in loaded:
+            if not isinstance(item, dict):
+                continue
+            key = item.get("name")
+            if not isinstance(key, str):
+                continue
+            try:
+                plat, folder = channel_key_to_dirs(key)
+            except Exception:
+                continue
+            if str(plat).casefold() == str(platform).casefold() and os.path.normpath(folder) == want:
+                return key
+        return ""
+
+    def _note_telegram(self, path, platform, username_dir):
+        """Queue a remux that this cleaner finished. The worker queues the ones it finishes itself.
+
+        Only a channel that opted in is queued, and only while the global switch is on.
+        """
+        try:
+            from msr.telegram_queue import queue_if_channel, upload_enabled
             if not upload_enabled(self.config):
+                return
+            key = self._telegram_channel_key(platform, username_dir)
+            if not key:
                 return
             channel, title, started = username_dir, "", ""
             meta = os.path.splitext(path)[0] + ".meta.json"
@@ -89,10 +124,13 @@ class BackgroundCleaner:
                     started = doc.get("recording_started") or doc.get("recorded_at") or ""
             except (OSError, ValueError):
                 pass
-            note_ready(os.environ.get("MSR_HOME") or os.getcwd(), True, {
-                "path": path, "channel": channel, "platform": platform,
-                "title": title, "recorded_at": started,
-            })
+            queue_if_channel(
+                os.environ.get("MSR_HOME") or os.getcwd(),
+                self.config.get("Paths", "channels_file", fallback="channels.json"),
+                key, True, {
+                    "path": path, "channel": channel, "platform": platform,
+                    "title": title, "recorded_at": started,
+                })
         except Exception:
             logging.debug("telegram: could not queue %s", os.path.basename(path), exc_info=True)
 

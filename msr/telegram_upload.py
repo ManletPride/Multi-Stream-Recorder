@@ -33,10 +33,9 @@ from msr.telegram_queue import (
     discard_note,
     guard_part,
     guard_recording,
-    iter_inbox,
+    ordered_inbox,
     load_session,
     plan_spans,
-    read_note,
     read_settings,
     save_session,
     clear_session,
@@ -326,18 +325,20 @@ class Uploader:
     def _import_one(self) -> bool:
         if not upload_enabled(self.config):
             return False
-        for path in iter_inbox(self.data_dir):
-            note = read_note(path)
+        for _created, path, note in ordered_inbox(self.data_dir):
             if not note:
                 discard_note(path)
                 return True
             src = str(note.get("path") or "")
             if not os.path.isfile(src) or os.path.islink(src):
                 created = float(note.get("created") or 0)
-                if created and self.clock() - created > 3600:
+                # created is nanoseconds. A note from before that change is seconds.
+                age = self.clock() - (created / 1e9 if created > 1e12 else created)
+                if created and age > 3600:
                     discard_note(path)
                     return True
-                continue
+                # The file is not ready. Leave this note at the head so a later one cannot pass it.
+                return False
             ok, why = guard_recording(src, self._roots())
             if not ok:
                 log.warning("Telegram: not uploading %s (%s)", os.path.basename(src), why)
@@ -346,7 +347,8 @@ class Uploader:
             with self._lock:
                 job = self.store.enqueue(
                     src, str(note.get("channel") or ""), str(note.get("platform") or ""),
-                    str(note.get("title") or ""), str(note.get("recorded_at") or ""))
+                    str(note.get("title") or ""), str(note.get("recorded_at") or ""),
+                    topic_id=note.get("topic_id"))
                 if job is not None:
                     self.store.save()
             discard_note(path)
@@ -372,10 +374,14 @@ class Uploader:
         return True
 
     def _pick(self):
+        """The oldest recording that is ready. A FloodWait or a backoff holds the ones behind it."""
         now = self.clock()
         for job in self.store.jobs:
-            if job.get("state") in ("pending", "uploading") and float(job.get("next_try") or 0) <= now:
+            if job.get("state") not in ("pending", "uploading"):
+                continue
+            if float(job.get("next_try") or 0) <= now:
                 return job
+            return None
         return None
 
     def _job(self, job_id):
@@ -406,7 +412,8 @@ class Uploader:
         if size != int(job.get("size") or -1):
             self._fail(job, "the recording changed size and was not uploaded", settings)
             return {"kind": "none"}
-        dest = {"chat_id": settings.chat_id, "topic_id": settings.topic_id}
+        topic = job.get("topic_id") or settings.topic_id
+        dest = {"chat_id": settings.chat_id, "topic_id": int(topic)}
         if job.get("dest") and job["dest"] != dest:
             if any(p.get("confirmed") for p in job.get("parts") or []):
                 self._fail(job, "The group or topic changed after some parts were posted. "
@@ -429,12 +436,25 @@ class Uploader:
             return {"kind": "upload", "job_id": job["id"], "part": idx}
         return {"kind": "split", "job_id": job["id"], "part": idx}
 
+    def _behind(self) -> int:
+        """Recordings still queued after the one being sent."""
+        waiting = 0
+        for job in self.store.jobs:
+            if job.get("state") in ("pending", "uploading"):
+                waiting += 1
+        return max(0, waiting - 1)
+
     def _progress_line(self) -> str:
         cur = self._part or {}
         name = cur.get("name") or "recording"
         if int(cur.get("parts") or 1) > 1:
-            return f"Uploading {name}, part {cur.get('part')}/{cur.get('parts')}, {cur.get('percent') or 0}%"
-        return f"Uploading {name}, {cur.get('percent') or 0}%"
+            line = f"Uploading {name}, part {cur.get('part')}/{cur.get('parts')}, {cur.get('percent') or 0}%"
+        else:
+            line = f"Uploading {name}, {cur.get('percent') or 0}%"
+        behind = self._behind()
+        if behind:
+            line += f", {behind} waiting"
+        return line
 
     def _perform(self, action) -> str:
         kind = action.get("kind")

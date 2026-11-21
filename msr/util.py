@@ -494,7 +494,17 @@ def coerce_channel_records(loaded):
             skipped.append(name)
             continue
         seen.add(channel_dedupe_key(name))
-        records.append({"name": name, "enabled": bool(enabled)})
+        record = {"name": name, "enabled": bool(enabled)}
+        if isinstance(item, dict):
+            # Absent means off, and off is not written back. An old channels.json
+            # loads unchanged and nothing starts uploading until a channel opts in.
+            from msr.telegram_queue import telegram_of
+            upload, topic = telegram_of(item)
+            if upload:
+                record["telegram_upload"] = True
+            if topic:
+                record["telegram_topic"] = topic
+        records.append(record)
     return records, skipped
 
 

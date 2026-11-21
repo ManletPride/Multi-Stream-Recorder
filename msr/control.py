@@ -214,6 +214,21 @@ def parse_add_text(text, platform=None):
     return "kick", text
 
 
+def _apply_telegram(record, args) -> None:
+    from msr.telegram_queue import apply_channel_telegram
+    upload = args["telegram_upload"] if "telegram_upload" in args else None
+    topic = args["telegram_topic"] if "telegram_topic" in args else None
+    # apply_channel_telegram treats a missing argument as "leave it". Passing None for
+    # upload would clear it, so only forward the keys the caller set.
+    kwargs = {}
+    if "telegram_upload" in args:
+        kwargs["upload"] = _truthy(upload)
+    if "telegram_topic" in args:
+        kwargs["topic"] = topic
+    if kwargs:
+        apply_channel_telegram(record, **kwargs)
+
+
 def roster_add(records, name, platform=None, enable=True) -> str:
     from msr.channel_panel import build_channel_key
     from msr.util import validate_channel_name
@@ -700,8 +715,12 @@ def channel_rows(app) -> list:
     from msr.agent_status import iso
     from msr.util import channel_watch_url
     tracker = app.tracker
+    by_key = {r["name"]: r for r in app.records()}
     for row in rows:
         key = row.pop("_key")
+        saved = by_key.get(key) or {}
+        row["telegram_upload"] = bool(saved.get("telegram_upload"))
+        row["telegram_topic"] = saved.get("telegram_topic") or None
         try:
             # no query string: a custom URL can carry a token (same rule as the shown name)
             row["url"] = (channel_watch_url(key) or "").split("?", 1)[0].split("#", 1)[0]
@@ -1085,20 +1104,38 @@ class Controller:
         return {"order": [display_name(r["name"]) for r in self.app.records()]}
 
     def cmd_channel_edit(self, args):
-        """Rename a channel (new name and/or platform). Its recordings folder name follows the
-        key, so a channel being recorded must be stopped first."""
+        """Rename a channel, or set its Telegram upload and topic.
+
+        A rename changes the recordings folder name, so a channel being recorded must be
+        stopped first. The Telegram fields can change while it is recording: the file that
+        finishes uses the choice saved at that moment. A blank topic uses the one in Options.
+        """
         ref = args.get("channel")
         recs = self.app.records()
         old = recs[resolve_channel(recs, ref)]["name"]
+        renaming = (args.get("new_name") not in (None, "") or args.get("platform") not in (None, "")
+                    or "enabled" in args)
+        telegram = "telegram_upload" in args or "telegram_topic" in args
+        if not renaming and not telegram:
+            raise ControlError("Say what to change (name, platform, telegram_upload or telegram_topic).",
+                               "bad_request")
         rec = self.app.recorder
-        if is_running_session(rec) and old in getattr(rec, "processes", {}) and old not in rec.stopped_channels:
+        if renaming and is_running_session(rec) and old in getattr(rec, "processes", {}) \
+                and old not in rec.stopped_channels:
             raise ControlError("Stop this channel first (record_stop), then edit it.", "conflict")
 
         from msr.channel_panel import split_channel_key
+        from msr.telegram_queue import SettingError
         old_platform, old_user = split_channel_key(old)
 
         def edit(work):
             i = resolve_channel(work, old)
+            if not renaming:
+                try:
+                    _apply_telegram(work[i], args)
+                except SettingError as exc:
+                    raise ControlError(str(exc), "invalid") from None
+                return work[i]["name"]
             entry = work.pop(i)
             try:
                 key = roster_add(work, args.get("new_name") or old_user, args.get("platform") or old_platform,
@@ -1107,13 +1144,25 @@ class Controller:
             except ControlError:
                 work.insert(i, entry)
                 raise
-            work.insert(i, work.pop())
+            new = work.pop()
+            for field in ("telegram_upload", "telegram_topic"):
+                if field in entry:
+                    new[field] = entry[field]
+            try:
+                _apply_telegram(new, args)
+            except SettingError as exc:
+                work.insert(i, entry)
+                raise ControlError(str(exc), "invalid") from None
+            work.insert(i, new)
             return key
 
         key = self.app.mutate(edit)
         if rec is not None and old != key:
             self._rec_call(rec, "remove_channel", old)
-        return {"old": display_name(old), "new": display_name(key)}
+        saved = self.app.records()[resolve_channel(self.app.records(), key)]
+        return {"old": display_name(old), "new": display_name(key),
+                "telegram_upload": bool(saved.get("telegram_upload")),
+                "telegram_topic": saved.get("telegram_topic")}
 
     def cmd_channels_reload(self, args):
         return {"channels": self.app.reload_channels()}

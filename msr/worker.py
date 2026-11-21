@@ -2465,7 +2465,11 @@ def record_worker(args):
         bg_remux_threads[:] = [(t, timeout) for t, timeout in bg_remux_threads if t.is_alive()]
 
     def _note_telegram(paths, title, started):
-        """Tell the main process a recording is final. No-op unless uploads are on."""
+        """Tell the main process a recording is final.
+
+        No-op unless uploads are on globally and this channel opted in. The
+        channel's topic, when it has one, is copied onto the note.
+        """
         if not paths:
             return
         try:
@@ -2474,17 +2478,18 @@ def record_worker(args):
             return
         if not enabled:
             return
-        from msr.telegram_queue import note_ready
+        from msr.telegram_queue import queue_if_channel
         when = started.isoformat() if hasattr(started, "isoformat") else (started or "")
         data_dir = os.environ.get("MSR_HOME") or os.getcwd()
+        channels_file = config.get("Paths", "channels_file", fallback="channels.json")
         for path in paths:
             try:
-                note_ready(data_dir, True, {
+                queue_if_channel(data_dir, channels_file, channel_key, True, {
                     "path": path, "channel": username, "platform": platform,
                     "title": title or "", "recorded_at": when or "",
                 })
             except Exception:
-                logger.debug("telegram: could not queue %s", os.path.basename(path), exc_info=True)
+                logger.debug("telegram: could not queue %s", os.path.basename(str(path)), exc_info=True)
 
     def _finalize_pending_group():
         nonlocal group_parts, group_base_name

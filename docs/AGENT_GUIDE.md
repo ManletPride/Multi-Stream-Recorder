@@ -96,9 +96,12 @@ Only one sign-in runs at a time. If one is already running (also from the Option
 
 **Telegram uploads** (same as Options > Telegram; off unless the user enabled it)
 ```
-python msr_ctl.py telegram status     # waiting / uploading / paused; no token, no file paths
+python msr_ctl.py telegram status     # queue length, the file uploading now, waiting / paused; no token, no paths
 python msr_ctl.py telegram test       # one test message in the configured topic
+python msr_ctl.py edit knut --telegram-upload on --telegram-topic 55
+python msr_ctl.py edit knut --telegram-upload off --telegram-topic ""
 ```
+A channel uploads only when Telegram is enabled and that channel opted in. The topic argument overrides the Options topic for that channel; blank uses the Options topic. Same group and bot. The queue sends one recording at a time.
 Credentials are `config set` (`Telegram.api_hash`, `Telegram.bot_token` via `--stdin`). Do not put the token on the command line if the shell keeps history. Deleting the local file after a confirmed upload is `Telegram.delete_after_upload` and stays off unless the user asks.
 
 **Change a setting** (same checks as the Options tab)
