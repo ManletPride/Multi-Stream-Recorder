@@ -321,6 +321,25 @@ class SecretTests(unittest.TestCase):
             else:
                 self.assertIn("bot_token_box", text)
 
+    def test_a_key_containing_newlines_still_round_trips_the_session(self):
+        # Windows text-mode writes turn \\n / Ctrl+Z in the key into a different file.
+        from msr import filecrypt
+        nasty = bytes(range(32))
+        real = filecrypt.os.urandom
+
+        def urandom(n, real=real):
+            return nasty if n == 32 else real(n)
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"MSR_SECRET_DIR": os.path.join(tmp, "keys")}), \
+                mock.patch.object(dpapi, "available", return_value=False), \
+                mock.patch.object(filecrypt.os, "urandom", urandom):
+            save_session(tmp, "session-secret", "fp1")
+            key = os.path.join(tmp, "keys", "secret.key")
+            with open(key, "rb") as fh:
+                self.assertEqual(fh.read(), nasty)
+            self.assertEqual(load_session(tmp, "fp1"), "session-secret")
+
     def test_session_file_round_trip_and_mode(self):
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.dict(os.environ, {"MSR_SECRET_DIR": os.path.join(tmp, "keys")}), \
