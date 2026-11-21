@@ -314,7 +314,8 @@ class OptionsPanel:
             command=lambda: self._commit("Telegram", "enabled", "true" if self.tg_enabled.get() else "false")))
         cb.pack(side=tk.LEFT)
         self.tip(cb, "After a recording is remuxed, MSR uploads it in the background.\n"
-                     "Recording and the window keep running. Off until you turn this on.")
+                     "A channel is included only when this is on and that channel's\n"
+                     "Telegram box is ticked. Off until you turn this on.")
         self.vars[("Telegram", "enabled")] = self.tg_enabled
 
         hint = ("Telethon is not installed, so this is off. Install it (pip install Telethon) and restart MSR."
