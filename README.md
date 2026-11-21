@@ -28,6 +28,12 @@ This README describes **v3.2.0**. Full history: [CHANGELOG.md](CHANGELOG.md).
 
 </details>
 
+## What's new in 3.2.0
+
+- **Telegram uploads** (optional): a finished recording can go to one topic in a group you run. Both switches have to be on: **Options > Telegram** and a per-channel opt-in (right-click **Telegram…**, or `msr_ctl.py edit`). A topic on that channel overrides the global one. Sends use MTProto, about 2 GB per part, split with ffmpeg. The queue sends one file at a time, keeps going after a restart, and shows progress in the log, the Status tab, and `msr_ctl.py telegram status`. Install Telethon (`pip install "Telethon>=1.36,<2"`, or let `run_msr.pyw` install `requirements.txt`) and restart. Without it the section is greyed out and nothing is uploaded.
+- **Linux secrets**: the Twitch sign-in and the Fishtank password are encrypted at rest with the same user key as the Telegram secrets. A value that is still plain is encrypted on the next start.
+- **The per-channel Telegram window** opens at the size of its contents.
+
 ## What's new in 3.1
 
 - **3.1.4 Clip Now stays on the live edge** of a long recording, on every OS. Space plays the open Clip Editor instead of opening another one. The Logs tab shows worker lines such as remux progress. The Library overview scrolls, and on Linux old lowercase recording folders are counted and reused.
