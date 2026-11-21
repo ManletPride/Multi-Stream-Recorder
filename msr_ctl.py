@@ -81,7 +81,8 @@ CATALOG = {
     "subscribe": ("read", ["subscribe", "subscribe --event finished --event health_problem --heartbeat 30"]),
     "move": ("write", ["move knut --to top"]),
     "sort": ("write", ["sort platform"]),
-    "edit": ("write", ["edit twitch:old --name new"]),
+    "edit": ("write", ["edit twitch:old --name new",
+                      "edit knut --telegram-upload on --telegram-topic 55"]),
     "check": ("read", ["check knut"]),
     "clip": ("write", ["clip knut --seconds 30", "clip knut --from=-1:00 --to end",
                        "clip --file D:/streams/Processed/kick/knut/knut.mp4 --from 1:02:03 --to 1:02:48 --exact"]),
@@ -113,8 +114,8 @@ CATALOG = {
 }
 # Window feature -> CLI commands (help --json "gui_features"; a test checks every name exists).
 GUI_FEATURES = {
-    "Channels tab (roster, add/remove, tick, move, sort)": ["channels", "add", "remove", "enable", "disable",
-                                                             "move", "sort", "edit", "reload-channels"],
+    "Channels tab (roster, add/remove, tick, move, sort, per-channel Telegram)": [
+        "channels", "add", "remove", "enable", "disable", "move", "sort", "edit", "reload-channels"],
     "Start / Stop Recording, per-channel start/stop, Check Now": ["start", "stop", "record-start", "record-stop",
                                                                    "check"],
     "Clip Now, Screenshot, Clip Editor cut": ["clip", "screenshot"],
@@ -239,10 +240,14 @@ def build_parser():
     p.add_argument("channels", nargs="+")
     p.add_argument("--to", required=True, choices=["top", "bottom", "up", "down"])
     sub.add_parser("sort", help="sort the roster").add_argument("by", choices=["enabled", "platform", "name"])
-    p = sub.add_parser("edit", help="rename / change platform")
+    p = sub.add_parser("edit", help="rename, or set this channel's Telegram upload and topic")
     p.add_argument("channel")
     p.add_argument("--name", dest="new_name")
     p.add_argument("--platform")
+    p.add_argument("--telegram-upload", choices=["on", "off"],
+                   help="upload this channel's finished recordings (also needs Options > Telegram on)")
+    p.add_argument("--telegram-topic",
+                   help="topic id for this channel, or blank to use the topic in Options")
     sub.add_parser("check", help="Check Now (all, or the named channels)").add_argument("channels", nargs="*")
     p = sub.add_parser("clip", help="Clip Now (last N seconds), or cut --from/--to like the Clip Editor")
     p.add_argument("channel", nargs="?")
@@ -385,8 +390,13 @@ def to_request(a):
     if c == "sort":
         return "channel_sort", {"by": a.by}
     if c == "edit":
-        return "channel_edit", {k: v for k, v in {"channel": a.channel, "new_name": a.new_name,
-                                                  "platform": a.platform}.items() if v is not None}
+        out = {k: v for k, v in {"channel": a.channel, "new_name": a.new_name,
+                                 "platform": a.platform}.items() if v is not None}
+        if a.telegram_upload is not None:
+            out["telegram_upload"] = a.telegram_upload == "on"
+        if a.telegram_topic is not None:
+            out["telegram_topic"] = a.telegram_topic
+        return "channel_edit", out
     if c == "check":
         return "check", ({"channels": a.channels} if a.channels else {})
     if c == "clip":
@@ -646,9 +656,8 @@ def human(cmd, reply):
             text += f"\nWaiting for approval: {res['verification_url']} code {res['user_code']}"
         return text + f"\ninstant alerts: {'on' if res.get('push_enabled') else 'off'}"
     if cmd == "telegram_status":
-        line = res.get("line") or res.get("state") or ""
-        extra = f" ({res['pending']} waiting)" if res.get("pending") else ""
-        return f"Telegram: {line}{extra}"
+        from msr.telegram_queue import format_status
+        return format_status(res)
     if cmd == "telegram_test":
         return "Test message sent to the configured topic."
     if cmd == "wait":

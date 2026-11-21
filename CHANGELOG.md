@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Each channel can opt in to the Telegram upload, off until you tick it (an existing channel list stays off). Right-click a channel and choose **Telegram…**, or `msr_ctl.py edit <channel> --telegram-upload on`. An optional topic id on that channel overrides the one in Options; blank keeps the global topic, in the same group. The queue sends one recording at a time, oldest first, and a FloodWait holds the ones behind it. The Status tab and `msr_ctl.py telegram status` show how many are waiting and which file is uploading.
 - Optional Telegram upload of a finished recording into one forum topic (**Options > Telegram**, off by default). A background queue runs after the remux, retries on network errors and FloodWait, and resumes after a restart. The bot signs in with its token over MTProto (Telethon); MSR never logs in as the user. The hosted Bot API's 50 MB cap is not used. Parts stay under Telegram's 2,097,152,000-byte MTProto limit and are split with stream-copy, named `part n/m`, with a caption. **Delete the local file after every part is confirmed** is off unless you turn it on; a partial failure keeps the file. The api hash, bot token and session file are encrypted at rest: DPAPI on Windows, and on Linux a ciphertext plus a key in the user config directory (mode 0600), never the secret in the clear. `msr_ctl.py telegram status` / `telegram test` report the queue and send the test message. Without Telethon the section is greyed out and recording is unchanged.
 
 ### Fixed

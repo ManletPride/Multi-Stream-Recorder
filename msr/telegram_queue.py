@@ -446,6 +446,112 @@ def _stat(path):
     return st.st_size, getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
 
 
+_UNSET = object()
+
+
+def _flag_on(value) -> bool:
+    """True only for a real opt-in. The string ``"false"`` is not true."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def topic_or_none(value):
+    """A stored topic id, or None when it is blank or not a positive number.
+
+    A bad value is dropped rather than refusing to load the channel list.
+    """
+    if value in (None, "", 0, "0", False):
+        return None
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def normalize_topic_id(value):
+    """What the user typed. Blank clears the override. Anything else must be a positive number."""
+    if value is None or str(value).strip() in ("", "0"):
+        return None
+    number = topic_or_none(value)
+    if number is None:
+        raise SettingError(
+            "The topic id must be a positive number, or blank to use the topic in Options.")
+    return number
+
+
+def telegram_of(item) -> tuple[bool, int | None]:
+    """``(upload this channel, topic override or None)`` from one channels.json entry.
+
+    Missing keys are off and "use the global topic". That is how an existing list loads.
+    """
+    if not isinstance(item, dict):
+        return False, None
+    return _flag_on(item.get("telegram_upload")), topic_or_none(item.get("telegram_topic"))
+
+
+def apply_channel_telegram(record: dict, upload=_UNSET, topic=_UNSET) -> None:
+    """Set the per-channel upload flag and topic override. An unset argument is left alone.
+
+    Off and blank are stored by removing the key, so a list that never opted in stays
+    in the shape it had.
+    """
+    if upload is not _UNSET:
+        if _flag_on(upload):
+            record["telegram_upload"] = True
+        else:
+            record.pop("telegram_upload", None)
+    if topic is not _UNSET:
+        number = normalize_topic_id(topic)
+        if number is None:
+            record.pop("telegram_topic", None)
+        else:
+            record["telegram_topic"] = number
+
+
+def channels_path(data_dir: str, configured: str | None) -> str:
+    path = configured or "channels.json"
+    if not os.path.isabs(path):
+        path = os.path.join(data_dir or ".", path)
+    return path
+
+
+def read_channel_telegram(path: str, key: str) -> tuple[bool, int | None]:
+    """The choice saved for ``key``. A missing file or a missing channel is off."""
+    try:
+        with open(path, encoding="utf-8-sig") as fh:
+            loaded = json.load(fh)
+    except (OSError, ValueError):
+        return False, None
+    if not isinstance(loaded, list):
+        return False, None
+    for item in loaded:
+        if isinstance(item, dict) and item.get("name") == key:
+            return telegram_of(item)
+    return False, None
+
+
+def queue_if_channel(data_dir: str, channels_file: str | None, channel_key: str,
+                     global_on: bool, info: dict) -> str | None:
+    """Queue one finished recording when the global switch and this channel are both on.
+
+    The note remembers a per-channel topic. A blank topic means the global one, decided
+    when the upload starts. Credentials are not written.
+    """
+    if not global_on or not channel_key:
+        return None
+    upload, topic = read_channel_telegram(channels_path(data_dir, channels_file), channel_key)
+    if not upload:
+        return None
+    payload = dict(info or {})
+    if topic:
+        payload["topic_id"] = topic
+    return note_ready(data_dir, True, payload)
+
+
 def note_ready(data_dir: str, enabled: bool, info: dict) -> str | None:
     """Drop one inbox note for a recording that just became final. No-op when uploads are off.
 
@@ -463,14 +569,20 @@ def note_ready(data_dir: str, enabled: bool, info: dict) -> str | None:
             os.chmod(inbox, 0o700)
         except OSError:
             pass
+    created = info.get("created")
+    if created is None:
+        created = time.time_ns()
     note = {
         "path": path,
         "channel": str(info.get("channel") or "")[:200],
         "platform": str(info.get("platform") or "")[:40],
         "title": str(info.get("title") or "")[:300],
         "recorded_at": str(info.get("recorded_at") or "")[:40],
-        "created": time.time(),
+        "created": created,
     }
+    topic = topic_or_none(info.get("topic_id"))
+    if topic:
+        note["topic_id"] = topic
     dest = os.path.join(inbox, uuid.uuid4().hex + ".json")
     _write_private(dest, json.dumps(note).encode("utf-8"))
     return dest
@@ -485,6 +597,22 @@ def iter_inbox(data_dir: str):
     for name in names:
         if name.endswith(".json"):
             yield os.path.join(inbox, name)
+
+
+def ordered_inbox(data_dir: str):
+    """Inbox notes oldest first. A burst of finishes stays in the order they were queued."""
+    rows = []
+    for path in iter_inbox(data_dir):
+        note = read_note(path)
+        created = 0.0
+        if isinstance(note, dict):
+            try:
+                created = float(note.get("created") or 0)
+            except (TypeError, ValueError):
+                created = 0.0
+        rows.append((created, path, note))
+    rows.sort(key=lambda row: (row[0], row[1]))
+    return rows
 
 
 def read_note(path: str) -> dict | None:
@@ -547,7 +675,8 @@ class QueueStore:
                 return job
         return None
 
-    def enqueue(self, path: str, channel: str, platform: str, title: str, recorded_at: str) -> dict | None:
+    def enqueue(self, path: str, channel: str, platform: str, title: str, recorded_at: str,
+                topic_id=None) -> dict | None:
         try:
             size, mtime_ns = _stat(path)
         except OSError:
@@ -573,6 +702,9 @@ class QueueStore:
             "parts": [],
             "created": time.time(),
         }
+        topic = topic_or_none(topic_id)
+        if topic:
+            job["topic_id"] = topic
         self.jobs.append(job)
         return job
 
@@ -594,6 +726,24 @@ class QueueStore:
         if not times:
             return None
         return min(times) if min(times) > now else now
+
+
+def format_status(st: dict) -> str:
+    """One status line: what is happening, and how many recordings are still in the queue.
+
+    ``pending`` counts the upload in progress as well as the ones waiting. No paths, no secrets.
+    """
+    line = str((st or {}).get("line") or (st or {}).get("state") or "")
+    try:
+        pending = int((st or {}).get("pending") or 0)
+    except (TypeError, ValueError):
+        pending = 0
+    current = str(((st or {}).get("current") or {}).get("name") or "")
+    parts = [line]
+    if current and current not in line:
+        parts.append(current)
+    parts.append(f"queue {pending}")
+    return "Telegram: " + " · ".join(part for part in parts if part)
 
 
 def _write_private(path: str, data: bytes) -> None:

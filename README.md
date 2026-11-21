@@ -278,7 +278,7 @@ Output layout: `streams_dir\Recorded\<platform>\<channel>\` (raw `.ts` while rec
 
 ### Telegram uploads (optional)
 
-For a machine with little disk, MSR can post each finished recording into one topic of a Telegram group you run. It is off until you turn it on under **Options > Telegram** (or `[Telegram] enabled = true`). Recording and the window are not held up: a background queue uploads after the remux, retries with a pause, and resumes after a restart.
+For a machine with little disk, MSR can post a finished recording into one topic of a Telegram group you run. It is off until you turn it on under **Options > Telegram** (or `[Telegram] enabled = true`) **and** tick **Upload finished recordings from this channel** (right-click the channel, **Telegram…**, or `msr_ctl.py edit <channel> --telegram-upload on`). Existing channels stay off. A topic id on the channel overrides the one in Options; leave it blank to use that one. The group and the bot stay the ones in Options. Recording and the window are not held up: a background queue uploads after the remux, one file at a time, oldest first, retries with a pause, and resumes after a restart. The Status tab and `msr_ctl.py telegram status` show the queue and the file being sent.
 
 The hosted Bot API only accepts about **50 MB** per file. MSR does not use that for the video. It signs the bot in over MTProto (Telethon: api id, api hash, bot token) and sends documents of up to **2,097,152,000 bytes** (4000 × 512 KiB, Telegram's non-Premium cap). A larger file is split with ffmpeg stream-copy — no re-encode — into parts named `name.part01of03.mp4`, each with a caption (channel, title, date, part n/m).
 
