@@ -728,6 +728,62 @@ class QueueStore:
         return min(times) if min(times) > now else now
 
 
+def _size_text(n: int) -> str:
+    n = max(0, int(n))
+    if n >= 1024 * 1024:
+        return f"{n / (1024 * 1024):.1f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.0f} KiB"
+    return f"{n} B"
+
+
+def _eta_text(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds >= 3600:
+        return f"{seconds // 3600}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}"
+    if seconds >= 60:
+        return f"{seconds // 60}:{seconds % 60:02d}"
+    return f"{seconds}s"
+
+
+def upload_start_line(name: str, n: int, m: int, size: int, topic) -> str:
+    """Logged once when a part actually starts uploading."""
+    return f"uploading {name} part {int(n)}/{int(m)} ({_size_text(size)}) to topic {topic}"
+
+
+def upload_progress_line(name: str, sent: int, total: int, elapsed: float) -> str:
+    """Percent, megabytes, average speed and ETA for one progress log line."""
+    sent = max(0, int(sent))
+    total = max(0, int(total))
+    percent = int(100 * sent / total) if total else 0
+    speed = sent / elapsed if elapsed and elapsed > 0 else 0.0
+    if speed > 0 and total > sent:
+        eta = _eta_text((total - sent) / speed)
+    elif total and sent >= total:
+        eta = "0s"
+    else:
+        eta = "…"
+    return (f"Uploading {name} {percent}% ({_size_text(sent)}/{_size_text(total)}, "
+            f"{speed / (1024 * 1024):.1f} MB/s, ETA {eta})")
+
+
+def progress_log_due(percent: int, now: float, last_percent: int, last_at: float, *,
+                     step: int = 10, gap: float = 10.0) -> bool:
+    """True on a 10-point step, or after 10 s if the percent moved.
+
+    Telethon calls the progress callback many times a second. Logging on every
+    call floods the log; waiting only for 10% hides a slow upload. A step that
+    arrives inside the 10 s gap is still logged, and a crawl that has not
+    gained 10 points is logged once the gap has passed.
+    """
+    percent = int(percent)
+    if percent <= int(last_percent):
+        return False
+    if percent - int(last_percent) >= step:
+        return True
+    return (float(now) - float(last_at)) >= gap
+
+
 def format_status(st: dict) -> str:
     """One status line: what is happening, and how many recordings are still in the queue.
 
