@@ -266,11 +266,43 @@ class AddChannelDialogTests(TkCase):
         self.addCleanup(dlg.destroy)
         self.assertTrue(dlg._msr_title_bar)
         self.assertEqual(self.revealed[0][0], dlg)
-        self.assertTrue(dlg._msr_place.startswith("+"))
+        self.assertRegex(dlg._msr_place, r"^\d+x\d+\+")
+        width, height = (int(part) for part in dlg._msr_place.split("+", 1)[0].split("x"))
+        self.assertLess(width, 700)
+        self.assertLess(height, 400)
         self.assertEqual(str(dlg.state()), "withdrawn")  # nothing was shown by the test
         self.assertEqual(dlg.wm_transient(), "")  # hidden parent: no transient link
         dialogs.wintheme.set_title_bar_dark.assert_called()
         self.assertTrue(all(call.args[1] is True for call in dialogs.wintheme.set_title_bar_dark.call_args_list))
+
+    def test_channel_telegram_dialog_fits_its_content(self):
+        from msr import channel_panel as cp
+
+        def texts(widget):
+            found = []
+            try:
+                found.append(str(widget.cget("text")))
+            except tk.TclError:
+                pass
+            for child in widget.winfo_children():
+                found.extend(texts(child))
+            return found
+
+        dlg = cp.open_channel_telegram_dialog(
+            self.root, "alice · Kick", False, None, lambda upload, topic: "")
+        self.addCleanup(dlg.destroy)
+        self.assertTrue(dlg._msr_title_bar)
+        self.assertEqual(tuple(int(v) for v in dlg.resizable()), (0, 0))
+        self.assertRegex(dlg._msr_place, r"^\d+x\d+\+")
+        width, height = (int(part) for part in dlg._msr_place.split("+", 1)[0].split("x"))
+        self.assertGreater(width, 200)
+        self.assertLess(width, 480)
+        self.assertGreater(height, 60)
+        self.assertLess(height, 260)
+        self.assertEqual((dlg.winfo_reqwidth(), dlg.winfo_reqheight()), (width, height))
+        blob = " ".join(texts(dlg))
+        self.assertIn("this box is ticked", blob)
+        self.assertIn("Upload finished recordings", blob)
 
 
 if __name__ == "__main__":

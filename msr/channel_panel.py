@@ -431,3 +431,62 @@ def open_add_channel_dialog(root, theme, on_add, initial_text="",
     ent.focus_set()
     ent.icursor(tk.END)
     return dlg
+
+
+def open_channel_telegram_dialog(parent, channel_label, upload, topic, on_save):
+    """Upload and topic for one channel. ``on_save(upload, topic_text)`` returns an error or ''."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    from msr import dialogs
+
+    win, frame = dialogs.new_dialog(parent, "Telegram", padding=8)
+    ttk.Label(frame, text=channel_label, style="Muted.TLabel").grid(
+        row=0, column=0, columnspan=2, sticky="w")
+    upload_var = tk.BooleanVar(value=bool(upload))
+    ttk.Checkbutton(frame, text="Upload finished recordings from this channel",
+                    variable=upload_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+    ttk.Label(frame, text="Topic id").grid(row=2, column=0, sticky="w", pady=(6, 0))
+    topic_var = tk.StringVar(value="" if not topic else str(topic))
+    ent = ttk.Entry(frame, textvariable=topic_var, width=12)
+    ent.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+    ttk.Label(
+        frame,
+        text="This channel is uploaded only when this box is ticked and "
+             "Upload finished recordings is on under Options. "
+             "A blank topic uses the topic set there. Same group and bot.",
+        style="Muted.TLabel", wraplength=320, justify="left",
+    ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+    err = ttk.Label(frame, text="", style="Error.TLabel", wraplength=320)
+    err.grid(row=4, column=0, columnspan=2, sticky="w")
+    btns = ttk.Frame(frame)
+    btns.grid(row=5, column=0, columnspan=2, sticky="e", pady=(10, 0))
+
+    def _fit():
+        """Size the window to its widgets. A position-only geometry stays huge on Hyprland."""
+        win.update_idletasks()
+        width, height = win.winfo_reqwidth(), win.winfo_reqheight()
+        place = getattr(win, "_msr_place", "") or ""
+        at = place.find("+")
+        tail = place[at:] if at >= 0 else ""
+        win.geometry(f"{max(width, 1)}x{max(height, 1)}{tail}")
+
+    def _ok(_e=None):
+        message = on_save(bool(upload_var.get()), topic_var.get().strip()) or ""
+        if message:
+            err.configure(text=message)
+            _fit()
+            return "break"
+        win.destroy()
+        return "break"
+
+    def _cancel(_e=None):
+        win.destroy()
+        return "break"
+
+    ttk.Button(btns, text="Cancel", command=_cancel).pack(side=tk.LEFT, padx=(0, 6))
+    ttk.Button(btns, text="Save", command=_ok).pack(side=tk.LEFT)
+    win.bind("<Return>", _ok)
+    win.bind("<Escape>", _cancel)
+    dialogs.run_modal(win, parent, ent)
+    return win

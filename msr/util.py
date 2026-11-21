@@ -494,7 +494,17 @@ def coerce_channel_records(loaded):
             skipped.append(name)
             continue
         seen.add(channel_dedupe_key(name))
-        records.append({"name": name, "enabled": bool(enabled)})
+        record = {"name": name, "enabled": bool(enabled)}
+        if isinstance(item, dict):
+            # Absent means off, and off is not written back. An old channels.json
+            # loads unchanged and nothing starts uploading until a channel opts in.
+            from msr.telegram_queue import telegram_of
+            upload, topic = telegram_of(item)
+            if upload:
+                record["telegram_upload"] = True
+            if topic:
+                record["telegram_topic"] = topic
+        records.append(record)
     return records, skipped
 
 
@@ -1958,6 +1968,10 @@ _SENSITIVE_HEADER_RE = re.compile(
     r'(?i)(\b(?:Authorization|Cookie|Set-Cookie|X-Api-Key)\s*:\s*)(.*?)(?=\r\n|$)',
 )
 _QUERY_PARAM_RE = re.compile(r'([?&])([^=&\s]+)=([^&\s]*)')
+# Bot API URLs embed the token in the path (api.telegram.org/bot<token>/...).
+# The token itself is digits, a colon, then a long secret. Scrub both.
+_BOT_URL_RE = re.compile(r"https?://api\.telegram\.org/bot\S+", re.IGNORECASE)
+_BOT_TOKEN_RE = re.compile(r"\d{6,12}:[A-Za-z0-9_-]{20,}")
 
 
 # Path segments of signed CDN URLs (googlevideo: /expire/N/ei/X/ip/ADDR/.../sig/S/lsig/L)
@@ -2028,6 +2042,8 @@ def redact_for_log(text):
 
     text = _QUERY_PARAM_RE.sub(_param, text)
     text = _SENSITIVE_HEADER_RE.sub(r'\1***', text)
+    text = _BOT_URL_RE.sub("https://api.telegram.org/bot***/...", text)
+    text = _BOT_TOKEN_RE.sub("***", text)
     return text
 
 

@@ -123,6 +123,9 @@ def main_headless(config):
 
     app = HeadlessApp(config, lambda keys: StreamRecorder(keys, config, presence=app.presence,
                                                           watch_channels=app.disabled_keys()))
+    from msr.telegram_upload import Uploader
+    app.uploads = Uploader(config, os.getcwd(), get_recorder=lambda: app.recorder)
+    app.uploads.sync()
     # An in-app update (msr_ctl.py update install --yes) relaunches with exactly this data folder.
     app.relaunch_args = ["--headless", "--data-dir", os.getcwd(),
                          "--config", os.path.abspath(config.config_file)]
@@ -169,6 +172,10 @@ def main_headless(config):
         service.stop()
     if app.last_recorder is not None:
         finish_headless_session(app.last_recorder)
+    try:
+        app.uploads.stop()
+    except Exception:
+        logging.debug("telegram stop", exc_info=True)
     if app.after_children is not None:  # update install: the helper waits for this process to exit
         try:
             app.after_children()

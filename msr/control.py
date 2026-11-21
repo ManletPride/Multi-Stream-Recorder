@@ -214,6 +214,21 @@ def parse_add_text(text, platform=None):
     return "kick", text
 
 
+def _apply_telegram(record, args) -> None:
+    from msr.telegram_queue import apply_channel_telegram
+    upload = args["telegram_upload"] if "telegram_upload" in args else None
+    topic = args["telegram_topic"] if "telegram_topic" in args else None
+    # apply_channel_telegram treats a missing argument as "leave it". Passing None for
+    # upload would clear it, so only forward the keys the caller set.
+    kwargs = {}
+    if "telegram_upload" in args:
+        kwargs["upload"] = _truthy(upload)
+    if "telegram_topic" in args:
+        kwargs["topic"] = topic
+    if kwargs:
+        apply_channel_telegram(record, **kwargs)
+
+
 def roster_add(records, name, platform=None, enable=True) -> str:
     from msr.channel_panel import build_channel_key
     from msr.util import validate_channel_name
@@ -340,6 +355,12 @@ def validate_setting(section, key, value) -> str:
     if (section, key) in (("Paths", "streams_dir"), ("Recording", "filename_pattern"),
                           ("Advanced", "ffmpeg_path")) and not value:
         raise ControlError(f"{section}.{key} cannot be empty.", "invalid")
+    if section == "Telegram" and key not in ("enabled", "delete_after_upload"):
+        from msr.telegram_queue import SettingError, normalize_setting
+        try:
+            return normalize_setting(key, value)
+        except SettingError as exc:
+            raise ControlError(str(exc), "invalid") from None
     if "\n" in value or "\r" in value:
         raise ControlError("A setting cannot contain a line break.", "invalid")
     return value
@@ -347,6 +368,8 @@ def validate_setting(section, key, value) -> str:
 
 def setting_applies(section, key) -> str:
     if (section, key) in LIVE_SETTINGS or (section, key) in NOW_SETTINGS:
+        return "now"
+    if section == "Telegram":
         return "now"
     if section == "Control":
         return "restart"
@@ -358,9 +381,13 @@ def apply_setting(config, section, key, value, recording=False, live=None) -> st
     type/range checks, save (secrets DPAPI-encrypted by Config.save), then ``live(value)``
     for settings a running session takes at once. Returns the stored value."""
     section, key = str(section or ""), str(key or "").lower()
-    # before the known-key check: the _dpapi copy only exists in config.ini on Windows
-    if key.endswith("_dpapi") and ((section, key[:-6]) in SECRET_KEYS or known_setting(config, section, key)):
-        raise ControlError(f"Set {section}.{key[:-6]} instead; the encrypted copy is managed by MSR.", "invalid")
+    # before the known-key check: the encrypted copy is managed by MSR
+    for suffix in ("_dpapi", "_box"):
+        if key.endswith(suffix) and ((section, key[:-len(suffix)]) in SECRET_KEYS
+                                     or known_setting(config, section, key)):
+            raise ControlError(
+                f"Set {section}.{key[:-len(suffix)]} instead; the encrypted copy is managed by MSR.",
+                "invalid")
     if not known_setting(config, section, key):
         raise ControlError(f"Unknown setting {section}.{key}.", "not_found")
     if (section, key) == ("Paths", "streams_dir") and recording:
@@ -373,6 +400,7 @@ def apply_setting(config, section, key, value, recording=False, live=None) -> st
     config.config.set(section, key, value)
     if (section, key) in SECRET_KEYS and not value.strip():  # clearing also drops the encrypted copy
         config.config.remove_option(section, key + "_dpapi")
+        config.config.remove_option(section, key + "_box")
     if not config.save():
         raise ControlError("config.ini could not be written (see the log).", "write_failed")
     if live is not None and (section, key) in LIVE_SETTINGS:
@@ -555,6 +583,12 @@ class HeadlessApp(AppAdapter):
     def records(self):
         return self.roster.records()
 
+    def settings_changed(self, section, key) -> None:
+        if section == "Telegram":
+            uploads = getattr(self, "uploads", None)
+            if uploads is not None:
+                uploads.sync()
+
     def mutate(self, fn):
         def work():
             result = self.roster.mutate(fn)
@@ -681,8 +715,12 @@ def channel_rows(app) -> list:
     from msr.agent_status import iso
     from msr.util import channel_watch_url
     tracker = app.tracker
+    by_key = {r["name"]: r for r in app.records()}
     for row in rows:
         key = row.pop("_key")
+        saved = by_key.get(key) or {}
+        row["telegram_upload"] = bool(saved.get("telegram_upload"))
+        row["telegram_topic"] = saved.get("telegram_topic") or None
         try:
             # no query string: a custom URL can carry a token (same rule as the shown name)
             row["url"] = (channel_watch_url(key) or "").split("?", 1)[0].split("#", 1)[0]
@@ -762,6 +800,15 @@ def live_status(app) -> dict:
         "channels": rows,
         "update": app.update_info(),
     }
+    try:
+        uploads = getattr(app, "uploads", None)
+        if uploads is not None:
+            out["telegram"] = uploads.status()
+        else:
+            from msr.telegram_upload import disk_status
+            out["telegram"] = disk_status(app.config, app.data_dir)
+    except Exception:
+        logging.debug("telegram status", exc_info=True)
     tracker = app.tracker
     if tracker is not None:
         out["finished"] = tracker.recent_finished()
@@ -1057,20 +1104,38 @@ class Controller:
         return {"order": [display_name(r["name"]) for r in self.app.records()]}
 
     def cmd_channel_edit(self, args):
-        """Rename a channel (new name and/or platform). Its recordings folder name follows the
-        key, so a channel being recorded must be stopped first."""
+        """Rename a channel, or set its Telegram upload and topic.
+
+        A rename changes the recordings folder name, so a channel being recorded must be
+        stopped first. The Telegram fields can change while it is recording: the file that
+        finishes uses the choice saved at that moment. A blank topic uses the one in Options.
+        """
         ref = args.get("channel")
         recs = self.app.records()
         old = recs[resolve_channel(recs, ref)]["name"]
+        renaming = (args.get("new_name") not in (None, "") or args.get("platform") not in (None, "")
+                    or "enabled" in args)
+        telegram = "telegram_upload" in args or "telegram_topic" in args
+        if not renaming and not telegram:
+            raise ControlError("Say what to change (name, platform, telegram_upload or telegram_topic).",
+                               "bad_request")
         rec = self.app.recorder
-        if is_running_session(rec) and old in getattr(rec, "processes", {}) and old not in rec.stopped_channels:
+        if renaming and is_running_session(rec) and old in getattr(rec, "processes", {}) \
+                and old not in rec.stopped_channels:
             raise ControlError("Stop this channel first (record_stop), then edit it.", "conflict")
 
         from msr.channel_panel import split_channel_key
+        from msr.telegram_queue import SettingError
         old_platform, old_user = split_channel_key(old)
 
         def edit(work):
             i = resolve_channel(work, old)
+            if not renaming:
+                try:
+                    _apply_telegram(work[i], args)
+                except SettingError as exc:
+                    raise ControlError(str(exc), "invalid") from None
+                return work[i]["name"]
             entry = work.pop(i)
             try:
                 key = roster_add(work, args.get("new_name") or old_user, args.get("platform") or old_platform,
@@ -1079,13 +1144,25 @@ class Controller:
             except ControlError:
                 work.insert(i, entry)
                 raise
-            work.insert(i, work.pop())
+            new = work.pop()
+            for field in ("telegram_upload", "telegram_topic"):
+                if field in entry:
+                    new[field] = entry[field]
+            try:
+                _apply_telegram(new, args)
+            except SettingError as exc:
+                work.insert(i, entry)
+                raise ControlError(str(exc), "invalid") from None
+            work.insert(i, new)
             return key
 
         key = self.app.mutate(edit)
         if rec is not None and old != key:
             self._rec_call(rec, "remove_channel", old)
-        return {"old": display_name(old), "new": display_name(key)}
+        saved = self.app.records()[resolve_channel(self.app.records(), key)]
+        return {"old": display_name(old), "new": display_name(key),
+                "telegram_upload": bool(saved.get("telegram_upload")),
+                "telegram_topic": saved.get("telegram_topic")}
 
     def cmd_channels_reload(self, args):
         return {"channels": self.app.reload_channels()}
@@ -1323,7 +1400,7 @@ class Controller:
             if section and s.lower() != str(section).lower():
                 continue
             values = {k: masked(k, v) for k, v in cfg.items(s)
-                      if (not key or k == key) and not k.endswith("_dpapi")}
+                      if (not key or k == key) and not k.endswith("_dpapi") and not k.endswith("_box")}
             for sec, k in SECRET_KEYS:  # encrypted credentials count as set
                 if sec.lower() == s.lower() and k in values:
                     values[k] = masked(k, read_secret(cfg, s, k))
@@ -1539,6 +1616,34 @@ class Controller:
             out["note"] = ("Twitch was unreachable: the token was deleted here; remove MSR's access at "
                            "https://www.twitch.tv/settings/connections.")
         return out
+
+    # -------------------------------------------------- Telegram uploads (Options > Telegram)
+    def _uploads(self):
+        return getattr(self.app, "uploads", None)
+
+    def cmd_telegram_status(self, args):
+        """Upload queue: waiting / uploading / paused. No token, no paths."""
+        uploads = self._uploads()
+        if uploads is not None:
+            return uploads.status()
+        from msr.telegram_upload import disk_status
+        return disk_status(self.app.config, self.app.data_dir)
+
+    def cmd_telegram_test(self, args):
+        """Send one plain test message to the configured topic. Checks the bot, the group and the user id."""
+        uploads = self._uploads()
+        if uploads is not None:
+            result = uploads.test(timeout=float(args.get("timeout") or 90))
+        else:
+            from msr.telegram_upload import Uploader
+            probe = Uploader(self.app.config, self.app.data_dir)
+            try:
+                result = probe.test_inline()
+            finally:
+                probe.stop()
+        if not result.get("ok"):
+            raise ControlError(result.get("error") or "Telegram test failed.", "failed")
+        return {"sent": True}
 
     # -------------------------------------------------- logs
     def cmd_logs(self, args):

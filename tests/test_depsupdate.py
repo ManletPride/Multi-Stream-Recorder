@@ -25,7 +25,8 @@ msr_ctl = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(msr_ctl)
 
 LATEST = {"yt-dlp": "2099.1.1", "streamlink": "8.5.0", "curl_cffi": "0.16.0", "websocket-client": "1.9.0",
-          "psutil": "7.0.0", "Pillow": "99.0", "pystray": "0.19.5", "plyer": "2.1.0", "colorama": "0.4.6"}
+          "psutil": "7.0.0", "Pillow": "99.0", "pystray": "0.19.5", "plyer": "2.1.0", "colorama": "0.4.6",
+          "Telethon": "1.46.0"}
 INSTALLED = dict(LATEST, **{"yt-dlp": "2026.8.19", "Pillow": "12.3.0", "plyer": None})
 
 
