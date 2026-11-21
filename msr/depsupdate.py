@@ -41,6 +41,7 @@ PACKAGES = (
     ("pystray", "pystray", "package"),
     ("plyer", "plyer", "package"),
     ("colorama", "colorama", "package"),
+    ("Telethon", "Telethon", "package"),
 )
 NAMES = ("msr", "ffmpeg") + tuple(p[0].lower() for p in PACKAGES)
 STATE_KEY = "deps_check"            # window_state.json: last check time and what had updates

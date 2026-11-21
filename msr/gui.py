@@ -426,6 +426,10 @@ def main_gui(config):
         except NameError:
             pass
         try:
+            tg_queue_label.configure(bg=t['bg'], fg=t['fg'])
+        except NameError:
+            pass
+        try:
             _theme_preview_strip(t)
         except NameError:
             pass
@@ -1254,6 +1258,7 @@ def main_gui(config):
         ctx_menu.add_command(label="Open stream page", command=open_channel_url)
         ctx_menu.add_command(label="Open Clips Folder", command=_open_roster_clips_dir)
         ctx_menu.add_command(label="Copy Name", command=copy_channel_name)
+        ctx_menu.add_command(label="Telegram\u2026", command=_open_channel_telegram)
         ctx_menu.add_separator()
         ctx_menu.add_command(label="Move to Top", command=_move_channels_to_top)
         ctx_menu.add_command(label="Move Up", command=_move_channel_up)
@@ -1271,6 +1276,31 @@ def main_gui(config):
             ctx_menu.tk_popup(event.x_root, event.y_root)
         finally:
             ctx_menu.grab_release()
+
+    def _open_channel_telegram():
+        """Per-channel upload and topic. Off until the user ticks it; a blank topic uses Options."""
+        names = _selected_roster_names()
+        if len(names) != 1:
+            _dialogs.show_info(root, "Telegram", "Select one channel.")
+            return
+        name = names[0]
+        idx = _index_for_name(name)
+        if idx < 0:
+            return
+        rec = channels[idx]
+        shown, plat = cp.channel_display(name)
+
+        def on_save(upload, topic_text):
+            from msr.telegram_queue import SettingError, apply_channel_telegram
+            try:
+                apply_channel_telegram(rec, upload=upload, topic=topic_text)
+            except SettingError as exc:
+                return str(exc)
+            save_channels()
+            return ""
+
+        cp.open_channel_telegram_dialog(
+            root, f"{shown} \u00b7 {plat}", rec.get("telegram_upload"), rec.get("telegram_topic"), on_save)
 
     def copy_channel_name():
         names = _selected_roster_names()
@@ -1882,6 +1912,41 @@ def main_gui(config):
         io_meter_label.pack(side=tk.RIGHT)
         Tooltip(io_meter_label, lambda: format_tooltip(_io_sampler.last))
 
+    # Queue length and the file being sent. Packed only while Telegram uploads are on,
+    # so a window that never enables them keeps the Status tab it had.
+    tg_queue_label = tk.Label(status_tab, text="", anchor="w", justify="left",
+                              font=("Segoe UI", 9))
+
+    def _paint_tg_queue():
+        t = _themes.current()
+        tg_queue_label.configure(bg=t["bg"], fg=t["fg"])
+        up = _telegram_uploads[0]
+        text = ""
+        if up is not None:
+            try:
+                st = up.status()
+            except Exception:
+                st = None
+            if st and st.get("enabled"):
+                from msr.telegram_queue import format_status
+                text = format_status(st)
+        if text:
+            tg_queue_label.configure(text=text)
+            if not tg_queue_label.winfo_ismapped():
+                anchor = status_meter_row if status_meter_row.winfo_ismapped() else status_header
+                tg_queue_label.pack(fill=tk.X, padx=10, pady=(0, 4), after=anchor)
+        elif tg_queue_label.winfo_ismapped():
+            tg_queue_label.pack_forget()
+
+    def _refresh_tg_queue():
+        try:
+            _paint_tg_queue()
+        except Exception:
+            logging.debug("Telegram queue line", exc_info=True)
+        root.after(1000, _refresh_tg_queue)
+
+    root.after(1000, _refresh_tg_queue)
+
     def _show_status_context_menu(event):
         """Show context menu on status tree with options appropriate to channel state."""
         item = tree.identify_row(event.y)
@@ -2100,6 +2165,8 @@ def main_gui(config):
         except _control.ControlError as e:
             raise ValueError(str(e)) from None
         _reflect_setting(section, key)
+        if section == "Telegram":
+            _telegram_sync()
         logging.info(f"Setting {section}.{key} changed in Options")
         return value
 
@@ -2108,10 +2175,34 @@ def main_gui(config):
         if tw is not None:
             threading.Thread(target=tw.restart, daemon=True, name="twitch-push-restart").start()
 
+    _telegram_uploads = [None]
+
+    def _telegram_sync():
+        up = _telegram_uploads[0]
+        if up is not None:
+            try:
+                up.sync()
+            except Exception:
+                logging.debug("telegram sync", exc_info=True)
+
+    def _telegram_status():
+        up = _telegram_uploads[0]
+        if up is None:
+            return {"enabled": False, "line": "Off", "state": "off"}
+        return up.status()
+
+    def _telegram_test():
+        up = _telegram_uploads[0]
+        if up is None:
+            return {"ok": False, "error": "Uploader is not running."}
+        return up.test()
+
     options_panel = _options_panel.OptionsPanel(
         notebook, config, library_data_dir, _options_apply_setting,
         on_twitch_changed=_options_twitch_changed, tooltip=Tooltip, sound_test=sounds.test,
-        open_updates=lambda: _open_updates())
+        open_updates=lambda: _open_updates(),
+        on_telegram_changed=_telegram_sync, telegram_status=_telegram_status,
+        telegram_test=_telegram_test)
     notebook.add(options_panel.frame, text="  Options  ")
 
     def _options_tab_opened(_event=None):
@@ -3669,6 +3760,11 @@ def main_gui(config):
         """
         # 0. No more commands; msr_status.json says "not running"
         try:
+            if _telegram_uploads[0] is not None:
+                _telegram_uploads[0].stop()
+        except Exception:
+            pass
+        try:
             if _control_service[0] is not None:
                 _control_service[0].stop()
         except Exception:
@@ -3775,6 +3871,8 @@ def main_gui(config):
         value = _control.apply_setting(config, section, key, value,
                                        recording=bool(recorder and recorder.is_running))
         _reflect_setting(section, key)
+        if section == "Telegram":
+            _telegram_sync()
         return value
 
     def _control_twitch_changed():
@@ -3788,7 +3886,11 @@ def main_gui(config):
         _reload_channels_from_disk()
         return len(channels)
 
-    _control_service[0] = _control.Service.start_for(_control_exec.GuiBridge(config, _control_jobs, {
+    from msr.telegram_upload import Uploader
+    _telegram_uploads[0] = Uploader(config, library_data_dir, get_recorder=lambda: recorder)
+    _telegram_uploads[0].sync()
+
+    _control_bridge = _control_exec.GuiBridge(config, _control_jobs, {
         "get_recorder": lambda: recorder,
         "get_presence": lambda: presence_store,
         "channels": lambda: channels,
@@ -3804,7 +3906,9 @@ def main_gui(config):
         "health_check_now": health_ctl.check_now,
         "sound_test": sounds.test,
         "update_tag": lambda: _update_tag[0],
-    }))
+    })
+    _control_bridge.uploads = _telegram_uploads[0]
+    _control_service[0] = _control.Service.start_for(_control_bridge)
 
     # ── Apply theme and start refresh loops ──
     apply_theme()

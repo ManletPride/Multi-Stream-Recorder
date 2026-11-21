@@ -181,7 +181,8 @@ class OptionsPanel:
     def __init__(self, container, config, data_dir, apply_setting, on_twitch_changed=None,
                  tooltip=None, api=te, connect_job=tc.ConnectJob, opener=webbrowser.open,
                  ask_dir=None, ask_file=None, fishtank_test=_fishtank_test, ffmpeg_check=_ffmpeg_check,
-                 environ=os.environ, sound_test=None, open_updates=None):
+                 environ=os.environ, sound_test=None, open_updates=None,
+                 on_telegram_changed=None, telegram_status=None, telegram_test=None):
         self.config = config
         self.data_dir = data_dir
         self.apply_setting = apply_setting
@@ -196,6 +197,10 @@ class OptionsPanel:
         self.environ = environ
         self.sound_test = sound_test
         self.open_updates = open_updates
+        self.on_telegram_changed = on_telegram_changed
+        self.telegram_status = telegram_status
+        self.telegram_test = telegram_test
+        self._tg_labels = []
         self.tip = tooltip or Tooltip  # same helper as the rest of the window (msr/tooltip.py)
         self.job = None
         self._foreign = None   # a sign-in started elsewhere (control); shown, not driven
@@ -219,6 +224,7 @@ class OptionsPanel:
         self._build_twitch(t)
         if open_updates is not None:
             self._build_updates()
+        self._build_telegram(t)
         for title, collapsed, rows in GROUPS:
             self._build_group(title, collapsed, rows, t)
         self.message = ttk.Label(self.body, text="", foreground=t["muted"])
@@ -278,6 +284,212 @@ class OptionsPanel:
                   style="Muted.TLabel").pack(side=tk.LEFT, padx=(10, 0))
         self.tip(btn, "When a site stops recording, an old yt-dlp / streamlink is the usual cause.\n"
                       "Updates are one click and the previous version is put back if it fails.")
+
+    def _build_telegram(self, t):
+        """Upload finished recordings into one forum topic. Dense, same widgets as the other groups."""
+        from msr import telegram_api
+        from msr.config import secret_is_saved
+        box = ttk.LabelFrame(self.body, text=" Telegram ", padding=(8, 4))
+        box.pack(fill=tk.X, pady=(8, 0))
+        self._tg_box = box
+        self._tg_widgets = []
+        installed = telegram_api.installed()
+        self._tg_installed = installed
+
+        def remember(widget):
+            self._tg_widgets.append(widget)
+            if not installed:
+                try:
+                    widget.state(["disabled"])
+                except tk.TclError:
+                    widget.configure(state=tk.DISABLED)
+            return widget
+
+        head = ttk.Frame(box)
+        head.pack(fill=tk.X)
+        enabled = str(self.config.get("Telegram", "enabled", "false")).strip().lower() in ("1", "true", "yes", "on")
+        self.tg_enabled = tk.BooleanVar(value=enabled)
+        cb = remember(ttk.Checkbutton(
+            head, text="Upload finished recordings", variable=self.tg_enabled,
+            command=lambda: self._commit("Telegram", "enabled", "true" if self.tg_enabled.get() else "false")))
+        cb.pack(side=tk.LEFT)
+        self.tip(cb, "After a recording is remuxed, MSR uploads it in the background.\n"
+                     "A channel is included only when this is on and that channel's\n"
+                     "Telegram box is ticked. Off until you turn this on.")
+        self.vars[("Telegram", "enabled")] = self.tg_enabled
+
+        hint = ("Telethon is not installed, so this is off. Install it (pip install Telethon) and restart MSR."
+                if not installed else
+                "Bot token only — MSR never logs in as you. Files over 2000 MB are split, without re-encoding.")
+        self.tg_intro = ttk.Label(box, text=hint, wraplength=640, foreground=t["warn" if not installed else "muted"])
+        self.tg_intro.pack(fill=tk.X, pady=(2, 4))
+        self._tg_labels.append(self.tg_intro)
+
+        grid = ttk.Frame(box)
+        grid.pack(fill=tk.X)
+        grid.columnconfigure(2, weight=1)
+        self._tg_grid = grid
+        specs = (
+            ("api_id", "API id", "from my.telegram.org", 12, False),
+            ("api_hash", "API hash", "", 22, True),
+            ("bot_token", "Bot token", "from BotFather", 22, True),
+            ("chat_id", "Group id", "supergroup, starts with -100", 18, False),
+            ("topic_id", "Topic id", "last number in the t.me/c/… link", 8, False),
+            ("owner_id", "Your user id", "so MSR can confirm the group is yours", 14, False),
+        )
+        for row_i, (key, label, hint_text, width, secret) in enumerate(specs):
+            ttk.Label(grid, text=label).grid(row=row_i, column=0, sticky="w", pady=1)
+            cell = ttk.Frame(grid)
+            cell.grid(row=row_i, column=1, sticky="w", padx=6, pady=1)
+            current = "" if secret else str(self.config.get("Telegram", key, "") or "")
+            var = tk.StringVar(value=current)
+            entry = remember(ttk.Entry(cell, textvariable=var, width=width, show="\u2022" if secret else ""))
+            entry.pack(side=tk.LEFT)
+            entry.bind("<Return>", lambda e, k=key, v=var, s=secret: self._commit_telegram(k, v, s), add="+")
+            entry.bind("<FocusOut>", lambda e, k=key, v=var, s=secret: self._commit_telegram(k, v, s), add="+")
+            if secret:
+                remember(ttk.Button(cell, text="Clear",
+                                    command=lambda k=key, v=var: self._clear_telegram(k, v))
+                         ).pack(side=tk.LEFT, padx=(4, 0))
+            text = hint_text
+            if secret:
+                text = {"saved": "saved — type to replace",
+                        "unreadable": "saved on another PC — type it again"}.get(
+                    secret_is_saved(self.config, "Telegram", key), "not set")
+            lab = ttk.Label(grid, text=text, foreground=t["muted"])
+            lab.grid(row=row_i, column=2, sticky="w")
+            self.hints[("Telegram", key)] = lab
+            self._tg_labels.append(lab)
+            self.vars[("Telegram", key)] = var
+            self.tip(entry, {
+                "api_id": "The number from my.telegram.org → API development tools. Not a secret.",
+                "api_hash": "From the same page. Encrypted at rest (Windows DPAPI, or a key\n"
+                            "private to your user on Linux). Never logged.",
+                "bot_token": "BotFather gives this. The bot is added to your group as an admin.\n"
+                             "MSR does not log in with your phone number. Encrypted at rest, same as the api hash.",
+                "chat_id": "From a topic link t.me/c/1234567890/55 the group id is -1001234567890.",
+                "topic_id": "The number after the last slash in that link (55 in the example). General is often 1.",
+                "owner_id": "Your numeric Telegram user id. Uploads are refused if this user is not in the group.",
+            }[key])
+
+        delete = str(self.config.get("Telegram", "delete_after_upload", "false")).strip().lower() in ("1", "true", "yes", "on")
+        self.tg_delete = tk.BooleanVar(value=delete)
+        del_row = ttk.Frame(box)
+        del_row.pack(fill=tk.X, pady=(4, 0))
+        del_cb = remember(ttk.Checkbutton(
+            del_row, text="Delete the local file after Telegram confirms every part",
+            variable=self.tg_delete,
+            command=lambda: self._commit("Telegram", "delete_after_upload",
+                                         "true" if self.tg_delete.get() else "false")))
+        del_cb.pack(side=tk.LEFT)
+        self.vars[("Telegram", "delete_after_upload")] = self.tg_delete
+        self.tip(del_cb, "Off unless you tick this. The file is removed only after every part\n"
+                         "has been confirmed. A failed or partial upload keeps it.")
+        self.tg_delete_warn = ttk.Label(
+            box, text="Off by default. A failed or partial upload keeps the recording. Deleting it cannot be undone.",
+            foreground=t["warn"], wraplength=640)
+        self.tg_delete_warn.pack(fill=tk.X)
+        self._tg_labels.append(self.tg_delete_warn)
+
+        actions = ttk.Frame(box)
+        actions.pack(fill=tk.X, pady=(4, 0))
+        self.tg_test = remember(ttk.Button(actions, text="Send test message", command=self._telegram_test))
+        self.tg_test.pack(side=tk.LEFT)
+        self.tip(self.tg_test, "Posts one plain sentence in the topic and checks the bot, the group and your user id.")
+        self.tg_status = ttk.Label(actions, text="", foreground=t["muted"])
+        self.tg_status.pack(side=tk.LEFT, padx=(10, 0))
+        self._tg_labels.append(self.tg_status)
+        if self.telegram_status is not None:
+            self.frame.after(1000, self._poll_telegram)
+
+    def _commit_telegram(self, key, var, secret):
+        if secret:
+            if var.get():
+                self._commit("Telegram", key, var.get())
+                var.set("")
+                self._telegram_secret_hint(key)
+            return
+        self._commit("Telegram", key, var.get())
+
+    def _clear_telegram(self, key, var):
+        var.set("")
+        self._commit("Telegram", key, "")
+        self._telegram_secret_hint(key)
+
+    def _telegram_secret_hint(self, key):
+        from msr.config import secret_is_saved
+        lab = self.hints.get(("Telegram", key))
+        if lab is None:
+            return
+        text = {"saved": "saved — type to replace",
+                "unreadable": "saved on another PC — type it again"}.get(
+            secret_is_saved(self.config, "Telegram", key), "not set")
+        lab.configure(text=text)
+
+    def _reflect_telegram(self, key):
+        if key in ("api_hash", "bot_token"):
+            var = self.vars.get(("Telegram", key))
+            if var is not None:
+                var.set("")
+            self._telegram_secret_hint(key)
+            return
+        var = self.vars.get(("Telegram", key))
+        if var is None:
+            return
+        cur = self.config.get("Telegram", key, "")
+        if isinstance(var, tk.BooleanVar):
+            var.set(str(cur).strip().lower() in ("1", "true", "yes", "on"))
+        else:
+            var.set(str(cur or ""))
+
+    def _telegram_test(self):
+        if not self.telegram_test:
+            self._say("The test runs while MSR is open.", error=True)
+            return
+        try:
+            self.tg_test.state(["disabled"])
+        except tk.TclError:
+            pass
+        self._background(self.telegram_test, self._telegram_tested)
+
+    def _telegram_tested(self, res):
+        if self._tg_installed:
+            try:
+                self.tg_test.state(["!disabled"])
+            except tk.TclError:
+                pass
+        if res[0] != "ok":
+            self._say(str(res[1]), error=True)
+            return
+        result = res[1] if isinstance(res[1], dict) else {"ok": False, "error": str(res[1])}
+        if result.get("ok"):
+            self._say("Test message sent to the topic.")
+        else:
+            self._say(result.get("error") or "Test failed.", error=True)
+
+    def _poll_telegram(self):
+        try:
+            if not self.frame.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if self.telegram_status is not None:
+            try:
+                info = self.telegram_status() or {}
+            except Exception:
+                info = {}
+            line = str(info.get("line") or "")
+            error = str(info.get("error") or "")
+            t = _themes.current()
+            colour = t["error"] if info.get("state") in ("paused", "missing") and error else t["muted"]
+            try:
+                self.tg_status.configure(text=line, foreground=colour)
+            except tk.TclError:
+                return
+        try:
+            self.frame.after(1000, self._poll_telegram)
+        except tk.TclError:
+            pass
 
     def _build_group(self, title, collapsed, rows, t):
         holder = ttk.Frame(self.body)
@@ -458,6 +670,11 @@ class OptionsPanel:
         shown = masked(key, saved)
         self._say(f"Saved {label}" + (f" = {shown}" if shown not in ("", "<set>") else "") + when)
         self.reflect(section, key)
+        if section == "Telegram" and self.on_telegram_changed:
+            try:
+                self.on_telegram_changed()
+            except Exception:
+                logging.debug("telegram setting", exc_info=True)
 
     def reflect(self, section, key):
         """Show the stored value (after a failed edit or a change from elsewhere)."""
@@ -470,6 +687,9 @@ class OptionsPanel:
             self._cookie_warning()
         if (section, key) == ("Fishtank", "password"):
             self._password_hint()
+            return
+        if section == "Telegram":
+            self._reflect_telegram(key)
             return
         v = self.vars.get((section, key))
         if v is None:
@@ -690,5 +910,11 @@ class OptionsPanel:
         self.link.configure(foreground=t["link"])
         for h in self.hints.values():
             h.configure(foreground=t["muted"])
+        if getattr(self, "tg_intro", None) is not None:
+            self.tg_intro.configure(foreground=t["warn" if not self._tg_installed else "muted"])
+        if getattr(self, "tg_delete_warn", None) is not None:
+            self.tg_delete_warn.configure(foreground=t["warn"])
+        if getattr(self, "tg_status", None) is not None and not (self.tg_status.cget("text") or ""):
+            self.tg_status.configure(foreground=t["muted"])
         self._preview_pattern(self.vars[("Recording", "filename_pattern")].get())
         self.refresh_status()

@@ -2101,6 +2101,18 @@ def _log_audio_track(mp4_file, ffmpeg_path, platform, logger):
         logger.debug(f"Audio check skipped: {_probe_err}")
 
 
+def _finished_recordings(parts, final=None):
+    """Files that are actually finished: the stitch when it exists, else each part still on disk."""
+    if final and os.path.isfile(final):
+        return [final]
+    out = []
+    for part in parts or []:
+        path = part.get("mp4") if isinstance(part, dict) else None
+        if path and os.path.isfile(path):
+            out.append(path)
+    return out
+
+
 def finalize_recording_group(parts, group_base_name, processed_path, pending_dir,
                               ffmpeg_path, ffmpeg_timeout, username, platform, logger):
     """Stitch a reconnect-continuity group into one continuous final MP4.
@@ -2122,8 +2134,10 @@ def finalize_recording_group(parts, group_base_name, processed_path, pending_dir
     copy, no re-encode) into a single file so the end user sees one
     recording instead of several.
     """
-    if not parts or len(parts) == 1:
-        return
+    if not parts:
+        return []
+    if len(parts) == 1:
+        return _finished_recordings(parts)
 
     logger.info(f"Stitching {len(parts)} reconnect segments into one continuous recording...")
 
@@ -2164,7 +2178,7 @@ def finalize_recording_group(parts, group_base_name, processed_path, pending_dir
                     os.remove(merge_tmp)
                 except Exception:
                     pass
-            return
+            return _finished_recordings(parts)
 
         # Move the now-superseded individual parts (mp4 + metadata sidecar)
         # out of the way into PendingDeletion — same treatment as raw .ts
@@ -2198,6 +2212,7 @@ def finalize_recording_group(parts, group_base_name, processed_path, pending_dir
             total_elapsed,
             parts[0].get('title'),
         )
+        return _finished_recordings(parts, final_file)
 
     except subprocess.TimeoutExpired:
         logger.error(f"Segment stitching timed out — leaving {len(parts)} segments as separate files")
@@ -2206,8 +2221,10 @@ def finalize_recording_group(parts, group_base_name, processed_path, pending_dir
                 os.remove(merge_tmp)
             except Exception:
                 pass
+        return _finished_recordings(parts)
     except Exception as e:
         logger.error(f"Segment stitching failed: {e} — leaving {len(parts)} segments as separate files")
+        return _finished_recordings(parts)
     finally:
         if os.path.exists(list_file):
             try:
@@ -2447,15 +2464,46 @@ def record_worker(args):
                 )
         bg_remux_threads[:] = [(t, timeout) for t, timeout in bg_remux_threads if t.is_alive()]
 
+    def _note_telegram(paths, title, started):
+        """Tell the main process a recording is final.
+
+        No-op unless uploads are on globally and this channel opted in. The
+        channel's topic, when it has one, is copied onto the note.
+        """
+        if not paths:
+            return
+        try:
+            enabled = bool(runtime.get("telegram_upload"))
+        except Exception:
+            return
+        if not enabled:
+            return
+        from msr.telegram_queue import queue_if_channel
+        when = started.isoformat() if hasattr(started, "isoformat") else (started or "")
+        data_dir = os.environ.get("MSR_HOME") or os.getcwd()
+        channels_file = config.get("Paths", "channels_file", fallback="channels.json")
+        for path in paths:
+            try:
+                queue_if_channel(data_dir, channels_file, channel_key, True, {
+                    "path": path, "channel": username, "platform": platform,
+                    "title": title or "", "recorded_at": when or "",
+                })
+            except Exception:
+                logger.debug("telegram: could not queue %s", os.path.basename(str(path)), exc_info=True)
+
     def _finalize_pending_group():
         nonlocal group_parts, group_base_name
+        paths, title, started = [], None, None
         if group_parts:
-            finalize_recording_group(
+            title = group_parts[0].get("title")
+            started = group_parts[0].get("start_wall")
+            paths = finalize_recording_group(
                 group_parts, group_base_name, processed_path, pending_dir,
                 ffmpeg_path, ffmpeg_timeout, username, platform, logger,
-            )
+            ) or []
         group_parts = []
         group_base_name = None
+        _note_telegram(paths, title, started)
 
     # Stream metadata shown in the status table (set when variant is resolved)
     stream_info = ""
@@ -2502,6 +2550,8 @@ def record_worker(args):
                     if group_parts:
                         logger.warning("Recordings folder changed - the reconnect parts recorded so far "
                                        "stay as separate files")
+                        _note_telegram([p.get("mp4") for p in group_parts if p.get("mp4")],
+                                       group_parts[0].get("title"), group_parts[0].get("start_wall"))
                     group_parts = []
                     group_base_name = None
                     root_path = choice.path
@@ -2942,11 +2992,12 @@ def record_worker(args):
                                 'elapsed': elapsed,
                                 'title': stream_title,
                             })
-                            finalize_recording_group(
+                            ready = finalize_recording_group(
                                 closing_parts, closing_name, processed_path,
                                 pending_dir, ffmpeg_path, ffmpeg_timeout,
                                 username, platform, logger,
                             )
+                            _note_telegram(ready, stream_title, start_wall)
                         else:
                             logger.error(f"Background remux failed: {error}")
                             if error == "output too small":

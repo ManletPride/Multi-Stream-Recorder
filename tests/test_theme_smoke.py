@@ -17,6 +17,10 @@ from tkinter import ttk
 sys.path.insert(0, sys.argv[1])
 os.chdir(sys.argv[2])
 os.environ["MSR_SMOKE_TEST"] = "1"
+# The smoke flag also exits the process after 2.5 s. Walking every theme takes
+# longer than that on a loaded Windows runner, which used to quit before the
+# result was printed (exit 0, empty stdout).
+os.environ["MSR_SMOKE_KEEP"] = "1"
 mode = sys.argv[3]
 out = {"errors": []}
 

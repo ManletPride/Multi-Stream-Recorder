@@ -87,6 +87,8 @@ def _coerce_specs():
         ("Sounds", "problems", "bool", False, None, None),
         ("Sounds", "clip_saved", "bool", False, None, None),
         ("Sounds", "quiet_while_locked", "bool", True, None, None),
+        ("Telegram", "enabled", "bool", False, None, None),
+        ("Telegram", "delete_after_upload", "bool", False, None, None),
         ("Advanced", "verbose", "bool", False, None, None),
         ("Advanced", "streamlink_debug", "bool", False, None, None),
         ("GUI", "dark_mode", "bool", True, None, None),
@@ -99,8 +101,17 @@ FISHTANK_PASSWORD_ENV = "MSR_FISHTANK_PASSWORD"
 
 
 # Credentials kept DPAPI-encrypted on Windows as ``<key>_dpapi`` with ``<key>`` left blank,
-# so older MSR versions just see no password. Elsewhere they stay plaintext.
-SECRET_KEYS = (("Fishtank", "password"),)
+# so older MSR versions just see no password. Fishtank stays plaintext off Windows
+# (that contract is tested). Telegram secrets do not: off Windows they are stored
+# as ``<key>_box`` (msr/filecrypt.py), never in the clear.
+SECRET_KEYS = (
+    ("Fishtank", "password"),
+    # api_hash (my.telegram.org) and the BotFather token. api id, group id,
+    # topic id and owner id are not secrets and stay in config.ini.
+    ("Telegram", "api_hash"),
+    ("Telegram", "bot_token"),
+)
+TELEGRAM_BOX_KEYS = (("Telegram", "api_hash"), ("Telegram", "bot_token"))
 _noted = set()
 
 
@@ -110,13 +121,33 @@ def _note_once(msg):
         logging.getLogger().warning(msg)
 
 
+def _decrypt_box(blob: str):
+    from msr import filecrypt
+    return filecrypt.decrypt_text(blob)
+
+
 def read_secret(config, section, key):
-    """Plaintext value if set, else the decrypted ``<key>_dpapi`` ('' if missing or unreadable)."""
+    """Plaintext value if set, else the decrypted copy ('' if missing or unreadable).
+
+    Windows stores ``<key>_dpapi``. Other systems store Telegram secrets as
+    ``<key>_box``. A value saved on the other kind of machine does not decrypt.
+    """
     plain = str(config.get(section, key, fallback='') or '')
     if plain.strip():
         return plain
+    box = str(config.get(section, key + '_box', fallback='') or '').strip()
     enc = str(config.get(section, key + '_dpapi', fallback='') or '').strip()
+    if box and not dpapi.available():
+        try:
+            return _decrypt_box(box)
+        except Exception:
+            _note_once(f"{section} {key} in config.ini can't be decrypted on this PC/user - "
+                       "please enter it again in Options")
+            return ''
     if not enc:
+        if box:
+            _note_once(f"{section} {key} in config.ini can't be decrypted on this PC/user - "
+                       "please enter it again in Options")
         return ''
     if dpapi.available():
         try:
@@ -132,7 +163,9 @@ def secret_is_saved(config, section, key):
     """'' (none), 'saved', or 'unreadable' - for hints; never returns the value."""
     if str(config.get(section, key, fallback='') or '').strip():
         return 'saved'
-    if not str(config.get(section, key + '_dpapi', fallback='') or '').strip():
+    has_copy = bool(str(config.get(section, key + '_dpapi', fallback='') or '').strip()
+                    or str(config.get(section, key + '_box', fallback='') or '').strip())
+    if not has_copy:
         return ''
     return 'saved' if read_secret(config, section, key) else 'unreadable'
 
@@ -249,6 +282,19 @@ class Config:
             'notifications': 'true',
             'window_state_file': 'window_state.json',
         },
+        'Telegram': {
+            # Optional upload of a finished recording into one forum topic.
+            # Off until the user fills this in. api_hash and bot_token are not
+            # stored in the clear: ``*_dpapi`` on Windows, ``*_box`` elsewhere.
+            'enabled': 'false',
+            'api_id': '',
+            'api_hash': '',
+            'bot_token': '',
+            'chat_id': '',       # supergroup id, starts with -100
+            'topic_id': '',      # forum topic (the last number in a t.me/c/… link)
+            'owner_id': '',      # the user's numeric id; uploads are refused if they are not in the group
+            'delete_after_upload': 'false',  # remove the local file only after every part is confirmed
+        },
         'Fishtank': {
             # Email and password for fishtank.live login.
             # Used by the recorder to obtain a fresh MistServer JWT via
@@ -339,17 +385,38 @@ class Config:
         return [(s, k) for s, k in SECRET_KEYS
                 if str(self.get(s, k, fallback='') or '').strip()]
 
+    def _plain_telegram(self):
+        return [(s, k) for s, k in TELEGRAM_BOX_KEYS
+                if str(self.get(s, k, fallback='') or '').strip()]
+
     def _protect_secrets(self):
-        """On Windows, move plaintext credentials to ``<key>_dpapi`` (in memory)."""
-        if not dpapi.available():
+        """Move plaintext credentials out of the file that is about to be written.
+
+        Windows: DPAPI blob in ``<key>_dpapi`` for every secret. Elsewhere: Telegram
+        api hash and bot token become ``<key>_box`` (the key stays in the user config
+        directory). A value that cannot be encrypted is dropped instead of written
+        in the clear. The Fishtank password is left as it was off Windows.
+        """
+        if dpapi.available():
+            for section, key in self._plain_secrets():
+                try:
+                    enc = dpapi.encrypt_text(self.get(section, key))
+                except Exception:
+                    logging.warning(f"Could not encrypt {section} {key}; left as it was")
+                    continue
+                self.config.set(section, key + '_dpapi', enc)
+                self.config.set(section, key, '')
             return
-        for section, key in self._plain_secrets():
+        for section, key in self._plain_telegram():
             try:
-                enc = dpapi.encrypt_text(self.get(section, key))
+                from msr import filecrypt
+                enc = filecrypt.encrypt_text(self.get(section, key))
             except Exception:
-                logging.warning(f"Could not encrypt {section} {key}; left as it was")
+                logging.error(f"Telegram: {section}.{key} was not saved "
+                              "(could not encrypt it). It was not written in the clear.")
+                self.config.set(section, key, '')
                 continue
-            self.config.set(section, key + '_dpapi', enc)
+            self.config.set(section, key + '_box', enc)
             self.config.set(section, key, '')
 
     def _write_startup(self):
@@ -461,6 +528,8 @@ class Config:
                         updated = True
             if dpapi.available() and self._plain_secrets():
                 updated = True  # migrate plaintext credentials
+            elif self._plain_telegram():
+                updated = True  # encrypt Telegram secrets that were still in the clear
             if updated:
                 self._write_startup()
         else:
