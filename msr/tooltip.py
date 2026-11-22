@@ -8,7 +8,7 @@ Omarchy's floating-workspace mode resizes every new non-modal window to about
 user float rule. This tip is created with class ``TkTooltip`` so that rule
 can match it (a plain Toplevel is class ``Toplevel``, which would also catch
 dialogs). Tk menus are already class ``Menu`` and ttk combobox lists are
-``ComboboxPopdown``. The line to add is in the README. Re-applying geometry
+``ComboboxPopdown``. The line to add is in ``docs/linux.md``. Re-applying geometry
 from ``<Configure>`` loses the race with the compositor, so this module does
 not do that.
 
