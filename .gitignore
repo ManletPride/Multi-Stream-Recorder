@@ -89,6 +89,7 @@ msr_status.json.*.tmp
 # Twitch push authorization (access + refresh token; msr/twitch_eventsub.py)
 twitch_token.json
 twitch_token.json.tmp
+.twitch_token.lock
 
 # Telegram uploads (bot session, queue, inbox notes, split temps). No tokens in git.
 telegram_session.json

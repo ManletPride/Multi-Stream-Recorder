@@ -63,7 +63,6 @@ class HealthController:
         self._ids: dict[str, str] = {}
         if autostart:
             self._ids["start"] = self.parent.after(STARTUP_DELAY_MS, lambda: self.run(startup=True))
-        self._ids["drain"] = self.parent.after(POLL_MS, self._drain)
         self.label.bind("<Destroy>", lambda _e: self.stop(), add="+")
 
     def stop(self) -> None:
@@ -98,10 +97,19 @@ class HealthController:
         except Exception as e:  # a health check must never take the app down
             self.q.put((None, [health.Issue(health.WARN, "health", f"Health check failed: {e}")]))
 
+    def _arm_drain(self) -> None:
+        if self._stopped or "drain" in self._ids:
+            return
+        try:
+            self._ids["drain"] = self.parent.after(POLL_MS, self._drain)
+        except tk.TclError:
+            pass
+
     def run(self, startup: bool = False) -> None:
         if self._busy:
             return
         self._busy = True
+        self._arm_drain()
         threading.Thread(target=self._work, args=(startup,), daemon=True, name="msr-health").start()
 
     def check_now(self) -> None:
@@ -109,6 +117,7 @@ class HealthController:
 
     # -- Tk side
     def _drain(self) -> None:
+        self._ids.pop("drain", None)
         try:
             while True:
                 first, periodic = self.q.get_nowait()
@@ -121,12 +130,9 @@ class HealthController:
                 self._schedule()
         except queue.Empty:
             pass
-        if self._stopped:
+        if self._stopped or not self._busy:
             return
-        try:
-            self._ids["drain"] = self.parent.after(POLL_MS, self._drain)
-        except tk.TclError:
-            pass
+        self._arm_drain()
 
     def _schedule(self) -> None:
         if self._next is not None:

@@ -334,8 +334,49 @@ def _explain(text: str, step: str) -> str:
                               "failed to establish a new connection", "no matching distribution",
                               "temporary failure in name resolution")):
         return "Could not download packages (offline, or PyPI not reachable)."
+    if any(s in low for s in ("pygobject", "girepository", "pycairo", "mesonpy")):
+        return ("Could not build the optional Linux tray package (PyGObject) — system dev headers are missing "
+                "(Debian/Ubuntu: sudo apt install gcc pkg-config python3-dev libgirepository-2.0-dev libcairo2-dev; "
+                "Arch: sudo pacman -S gobject-introspection cairo libayatana-appindicator).")
     lines = [ln for ln in (text or "").strip().splitlines() if ln.strip()]
     return f"{step} failed: " + (lines[-1][:300] if lines else "unknown error")
+
+
+_OPTIONAL_LINUX_PACKAGES = frozenset({"pygobject"})
+
+
+def split_optional_linux_requirements(reqs_path: str, *, platform: str | None = None) -> tuple[list[str], list[str]]:
+    """Split *reqs_path* into ``(core_lines, optional_specs)`` on Linux.
+
+    On Linux, PyGObject has no wheels on PyPI and builds from C/Meson source, which
+    fails when system dev headers are missing. Installing it in a second, best-effort
+    pip step keeps an optional tray icon from breaking first-run .venv setup.
+    Non-Linux platforms return ``([], [])`` so callers install ``requirements.txt`` as-is.
+    """
+    plat = sys.platform if platform is None else platform
+    if not str(plat).startswith("linux"):
+        return [], []
+    try:
+        with open(reqs_path, "r", encoding="utf-8", errors="replace") as fh:
+            raw_lines = fh.readlines()
+    except OSError:
+        return [], []
+    core: list[str] = []
+    optional: list[str] = []
+    for raw in raw_lines:
+        stripped = raw.split("#", 1)[0].strip()
+        if not stripped or stripped.startswith("-"):
+            core.append(raw)
+            continue
+        pkg_part = stripped.split(";", 1)[0].strip()
+        pkg_name = re.split(r"[\s\[<>=!~;]", pkg_part, maxsplit=1)[0].strip().lower()
+        if pkg_name in _OPTIONAL_LINUX_PACKAGES:
+            optional.append(stripped)
+        else:
+            core.append(raw)
+    if not optional:
+        return [], []
+    return core, optional
 
 
 def ensure(root: str, progress=None, run=subprocess.run, python: str | None = None, log=None,
@@ -382,24 +423,58 @@ def ensure(root: str, progress=None, run=subprocess.run, python: str | None = No
                 return False, _explain((r.stderr or "") + (r.stdout or ""), "Creating .venv")
         say("Installing yt-dlp, streamlink and the other packages (first time only, about a minute)\u2026")
         reqs = os.path.join(root, "requirements.txt")
-        cmd = [venv_python(root), "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
-               "--progress-bar", "off", "--retries", "1", "--timeout", "20", "-r", reqs]
+        core_lines, optional_specs = split_optional_linux_requirements(reqs)
+        core_reqs_tmp = None
+        install_reqs = reqs
+        if optional_specs:
+            core_reqs_tmp = os.path.join(d, ".msr_core_requirements.txt")
+            with open(core_reqs_tmp, "w", encoding="utf-8") as fh:
+                fh.writelines(core_lines)
+            install_reqs = core_reqs_tmp
+        base_pip = [venv_python(root), "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
+                    "--progress-bar", "off", "--retries", "1", "--timeout", "20"]
+        cmd = base_pip + ["-r", install_reqs]
         out("> pip install -r requirements.txt")
-        if log is not None and (popen is not None or run is subprocess.run):
-            tracker = PipProgress(count_requirements(reqs))
 
-            def line_seen(line: str) -> None:
+        def _run_pip(pip_cmd, top_count):
+            if log is not None and (popen is not None or run is subprocess.run):
+                tracker = PipProgress(top_count)
+
+                def line_seen(line: str) -> None:
+                    out(line)
+                    status = tracker.feed(line)
+                    if status:
+                        say(status)
+                return _stream(pip_cmd, PIP_TIMEOUT, line_seen, popen or subprocess.Popen)
+            res = _run(pip_cmd, PIP_TIMEOUT, run)
+            for line in ((res.stdout or "") + (res.stderr or "")).splitlines():
                 out(line)
-                status = tracker.feed(line)
-                if status:
-                    say(status)
-            r = _stream(cmd, PIP_TIMEOUT, line_seen, popen or subprocess.Popen)
-        else:
-            r = _run(cmd, PIP_TIMEOUT, run)
-            for line in ((r.stdout or "") + (r.stderr or "")).splitlines():
-                out(line)
+            return res
+
+        try:
+            r = _run_pip(cmd, count_requirements(install_reqs))
+        finally:
+            if core_reqs_tmp:
+                try:
+                    os.remove(core_reqs_tmp)
+                except OSError:
+                    pass
         if r.returncode != 0:
             return False, _explain((r.stderr or "") + (r.stdout or ""), "Installing packages")
+        if optional_specs:
+            say("Installing optional Linux system-tray support (PyGObject)\u2026")
+            out("> pip install " + " ".join(optional_specs) + "  # optional Linux tray")
+            try:
+                r_opt = _run_pip(base_pip + optional_specs, len(optional_specs))
+                if r_opt.returncode != 0:
+                    note = ("Optional Linux tray package (PyGObject) skipped (system dev headers missing); "
+                            "recording works normally without it.")
+                    say(note)
+                    out("NOTE: " + note)
+            except (OSError, subprocess.SubprocessError) as opt_exc:
+                note = f"Optional Linux tray package (PyGObject) skipped ({opt_exc}); recording works normally."
+                say(note)
+                out("NOTE: " + note)
         with open(os.path.join(d, MARKER), "w", encoding="utf-8") as fh:
             json.dump({"complete": True, "root": os.path.abspath(root), "python": python or base_python(),
                        "version": "%d.%d" % sys.version_info[:2], "requirements": requirements_hash(root),

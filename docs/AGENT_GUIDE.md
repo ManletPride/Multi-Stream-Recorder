@@ -7,7 +7,7 @@ This guide is for a script, bot or AI agent that drives Multi-Stream Recorder (M
 - **Data folder.** This folder holds `config.ini`, `channels.json`, `msr_control.json` and `msr_status.json`. `msr_ctl.py` looks for it in this order: `--data-dir`, then `MSR_HOME`, then `MSR_DATA`, then the current folder. Set `MSR_HOME` once so you don't have to pass `--data-dir` on every call.
 - **Is it running?** `python msr_ctl.py ping`. Exit 0 means a copy answers. Exit 3 means none is running: roster, settings, library and history commands then edit the files directly, and session commands (start, stop, wait...) fail.
 - **`msr_control.json`** exists only while a copy runs. It holds `port`, `token`, `pid`, `mode` (`gui` or `headless`) and `api_version`. `msr_ctl.py` reads it for you. Never copy the token anywhere.
-- **`msr_status.json`** is rewritten every few seconds. Read it for a cheap snapshot (channels, finished recordings, health) without sending a command.
+- **`msr_status.json`** is updated right after changes and on a 60-second heartbeat while idle (unchanged snapshots are not rewritten). Read it for a cheap snapshot (channels, finished recordings, health) without sending a command. Custom-URL tokens and query strings are redacted.
 - **Compatibility.** Every reply surface carries `api_version`. If `msr_ctl.py` and the running copy disagree, the command exits 7: use the `msr_ctl.py` that sits next to the running copy.
 
 ## 2. Start it headless
@@ -108,7 +108,7 @@ Credentials are `config set` (`Telegram.api_hash`, `Telegram.bot_token` via `--s
 ```
 python msr_ctl.py config set Recording.min_disk_space_gb 50
 ```
-Unknown keys, bad values and a recordings folder change while recording are refused. Secrets are stored encrypted on every OS (Windows DPAPI, or a user-only key elsewhere) and never shown; pass them with `--stdin`.
+Unknown keys, bad values and a recordings folder change while recording are refused. Host-path and binary settings (`Advanced.ffmpeg_path`, `Clipping.clips_dir`, `Paths.channels_file`, `Paths.fallback_dir`, `GUI.window_state_file`) return `forbidden` over remote `msr_ctl` control and must be changed locally in Options or `config.ini`. Secrets are stored encrypted on every OS (Windows DPAPI, or a user-only key elsewhere) and never shown; pass them with `--stdin`.
 
 **Recordings tab and clips**
 ```

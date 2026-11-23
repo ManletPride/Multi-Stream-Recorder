@@ -98,10 +98,18 @@ class Tracker:
         return self.channels.setdefault(key, {"last_error": "", "last_error_at": None, "errors": 0,
                                               "restarts": 0, "last_live": None, "last_recorded": None})
 
+    @staticmethod
+    def _public_channel(key):
+        if not isinstance(key, str) or not key:
+            return key
+        from msr.status import display_name
+        return display_name(key)
+
     def emit(self, kind, key, **data):
+        pub_key = self._public_channel(key)
         with self._cond:
             self.seq += 1
-            ev = {"seq": self.seq, "event": kind, "channel": key, "time": self.clock(), **data}
+            ev = {"seq": self.seq, "event": kind, "channel": pub_key, "time": self.clock(), **data}
             ev["at"] = iso(ev["time"])
             self._events.append(ev)
             self._cond.notify_all()
@@ -114,11 +122,14 @@ class Tracker:
     def wait(self, kinds, channel=None, timeout=300.0, after=None):
         """First event of ``kinds`` (for ``channel``) after seq ``after`` (default: from now on)."""
         end = time.monotonic() + max(0.0, float(timeout))
+        wanted_ch = self._public_channel(channel) if channel is not None else None
         with self._cond:
             mark = self.seq if after is None else int(after)
             while True:
                 for e in self._events:
-                    if e["seq"] > mark and e["event"] in kinds and (channel is None or e["channel"] == channel):
+                    if e["seq"] > mark and e["event"] in kinds and (
+                        channel is None or e["channel"] in (channel, wanted_ch)
+                    ):
                         return e
                 left = end - time.monotonic()
                 if left <= 0:
@@ -229,11 +240,12 @@ class Tracker:
                 size = os.path.getsize(path)
             except OSError:
                 size = None
-        entry = {"channel": key, "path": path, "size": size,
+        entry = {"channel": self._public_channel(key), "path": path, "size": size,
                  "duration_seconds": sidecar_seconds(path) if path and ok else None,
                  "finished_at": iso(self.clock()), "time": self.clock(), "remux_ok": ok}
         if error:
-            entry["error"] = error[:300]
+            from msr.util import redact_for_log
+            entry["error"] = redact_for_log(error)[:300]
         self.finished.append(entry)
         self.finishing.pop(key, None)
         if key in self.stop_seq:
@@ -422,6 +434,18 @@ class Tracker:
 
 
 # ------------------------------------------------------------------ health
+_cookie_health_cache: dict[str, tuple[tuple[int, int] | None, float, dict]] = {}
+_COOKIE_HEALTH_TTL_S = 300.0
+
+
+def _file_sig(path):
+    try:
+        st = os.stat(path)
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
 def cookie_health(config):
     from msr.util import find_cookies_file, validate_cookies
     try:
@@ -430,14 +454,21 @@ def cookie_health(config):
         path = None
     if not path:
         return {"found": False}
+    sig = _file_sig(path)
+    now = time.monotonic()
+    hit = _cookie_health_cache.get(path)
+    if hit is not None and hit[0] == sig and (now - hit[1]) < _COOKIE_HEALTH_TTL_S:
+        return dict(hit[2])
     v = validate_cookies(path)
     exp = v.get("auth_expiry")
-    return {"found": True, "file": os.path.basename(path), "valid": bool(v.get("valid")),
-            "cookies": v.get("total_cookies", 0), "domains": len(v.get("domains") or []),
-            "earliest_auth_expiry": exp.isoformat(timespec="seconds") if exp else None,
-            "auth_expired": bool(v.get("has_expired_auth")),
-            "expired_domains": list(v.get("expired_domains") or []),
-            "warnings": list(v.get("warnings") or [])}
+    result = {"found": True, "file": os.path.basename(path), "valid": bool(v.get("valid")),
+              "cookies": v.get("total_cookies", 0), "domains": len(v.get("domains") or []),
+              "earliest_auth_expiry": exp.isoformat(timespec="seconds") if exp else None,
+              "auth_expired": bool(v.get("has_expired_auth")),
+              "expired_domains": list(v.get("expired_domains") or []),
+              "warnings": list(v.get("warnings") or [])}
+    _cookie_health_cache[path] = (sig, now, result)
+    return dict(result)
 
 
 def _disk(folder, min_gb):
@@ -480,6 +511,24 @@ def health(config, update=None, tools=None):
 
 
 # ------------------------------------------------------------------ files
+_cleanup_queue_cache: dict[tuple, tuple[float, dict[str, int | None], list[dict]]] = {}
+_CLEANUP_QUEUE_TTL_S = 60.0
+
+
+def _dir_mtime_sig(path: str) -> int | None:
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return None
+
+
+def _dirs_unchanged(dir_mtimes: dict[str, int | None]) -> bool:
+    for path, prev_mtime in dir_mtimes.items():
+        if _dir_mtime_sig(path) != prev_mtime:
+            return False
+    return True
+
+
 def cleanup_queue(config, busy_keys=()):
     """Raw .ts files waiting in Recorded/ (main and fallback) for the cleanup remux."""
     from msr import storage
@@ -494,23 +543,44 @@ def cleanup_queue(config, busy_keys=()):
         platform, user = channel_key_to_dirs(k)
         busy.add(os.path.normcase(os.path.join(platform, *user.split("/"))))
     from msr.util import read_layout_paths
-    out = []
+    bases = []
     seen = set()
     for root in roots:
         for base in read_layout_paths(root, "Recorded"):
-            if not os.path.isdir(base):
-                continue
             base_key = os.path.normcase(os.path.abspath(base))
             if base_key in seen:
                 continue
             seen.add(base_key)
-            _collect_raw(out, base, busy)
+            bases.append(base)
+
+    cache_key = (tuple(bases),)
+    now = time.monotonic()
+    # Idle fast-path: when no channels are busy and our last walk found 0 pending
+    # .ts files, skip os.walk while every visited directory's mtime is unchanged.
+    if not busy:
+        cached = _cleanup_queue_cache.get(cache_key)
+        if cached is not None:
+            cached_at, dir_mtimes, cached_out = cached
+            if not cached_out and (now - cached_at) < _CLEANUP_QUEUE_TTL_S and _dirs_unchanged(dir_mtimes):
+                return []
+
+    out = []
+    dir_mtimes: dict[str, int | None] = {}
+    for base in bases:
+        if not os.path.isdir(base):
+            dir_mtimes[base] = None
+            continue
+        _collect_raw(out, base, busy, dir_mtimes)
     out.sort(key=lambda r: r["path"])
+    if not busy:
+        _cleanup_queue_cache[cache_key] = (now, dir_mtimes, list(out))
     return out
 
 
-def _collect_raw(out, base, busy):
+def _collect_raw(out, base, busy, dir_mtimes=None):
     for dirpath, _dirs, files in os.walk(base):
+        if dir_mtimes is not None:
+            dir_mtimes[dirpath] = _dir_mtime_sig(dirpath)
         rel = os.path.normcase(os.path.relpath(dirpath, base))
         for name in files:
             if not name.lower().endswith(".ts"):

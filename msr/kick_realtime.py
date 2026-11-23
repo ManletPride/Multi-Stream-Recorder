@@ -26,6 +26,7 @@ A connection allows at most 128 subscriptions (error 106 "limit exceeded").
 """
 
 import json
+import re
 import uuid
 
 KICK_REALTIME_API = "https://web.kick.com/api"
@@ -52,6 +53,22 @@ def connection_request_body(client_id):
                                                     {"provider": "centrifugo"}]}}
 
 
+_CLUSTER_RE = re.compile(r"^[A-Za-z0-9-]+$")
+_APP_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _safe_kick_ws_url(url: str) -> bool:
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(str(url or "").strip())
+    except ValueError:
+        return False
+    if parts.scheme.lower() != "wss":
+        return False
+    host = (parts.hostname or "").lower().rstrip(".")
+    return host == "kick.com" or host.endswith(".kick.com")
+
+
 def parse_connection_response(resp):
     """Mirror of the web client's selector: first usable websocket connection.
 
@@ -67,16 +84,22 @@ def parse_connection_response(resp):
         creds = conn.get("credentials") or {}
         prov = conn.get("provider")
         if prov == "centrifugo" and creds.get("url"):
-            url = str(creds["url"])
-            if url.startswith("wss://"):
+            url = str(creds["url"]).strip()
+            if _safe_kick_ws_url(url):
                 return {"provider": "centrifugo", "url": url}
         if prov == "pusher" and creds.get("app_key") and creds.get("cluster"):
-            return {"provider": "pusher", "app_key": str(creds["app_key"]),
-                    "cluster": str(creds["cluster"])}
+            app_key = str(creds["app_key"]).strip()
+            cluster = str(creds["cluster"]).strip()
+            if _APP_KEY_RE.match(app_key) and _CLUSTER_RE.match(cluster):
+                return {"provider": "pusher", "app_key": app_key, "cluster": cluster}
     return None
 
 
 def pusher_url(app_key, cluster):
+    app_key = str(app_key or "").strip()
+    cluster = str(cluster or "").strip()
+    if not (_APP_KEY_RE.match(app_key) and _CLUSTER_RE.match(cluster)):
+        raise ValueError("Invalid Pusher app_key or cluster")
     return (f"wss://ws-{cluster}.pusher.com/app/{app_key}"
             "?protocol=7&client=js&version=8.4.0&flash=false")
 

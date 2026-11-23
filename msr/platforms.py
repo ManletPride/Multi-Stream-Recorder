@@ -17,6 +17,62 @@ from msr.nowindow import no_window_kwargs
 from msr.deps import HAS_CURL_CFFI, HAS_STREAMLINK, HAS_YTDLP
 from msr.util import redact_cmd_for_log, redact_for_log
 
+
+def _is_http_url(url):
+    """True if *url* is a single-line http(s):// URL with a non-empty hostname."""
+    if not isinstance(url, str):
+        return False
+    s = url.strip()
+    if not s or any(c in s for c in ("\r", "\n", "\x00")) or s.startswith("-"):
+        return False
+    try:
+        parts = urllib.parse.urlsplit(s)
+    except ValueError:
+        return False
+    return parts.scheme.lower() in ("http", "https") and bool(parts.hostname)
+
+
+def _url_host_matches(url, *domains):
+    """True when *url*'s parsed hostname equals or is a subdomain of any domain in *domains*."""
+    if not isinstance(url, str):
+        return False
+    try:
+        host = (urllib.parse.urlsplit(url.strip()).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    if not host:
+        return False
+    return any(host == d or host.endswith("." + d) for d in domains)
+
+
+def _is_fishtank_host(host):
+    """True if *host* is a bare fishtank.live (or *.fishtank.live) hostname with no path/userinfo."""
+    if not isinstance(host, str):
+        return False
+    h = host.strip().lower()
+    if not h or any(c in h for c in ("/", "\\", "@", "?", "#", " ", "\t", "\r", "\n", "\x00")):
+        return False
+    try:
+        parts = urllib.parse.urlsplit(f"https://{h}")
+    except ValueError:
+        return False
+    if parts.netloc.lower() != h or parts.username is not None or parts.password is not None:
+        return False
+    parsed_host = (parts.hostname or "").lower().rstrip(".")
+    return parsed_host == "fishtank.live" or parsed_host.endswith(".fishtank.live")
+
+
+def _sanitize_ffmpeg_headers(http_headers):
+    """Format an http_headers dict for ffmpeg -headers, dropping any CRLF/NUL-tainted entries."""
+    lines = []
+    for k, v in (http_headers or {}).items():
+        ks, vs = str(k), str(v)
+        if any(c in ks or c in vs for c in ("\r", "\n", "\x00")) or ":" in ks or not ks.strip():
+            continue
+        lines.append(f"{ks}: {vs}\r\n")
+    return "".join(lines)
+
+
 # ────────────────────────────────────────────────
 #          Stream Checking Functions
 # ────────────────────────────────────────────────
@@ -36,7 +92,7 @@ def check_stream_kick_api(channel_name, logger, timeout=15, cookies_file=None):
         return None, None, "streamlink not available"
 
     url = f"https://kick.com/{channel_name}"
-    check_cmd = ["streamlink", "--json", url]
+    check_cmd = ["streamlink", "--json", "--", url]
     logger.info(f"Kick check (streamlink): {redact_cmd_for_log(check_cmd)}")
 
     try:
@@ -147,13 +203,15 @@ def parse_rumble_channel_html(page_html, logger):
                 continue
             url = item.get("url") or ""
             if not url and item.get("relative_url"):
-                url = "https://rumble.com" + item["relative_url"]
-            if not url:
+                rel = str(item["relative_url"])
+                if rel.startswith("/") and not rel.startswith("//"):
+                    url = "https://rumble.com" + rel
+            if not _is_http_url(url):
                 continue
             title = item.get("title") or None
             hls = None
             for v in item.get("videos") or []:
-                if isinstance(v, dict) and v.get("url"):
+                if isinstance(v, dict) and _is_http_url(v.get("url")):
                     hls = v["url"]
                     break
             return url, title, hls
@@ -267,7 +325,7 @@ def check_stream_rumble_html(channel_name, logger, timeout=20, cookies_file=None
     return True, title, live_url, hls_url, None
 
 
-def _find_rumble_live_url(url, logger, timeout, cookies_file, impersonate=False):
+def _find_rumble_live_url(url, logger, timeout, cookies_file, impersonate=False, state=None):
     """Scan a Rumble channel/user page playlist for a live stream entry.
 
     Rumble channel and user pages return a playlist when scraped.  Using
@@ -277,27 +335,35 @@ def _find_rumble_live_url(url, logger, timeout, cookies_file, impersonate=False)
 
     Returns the URL of the live stream entry, or None if none found.
     Only called when ``url`` looks like a Rumble channel/user page (not a
-    direct video URL).
+    direct video URL). If *state* (dict) is given, sets ``state["blocked"] = True``
+    when the request failed (e.g. Cloudflare 403/503) so the caller only retries
+    with impersonation on errors rather than on every ordinary offline poll.
     """
     cmd = ["yt-dlp", "--flat-playlist", "--dump-json"]
     if impersonate and HAS_CURL_CFFI:
         cmd.extend(["--impersonate", "chrome"])
     if cookies_file:
         cmd.extend(["--cookies", cookies_file])
-    cmd.append(url)
+    cmd.extend(["--", url])
 
     logger.info(f"Rumble playlist scan: {redact_cmd_for_log(cmd)}")
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **no_window_kwargs())
     except subprocess.TimeoutExpired:
         logger.warning("Rumble playlist scan timed out")
+        if state is not None:
+            state["blocked"] = True
         return None
     except Exception as e:
         logger.warning(f"Rumble playlist scan error: {e}")
+        if state is not None:
+            state["blocked"] = True
         return None
 
     if result.returncode != 0 and not result.stdout:
         logger.warning(f"Rumble playlist scan failed (code {result.returncode})")
+        if state is not None:
+            state["blocked"] = True
         return None
 
     # --flat-playlist emits one JSON object per line
@@ -312,6 +378,8 @@ def _find_rumble_live_url(url, logger, timeout, cookies_file, impersonate=False)
 
         live_status = entry.get("live_status", "")
         entry_url = entry.get("url") or entry.get("webpage_url")
+        if entry_url and not _is_http_url(entry_url):
+            entry_url = None
 
         if live_status == "is_live" and entry_url:
             title = entry.get("title", "(unknown)")
@@ -352,9 +420,9 @@ def _is_rumble_channel_url(url):
     Channel/user pages look like /c/ChannelName, /user/Username, etc.
     """
     import re as _re
-    if "rumble.com" not in url.lower():
+    if not _url_host_matches(url, "rumble.com"):
         return False
-    path = url.split("rumble.com", 1)[-1].split("?")[0].rstrip("/")
+    path = urllib.parse.urlsplit(url.strip()).path.rstrip("/")
     # Direct video URLs start with /v followed by alphanumerics then a dash
     if _re.match(r"^/v[a-z0-9]+-", path, _re.IGNORECASE):
         return False
@@ -421,6 +489,31 @@ def _tiktok_http_get(url, opener, timeout, logger):
         return resp.read().decode("utf-8", errors="replace")
 
 
+_tiktok_cj_cache = {}  # path -> (mtime_ns, size, MozillaCookieJar)
+
+
+def _load_tiktok_cookiejar(cookies_file, logger):
+    """Load *cookies_file* into a MozillaCookieJar, cached by ``(mtime_ns, size)``."""
+    if not cookies_file:
+        return http.cookiejar.MozillaCookieJar()
+    try:
+        st = os.stat(cookies_file)
+        sig = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        sig = None
+    cached = _tiktok_cj_cache.get(cookies_file)
+    if sig is not None and cached is not None and cached[0] == sig:
+        return cached[1]
+    cj = http.cookiejar.MozillaCookieJar()
+    try:
+        cj.load(cookies_file, ignore_discard=True, ignore_expires=True)
+        if sig is not None:
+            _tiktok_cj_cache[cookies_file] = (sig, cj)
+    except Exception as e:
+        logger.warning(f"TikTok webcast check: could not load cookies: {e}")
+    return cj
+
+
 def check_tiktok_live_webcast(username, cookies_file, logger, timeout=30):
     """Check TikTok live status when yt-dlp reports offline.
 
@@ -430,18 +523,15 @@ def check_tiktok_live_webcast(username, cookies_file, logger, timeout=30):
       2. roomId from the profile page, then ``/@user/live``.
       3. webcast.us.tiktok.com then webcast.tiktok.com (US-TTP vs global).
 
-    Any endpoint returning status 2 is live. Misses are logged at info.
+    Any endpoint returning status 2 is live. An explicit offline status (4)
+    from ``api-live/user/room`` short-circuits before hitting the remaining
+    HTML and webcast endpoints. Misses are logged at info.
 
     Returns (is_live, room_id, title, error).
     """
 
     handle = (username or "").lstrip("@")
-    cj = http.cookiejar.MozillaCookieJar()
-    if cookies_file:
-        try:
-            cj.load(cookies_file, ignore_discard=True, ignore_expires=True)
-        except Exception as e:
-            logger.warning(f"TikTok webcast check: could not load cookies: {e}")
+    cj = _load_tiktok_cookiejar(cookies_file, logger)
 
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
     opener.addheaders = [
@@ -470,6 +560,14 @@ def check_tiktok_live_webcast(username, cookies_file, logger, timeout=30):
                 f"(roomId={room_id}) for @{handle}"
             )
             return True, room_id, title, None
+        inner = data.get("data") if isinstance(data, dict) else None
+        user_st = (inner.get("user") or {}).get("status") if isinstance(inner, dict) and isinstance(inner.get("user"), dict) else None
+        room_st = (inner.get("liveRoom") or {}).get("status") if isinstance(inner, dict) and isinstance(inner.get("liveRoom"), dict) else None
+        if room_id and (user_st == 4 or room_st == 4):
+            logger.info(
+                f"TikTok api-live/user/room: @{handle} explicitly offline (status=4, roomId={room_id})"
+            )
+            return False, room_id, None, "api-live/user/room reports offline (status=4)"
         if room_id:
             logger.info(
                 f"TikTok api-live/user/room: @{handle} status not live "
@@ -558,9 +656,10 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None, info=None):
     # just grabs whatever is pinned first (usually a trailer/VOD).  We scan
     # the flat playlist to find any entry that is actually live.
     if _is_rumble_channel_url(url):
-        live_url = _find_rumble_live_url(url, logger, timeout, cookies_file, impersonate=False)
-        if live_url is None and HAS_CURL_CFFI:
-            # Channel page may be Cloudflare-gated — retry with impersonation
+        scan_state = {}
+        live_url = _find_rumble_live_url(url, logger, timeout, cookies_file, impersonate=False, state=scan_state)
+        if live_url is None and scan_state.get("blocked") and HAS_CURL_CFFI:
+            # Channel page failed / Cloudflare-gated — retry with impersonation
             logger.info("Rumble channel scan: retrying with --impersonate chrome")
             live_url = _find_rumble_live_url(url, logger, timeout, cookies_file, impersonate=True)
         if live_url is None:
@@ -577,7 +676,7 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None, info=None):
     # Rumble's video pages are Cloudflare-gated. A plain yt-dlp fetch 403s
     # even when the channel page (and cookies) are fine; --impersonate
     # chrome is required on the *first* attempt, not as a retry.
-    rumble_page = "rumble.com" in url.lower()
+    rumble_page = _url_host_matches(url, "rumble.com")
     impersonate_first = rumble_page and HAS_CURL_CFFI
 
     check_cmd = ["yt-dlp", "--dump-json", "--playlist-items", "1"]
@@ -585,7 +684,7 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None, info=None):
         check_cmd.extend(["--impersonate", "chrome"])
     if cookies_file:
         check_cmd.extend(["--cookies", cookies_file])
-    check_cmd.append(url)
+    check_cmd.extend(["--", url])
     logger.info(f"Check cmd (yt-dlp): {redact_cmd_for_log(check_cmd)}")
 
     try:
@@ -619,7 +718,7 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None, info=None):
                 # Check if yt-dlp resolved to a different URL (e.g. channel page -> video)
                 resolved = data.get("webpage_url") or data.get("url")
                 resolved_url = None
-                if resolved and resolved != url:
+                if resolved and resolved != url and _is_http_url(resolved):
                     logger.info(f"Resolved URL: {redact_for_log(resolved)}")
                     resolved_url = resolved
 
@@ -647,10 +746,10 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None, info=None):
                 if formats:
                     video_fmts = [f for f in formats
                                   if f.get("vcodec") not in (None, "none")
-                                  and f.get("url")]
+                                  and _is_http_url(f.get("url"))]
                     audio_fmts = [f for f in formats
                                   if f.get("vcodec") in (None, "none")
-                                  and f.get("url")]
+                                  and _is_http_url(f.get("url"))]
                     if video_fmts and audio_fmts:
                         best_v = max(video_fmts, key=lambda f: f.get("tbr") or f.get("vbr") or 0)
                         best_a = max(audio_fmts, key=lambda f: f.get("tbr") or f.get("abr") or 0)
@@ -659,6 +758,8 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None, info=None):
                         # that may expire between the check and record phases — so we
                         # prefer the master URL and let ffmpeg negotiate its own session.
                         manifest_url = best_v.get("manifest_url") or best_a.get("manifest_url")
+                        if manifest_url and not _is_http_url(manifest_url):
+                            manifest_url = None
                         # Carry yt-dlp's exact per-format http_headers through to ffmpeg.
                         # These are what yt-dlp uses internally when hitting the CDN —
                         # guessing a different header set risks Cloudflare rejections.
@@ -708,7 +809,7 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None, info=None):
                                        "--dump-json", "--playlist-items", "1"]
                     if cookies_file:
                         impersonate_cmd.extend(["--cookies", cookies_file])
-                    impersonate_cmd.append(url)
+                    impersonate_cmd.extend(["--", url])
                     try:
                         retry = subprocess.run(impersonate_cmd, capture_output=True,
                                                text=True, timeout=timeout, **no_window_kwargs())
@@ -722,7 +823,7 @@ def check_stream_ytdlp(url, logger, timeout=30, cookies_file=None, info=None):
                             # Check resolved URL for impersonation path too
                             resolved = data.get("webpage_url") or data.get("url")
                             resolved_url = None
-                            if resolved and resolved != url:
+                            if resolved and resolved != url and _is_http_url(resolved):
                                 logger.info(f"Resolved URL: {redact_for_log(resolved)}")
                                 resolved_url = resolved
                             # Don't treat resolved VODs as live
@@ -922,6 +1023,7 @@ class FishtankAuth:
         self._all_stream_names = {}  # all stream id→name from API, populated by get_live_streams
         self._refresh_thread = None
         self._refresh_stop = threading.Event()
+        self._lock = threading.RLock()
         self._catalog_ok = False     # True when the last /v1/live-streams call parsed (even if empty)
         self._auth_fail_logged_at = None  # monotonic time of the last "session expired" error
         # Offline detail for the worker's status row (set by check_stream_fishtank), or None.
@@ -957,13 +1059,14 @@ class FishtankAuth:
 
         def _refresh_loop():
             while not self._refresh_stop.wait(timeout=60):
-                now = time.time()
-                if self._jwt is not None and now >= (self._jwt_exp - self._JWT_REFRESH_BUFFER):
-                    remaining = max(0, self._jwt_exp - now)
-                    self._logger.info(
-                        f"[fishtank] JWT expires in {remaining:.0f}s — proactively refreshing"
-                    )
-                    self._refresh()
+                with self._lock:
+                    now = time.time()
+                    if self._jwt is not None and now >= (self._jwt_exp - self._JWT_REFRESH_BUFFER):
+                        remaining = max(0, self._jwt_exp - now)
+                        self._logger.info(
+                            f"[fishtank] JWT expires in {remaining:.0f}s — proactively refreshing"
+                        )
+                        self._refresh()
 
         self._refresh_thread = threading.Thread(
             target=_refresh_loop,
@@ -996,11 +1099,12 @@ class FishtankAuth:
 
         Returns the JWT string, or None if authentication failed.
         """
-        now = time.time()
-        # Refresh if expired (with 5-minute buffer) or forced
-        if force_refresh or self._jwt is None or now >= (self._jwt_exp - 300):
-            self._refresh()
-        return self._jwt
+        with self._lock:
+            now = time.time()
+            # Refresh if expired (with 5-minute buffer) or forced
+            if force_refresh or self._jwt is None or now >= (self._jwt_exp - 300):
+                self._refresh()
+            return self._jwt
 
     def build_stream_url(self, stream_id, quality="maxbps"):
         """Build the MistServer TS progressive HTTP URL for a given stream ID.
@@ -1026,7 +1130,7 @@ class FishtankAuth:
         url = f"https://{host}/hls/live+{stream_id}/index.m3u8?jwt={jwt}"
         return url, jwt
 
-    def get_live_streams(self):
+    def get_live_streams(self, target_id=None):
         """Fetch the list of currently-live stream IDs from the API.
 
         Host discovery uses the thumbnail endpoint rather than the loadBalancer
@@ -1035,6 +1139,9 @@ class FishtankAuth:
         stream.  The thumbnail endpoint (/live%2B<id>.jpeg) is served directly
         by the real streaming node with no auth required, so a 200 response
         from a given host means that host is currently serving the stream.
+
+        When *target_id* is given, only that camera's serving host is probed
+        (avoiding an N×M HEAD-request storm across per-channel workers).
 
         Returns a dict mapping stream_id → stream_name, or {} on failure.
         """
@@ -1064,11 +1171,22 @@ class FishtankAuth:
             self._all_stream_names = all_stream_names
             self._catalog_ok = True
 
-            # Discover the real serving host for each online stream via thumbnail.
-            # Use the loadBalancer host as the starting point for the thumbnail
-            # request — the thumbnail always responds from the real node.
-            for sid in list(streams.keys()):
-                candidate_host = lb.get(sid, self._stream_host)
+            # Discover the real serving host via thumbnail HEAD. When target_id
+            # is specified, probe only that camera (or 1 fallback online stream
+            # if target_id isn't in liveStreamStatus, e.g. Director Mode) instead
+            # of issuing N×M sequential HEAD requests across all cameras.
+            if target_id:
+                if target_id in streams or target_id in lb:
+                    probe_sids = [target_id]
+                else:
+                    probe_sids = list(streams.keys())[:1]
+            else:
+                probe_sids = list(streams.keys())
+            for sid in probe_sids:
+                raw_candidate = lb.get(sid)
+                candidate_host = raw_candidate if _is_fishtank_host(raw_candidate) else self._stream_host
+                if not _is_fishtank_host(candidate_host):
+                    candidate_host = self._DEFAULT_STREAM_HOST
                 thumb_url = (
                     f"https://{candidate_host}/live%2B{sid}.jpeg"
                 )
@@ -1078,19 +1196,20 @@ class FishtankAuth:
                         headers={"User-Agent": "Mozilla/5.0"})
                     with urllib.request.urlopen(req, timeout=5) as resp:
                         # The response URL's host is the real serving node
-                        real_host = resp.url.split("//")[1].split("/")[0]
-                        if real_host and "fishtank.live" in real_host:
+                        parts = urllib.parse.urlsplit(resp.url or "")
+                        real_host = parts.netloc if parts.scheme.lower() == "https" else ""
+                        if _is_fishtank_host(real_host):
                             self._stream_hosts[sid] = real_host
                             self._stream_host = real_host
                         else:
-                            # Responded from candidate_host directly
+                            # Responded from candidate_host directly (or redirected off-domain)
                             self._stream_hosts[sid] = candidate_host
                             self._stream_host = candidate_host
                 except Exception:
-                    # Fallback: trust the loadBalancer host as-is
-                    if lb.get(sid):
-                        self._stream_hosts[sid] = lb[sid]
-                        self._stream_host = lb[sid]
+                    # Fallback: trust the loadBalancer host only if it is on fishtank.live
+                    if _is_fishtank_host(raw_candidate):
+                        self._stream_hosts[sid] = raw_candidate
+                        self._stream_host = raw_candidate
 
             if self._stream_host != self._DEFAULT_STREAM_HOST:
                 self._logger.info(
@@ -1151,10 +1270,17 @@ class FishtankAuth:
             with open(self._cookies_file, 'r', encoding='utf-8', errors='replace') as f:
                 for line in f:
                     line = line.strip()
-                    if not line or line.startswith('#'):
+                    if not line:
+                        continue
+                    if line.startswith('#HttpOnly_'):
+                        line = line[len('#HttpOnly_'):]
+                    elif line.startswith('#'):
                         continue
                     parts = line.split('\t')
                     if len(parts) < 7:
+                        continue
+                    domain = parts[0].strip().lstrip('.').lower()
+                    if domain != 'fishtank.live' and not domain.endswith('.fishtank.live'):
                         continue
                     name = parts[5]
                     if 'sb-' in name and 'auth-token' in name:
@@ -1468,8 +1594,11 @@ def check_stream_fishtank(stream_id, auth, logger, timeout=20):
     auth.last_detail = None
 
     # Fetch the streams list — also populates auth._all_stream_names and
-    # caches the load balancer host from any online stream
-    live_streams = auth.get_live_streams()
+    # caches the load balancer host for this camera
+    try:
+        live_streams = auth.get_live_streams(target_id=resolved_id)
+    except TypeError:
+        live_streams = auth.get_live_streams()
     if not live_streams and not auth._all_stream_names:
         if getattr(auth, "_catalog_ok", False):
             # The API answered but lists no cameras: the show is between seasons.
@@ -1637,8 +1766,13 @@ def resolve_best_fishtank_variant(master_url, jwt, logger, timeout=10):
 
     # Resolve relative URI against the master playlist base URL
     if best_uri.startswith("http://") or best_uri.startswith("https://"):
-        # Absolute URI — use as-is; it already contains whatever auth it needs
-        variant_url = best_uri
+        # Absolute URI — require HTTPS on fishtank.live so a playlist cannot redirect JWTs off-site
+        if (urllib.parse.urlsplit(best_uri).scheme.lower() == "https"
+                and _url_host_matches(best_uri, "fishtank.live")):
+            variant_url = best_uri
+        else:
+            logger.warning("[fishtank] Ignoring off-domain or non-HTTPS variant URI in master playlist")
+            return master_url, ""
     else:
         # Relative path — resolve against the directory of the master URL
         base = master_url.split("?")[0]  # strip query string from master
@@ -1796,26 +1930,31 @@ def build_recording_command_ffmpeg_merge(video_url, audio_url, raw_file, config,
 
     # Build the -headers string from yt-dlp's own http_headers dict so ffmpeg
     # presents the exact same fingerprint to the CDN that yt-dlp used.
-    if http_headers:
-        headers = "".join(f"{k}: {v}\r\n" for k, v in http_headers.items())
-    else:
+    headers = _sanitize_ffmpeg_headers(http_headers)
+    if not headers:
         headers = (
             "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36\r\n"
         )
 
     if video_url and audio_url:
+        if not (_is_http_url(video_url) and _is_http_url(audio_url)):
+            raise ValueError("build_recording_command_ffmpeg_merge: stream URLs must be http(s)")
         # Preferred: two-input merge using the individual video+audio chunklist
         # URLs (with session tokens).  The master JWT URL is likely single-use —
         # yt-dlp consumes it during --dump-json format enumeration, invalidating
         # it before ffmpeg can reuse it.  Session tokens on chunklist URLs survive
         # independently and work for the duration of the stream (VLC confirms this).
+        # Note: -protocol_whitelist and -headers are per-input options in ffmpeg,
+        # so both MUST be repeated before the second -i input.
         cmd = [
             ffmpeg_path,
             "-loglevel", loglevel,
             "-protocol_whitelist", _FFMPEG_NETWORK_PROTOCOLS,
             "-headers", headers,
             "-i", video_url,
+            "-protocol_whitelist", _FFMPEG_NETWORK_PROTOCOLS,
+            "-headers", headers,
             "-i", audio_url,
             "-c", "copy",
             "-map", "0:v",
@@ -1824,6 +1963,8 @@ def build_recording_command_ffmpeg_merge(video_url, audio_url, raw_file, config,
             raw_file,
         ]
     elif manifest_url:
+        if not _is_http_url(manifest_url):
+            raise ValueError("build_recording_command_ffmpeg_merge: manifest URL must be http(s)")
         # Fallback: master HLS playlist when individual track URLs aren't available.
         cmd = [
             ffmpeg_path,
@@ -1846,7 +1987,7 @@ def check_stream_streamlink(url, logger, timeout=30):
 
     Returns (is_live: bool, stream_title: str | None, error: str | None).
     """
-    check_cmd = ["streamlink", "--json", url]
+    check_cmd = ["streamlink", "--json", "--", url]
     logger.info(f"Check cmd: {redact_cmd_for_log(check_cmd)}")
 
     try:
@@ -1905,9 +2046,8 @@ def build_recording_command_ytdlp(url, raw_file, config, verbose, streamlink_deb
         cmd.extend(["--impersonate", "chrome"])
 
     cmd.extend([
-        url,
         "-f", "bestvideo+bestaudio/b/best",  # merged tracks first (e.g. Chaturbate), fallback to single-file "b" or "best"
-        "-o", raw_file,
+        "-o", raw_file.replace("%", "%%"),   # -o is a yt-dlp template; escape % in {title}
         "--no-part",
         "--no-mtime",
         "--retries", "10",
@@ -1954,7 +2094,7 @@ def build_recording_command_ytdlp(url, raw_file, config, verbose, streamlink_deb
     # editing code (e.g. "tv", "mweb", "default,-web").  Blank = yt-dlp's
     # default, which is what you want unless you're working around a
     # regression.
-    if "youtube.com" in url or "youtu.be" in url:
+    if _url_host_matches(url, "youtube.com", "youtu.be"):
         player_client = (config.get('Advanced', 'youtube_player_client', fallback='') or '').strip()
         if player_client:
             cmd.extend(["--extractor-args", f"youtube:player_client={player_client}"])
@@ -1962,6 +2102,7 @@ def build_recording_command_ytdlp(url, raw_file, config, verbose, streamlink_deb
     if verbose or streamlink_debug:
         cmd.append("--verbose")
 
+    cmd.extend(["--", url])
     return cmd
 
 
@@ -1975,7 +2116,7 @@ def build_recording_command_ytdlp_from_start(url, out_stem, config, verbose, str
     <out_stem>.mp4 with ffmpeg when the broadcast ends.
     """
     cmd = [
-        "yt-dlp", url,
+        "yt-dlp",
         "--live-from-start",
         "-f", "bv*+ba/b",
         "-o", out_stem.replace("%", "%%") + ".%(ext)s",   # -o is a template
@@ -1992,6 +2133,7 @@ def build_recording_command_ytdlp_from_start(url, out_stem, config, verbose, str
         cmd.extend(["--extractor-args", f"youtube:player_client={player_client}"])
     if verbose or streamlink_debug:
         cmd.append("--verbose")
+    cmd.extend(["--", url])
     return cmd
 
 
@@ -2005,7 +2147,6 @@ def build_recording_command_streamlink_kick(url, raw_file, quality, verbose, str
     cmd = [
         "streamlink",
         "--http-header", "User-Agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        url, quality,
         "--retry-streams", "10",
         "--retry-max", "3",
         "--retry-open", "3",
@@ -2014,6 +2155,7 @@ def build_recording_command_streamlink_kick(url, raw_file, quality, verbose, str
         "-o", raw_file,
         # Always use debug for the fallback path so we can diagnose issues
         "--loglevel", "debug",
+        "--", url, quality,
     ]
 
     return cmd
@@ -2039,7 +2181,6 @@ def build_recording_command_streamlink(url, raw_file, quality, platform, config,
         ])
 
     cmd.extend([
-        url, quality,
         "--retry-streams", "30",
         "--retry-max", "10",
         "--retry-open", "3",
@@ -2055,5 +2196,6 @@ def build_recording_command_streamlink(url, raw_file, quality, platform, config,
     else:
         cmd += ["--loglevel", "warning"]
 
+    cmd.extend(["--", url, quality])
     return cmd
 

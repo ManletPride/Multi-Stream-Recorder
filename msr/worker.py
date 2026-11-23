@@ -16,6 +16,7 @@ import time
 from msr import __version__
 from msr import yt_live_start
 from msr.config import (
+    FISHTANK_PASSWORD_ENV,
     default_streams_dir,
     fishtank_password,
     new_parser,
@@ -1132,7 +1133,8 @@ def _watch_resolution_change_thread(raw_file, resolution_change_ref, ffmpeg_path
                 break
         except OSError:
             pass
-        time.sleep(1)
+        if stop_event.wait(1):
+            return
     else:
         return  # file never appeared or grew — give up
 
@@ -1141,11 +1143,8 @@ def _watch_resolution_change_thread(raw_file, resolution_change_ref, ffmpeg_path
         return  # couldn't establish a baseline — nothing to compare against
 
     while not stop_event.is_set():
-        # Interruptible sleep so we don't delay shutdown by up to check_interval.
-        for _ in range(check_interval):
-            if stop_event.is_set():
-                return
-            time.sleep(1)
+        if stop_event.wait(check_interval):
+            return
 
         # Sample near the live edge (-sseof) rather than the start of the file,
         # so we catch the *current* resolution, not the one from minutes ago.
@@ -1580,7 +1579,7 @@ def _lower_priority_popen_kwargs():
 
 def _run_remux_cmd(ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file, logger, timeout,
                    file_size, label="Remux", progress_cb=None,
-                   low_priority=False, cancel_event=None):
+                   low_priority=False, cancel_event=None, source_duration=None):
     """Run a single ffmpeg remux command, streaming progress to the logger.
 
     ffmpeg is invoked with ``-progress pipe:1 -stats_period 5`` so it writes
@@ -1599,7 +1598,7 @@ def _run_remux_cmd(ffmpeg_cmd, ffmpeg_path, raw_file, mp4_file, logger, timeout,
     Returns ``(returncode, stderr_text)``.
     """
     # Probe source duration so we can compute % complete from out_time_ms.
-    total_secs = _probe_duration(ffmpeg_path, raw_file)
+    total_secs = _probe_duration(ffmpeg_path, raw_file) if source_duration is None else source_duration
 
     # Inject progress reporting into the command.  Insert before the output
     # path (last positional argument, just before "-y").
@@ -1780,7 +1779,7 @@ def _remove_quietly(path):
         pass
 
 
-def verify_media_output(sources, out_file, ffmpeg_path, logger, min_bytes=None):
+def verify_media_output(sources, out_file, ffmpeg_path, logger, min_bytes=None, source_duration=None):
     """Is ``out_file`` a complete copy of ``sources`` (a list of files, played one after another)?
 
     Returns ``(ok, reason)``.  Nothing may be deleted or replaced because of an output that
@@ -1803,13 +1802,16 @@ def verify_media_output(sources, out_file, ffmpeg_path, logger, min_bytes=None):
     out_secs = _probe_duration(ffmpeg_path, out_file)
     if not out_secs:
         return False, "output unreadable (no duration)"
-    src_secs = 0.0
-    for src in sources:
-        d = _probe_duration(ffmpeg_path, src)
-        if not d:
-            src_secs = None
-            break
-        src_secs += d
+    if source_duration is not None:
+        src_secs = source_duration or None
+    else:
+        src_secs = 0.0
+        for src in sources:
+            d = _probe_duration(ffmpeg_path, src)
+            if not d:
+                src_secs = None
+                break
+            src_secs += d
     if src_secs:
         slack = max(DURATION_SLACK_SECONDS, DURATION_SLACK_FRACTION * src_secs)
         if out_secs >= src_secs - slack:
@@ -1825,9 +1827,9 @@ def verify_media_output(sources, out_file, ffmpeg_path, logger, min_bytes=None):
     return True, None
 
 
-def verify_remux_output(raw_file, out_file, ffmpeg_path, logger, min_bytes=None):
+def verify_remux_output(raw_file, out_file, ffmpeg_path, logger, min_bytes=None, source_duration=None):
     """``verify_media_output`` for one raw recording."""
-    return verify_media_output([raw_file], out_file, ffmpeg_path, logger, min_bytes)
+    return verify_media_output([raw_file], out_file, ffmpeg_path, logger, min_bytes, source_duration=source_duration)
 
 
 def _publish_remux(part_file, mp4_file, logger):
@@ -1843,8 +1845,51 @@ def _publish_remux(part_file, mp4_file, logger):
             time.sleep(wait)
 
 
+# Global cap on concurrent background remuxes so multiple 8 GB +faststart
+# remuxes cannot saturate disk I/O while live streams are being captured.
+MAX_CONCURRENT_REMUXES = 2
+_LOCAL_REMUX_SEM = threading.BoundedSemaphore(MAX_CONCURRENT_REMUXES)
+
+
+class _RemuxSlot:
+    """Acquire a remux concurrency slot while honouring ``cancel_event``."""
+
+    def __init__(self, sem, cancel_event=None):
+        self._sem = sem
+        self._cancel = cancel_event
+        self.acquired = False
+
+    def __enter__(self):
+        if self._sem is None:
+            return True
+        while True:
+            if self._cancel is not None and self._cancel.is_set():
+                return False
+            try:
+                if self._sem.acquire(timeout=0.5):
+                    self.acquired = True
+                    return True
+            except TypeError:
+                # Some custom/mock semaphores only accept blocking bool.
+                self._sem.acquire()
+                self.acquired = True
+                return True
+            except Exception:
+                # Manager shut down or proxy broken — don't fail the remux.
+                return True
+
+    def __exit__(self, *exc):
+        if self.acquired and self._sem is not None:
+            try:
+                self._sem.release()
+            except Exception:
+                pass
+            self.acquired = False
+
+
 def remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, timeout=600,
-                 progress_cb=None, low_priority=False, cancel_event=None):
+                 progress_cb=None, low_priority=False, cancel_event=None,
+                 remux_sem=None):
     """Remux recorded .ts file to MP4 format.
 
     The output is written to ``<mp4>.part``, checked (``verify_remux_output``: size, a readable
@@ -1890,11 +1935,12 @@ def remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, timeout=600,
         ]
 
     file_size = os.path.getsize(raw_file) if os.path.exists(raw_file) else 0
+    src_secs = _probe_duration(ffmpeg_path, raw_file)
     logger.info("Starting remux...")
 
     def _accept(label):
         """Verify and publish the ``.part``. Returns ``(result_tuple_or_None)``."""
-        ok, reason = verify_remux_output(raw_file, part_file, ffmpeg_path, logger)
+        ok, reason = verify_remux_output(raw_file, part_file, ffmpeg_path, logger, source_duration=src_secs)
         if not ok:
             size = os.path.getsize(part_file) if os.path.exists(part_file) else 0
             logger.error(f"{label} output rejected ({reason}); the raw file {os.path.basename(raw_file)} is kept")
@@ -1905,12 +1951,29 @@ def remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, timeout=600,
         logger.info(f"{label} successful: {human_size(mp4_size)}")
         return True, mp4_size, None
 
+    slot_sem = remux_sem if remux_sem is not None else (_LOCAL_REMUX_SEM if low_priority else None)
+    with _RemuxSlot(slot_sem, cancel_event) as got_slot:
+        if not got_slot:
+            logger.warning("Remux cancelled while waiting for remux slot")
+            _remove_quietly(part_file)
+            return False, 0, "cancelled"
+        return _remux_to_mp4_body(
+            raw_file, mp4_file, part_file, ffmpeg_cmd, ffmpeg_path, logger,
+            timeout, file_size, src_secs, has_timed_id3, progress_cb, low_priority,
+            cancel_event, _accept,
+        )
+
+
+def _remux_to_mp4_body(raw_file, mp4_file, part_file, ffmpeg_cmd, ffmpeg_path, logger,
+                       timeout, file_size, src_secs, has_timed_id3, progress_cb,
+                       low_priority, cancel_event, _accept):
     try:
         returncode, stderr_text = _run_remux_cmd(
             ffmpeg_cmd, ffmpeg_path, raw_file, part_file,
             logger, timeout, file_size, label="Remux",
             progress_cb=progress_cb,
             low_priority=low_priority, cancel_event=cancel_event,
+            source_duration=src_secs,
         )
 
         if returncode == REMUX_CANCELLED:
@@ -1952,6 +2015,7 @@ def remux_to_mp4(raw_file, mp4_file, ffmpeg_path, logger, timeout=600,
                     logger, timeout, file_size, label="Fallback remux",
                     progress_cb=progress_cb,
                     low_priority=low_priority, cancel_event=cancel_event,
+                    source_duration=src_secs,
                 )
                 if fb_code == REMUX_CANCELLED:
                     logger.warning("Remux cancelled")
@@ -2005,7 +2069,8 @@ def save_metadata(mp4_file, username, platform, start_time_str, duration_seconds
 
 def process_finished_raw(raw_file, mp4_file, pending_dir, ffmpeg_path, logger,
                          timeout, username, platform, start_wall, elapsed,
-                         stream_title, progress_cb=None):
+                         stream_title, progress_cb=None, low_priority=False,
+                         remux_sem=None):
     """Remux (or move) a finished raw recording into processed/.
 
     Shared by the worker's synchronous stream-end path and the background
@@ -2033,7 +2098,8 @@ def process_finished_raw(raw_file, mp4_file, pending_dir, ffmpeg_path, logger,
 
     success, mp4_size, error = remux_to_mp4(
         raw_file, mp4_file, ffmpeg_path, logger, timeout,
-        progress_cb=progress_cb,
+        progress_cb=progress_cb, low_priority=low_priority,
+        remux_sem=remux_sem,
     )
     if not success:
         return False, mp4_size, error
@@ -2259,9 +2325,10 @@ def _reap_capture(proc, logger):
 
 def record_worker(args):
     """Worker process to record a single channel."""
-    # log_queue is optional so a caller still passing the old 6-tuple keeps working.
+    # log_queue and remux_sem are optional so callers passing 6- or 7-tuples keep working.
     channel_entry, config_dict, stop_event, status_queue, wake_event, runtime = args[:6]
     log_queue = args[6] if len(args) > 6 else None
+    remux_sem = args[7] if len(args) > 7 else None
 
     # Reconstruct config in child process
     config = new_parser()
@@ -2288,6 +2355,7 @@ def record_worker(args):
     reconnect_extended_minutes = parser_getint(config, 'Timeouts', 'reconnect_extended_minutes', 10)
     file_creation_timeout = parser_getint(config, 'Timeouts', 'file_creation_timeout', 60)
     filename_pattern = config.get('Recording', 'filename_pattern', fallback='{username}_{timestamp}') or '{username}_{timestamp}'
+    exit_when_offline = parser_getboolean(config, '_Worker', 'exit_when_offline', False)
     from_start_enabled, from_start_max_minutes = yt_live_start.settings(config)
 
     # Cookies file
@@ -2306,6 +2374,10 @@ def record_worker(args):
         )
         return
     platform, username = parsed
+    if platform != "fishtank":
+        # Non-Fishtank workers never need MSR_FISHTANK_PASSWORD; drop it from
+        # this worker's environment immediately.
+        os.environ.pop(FISHTANK_PASSWORD_ENV, None)
     logger.info(f"Worker STARTED (PID {os.getpid()})")
     if cookies_file:
         logger.info(f"Using cookies file: {cookies_file}")
@@ -2513,6 +2585,9 @@ def record_worker(args):
     if platform == "fishtank":
         ft_email = config.get('Fishtank', 'email', fallback='')
         ft_password = fishtank_password(config)
+        # Drop MSR_FISHTANK_PASSWORD from os.environ once FishtankAuth has read
+        # it so child tools (ffmpeg, ffprobe) never inherit it.
+        os.environ.pop(FISHTANK_PASSWORD_ENV, None)
         fishtank_auth = FishtankAuth(cookies_file, logger,
                                      email=ft_email, password=ft_password)
         auth_method = "email+password" if (ft_email and ft_password) else "cookie jar"
@@ -2525,6 +2600,7 @@ def record_worker(args):
 
     proc = None              # the running capture, reaped on every error path
     overlap_handoff = {}     # a size/time split's next capture, if one was started
+    handed_back = False      # coordinator mode: exited cleanly after offline/grace end
     while not stop_event.is_set():
         try:
             # Live-refresh the poll interval from the shared runtime dict so
@@ -2757,28 +2833,28 @@ def record_worker(args):
                             "size": "", "time": "", "progress": 0, "event": "ended"}))
                         _finalize_pending_group()
 
-                # Normal offline — flat interval with jitter (no backoff)
-                sleep_time = jittered_sleep(poll_base_seconds, poll_jitter_percent)
+                if exit_when_offline:
+                    handed_back = True
+                    logger.info("Stream offline — handing channel back to idle polling coordinator")
+                    break
+
+                # Normal offline — flat interval with jitter (no backoff).
+                # When realtime push (Kick/Twitch WebSocket) is actively listening,
+                # relax the fallback safety-net poll floor to 10 minutes so idle
+                # channels don't spawn streamlink --json every 3 minutes.
+                push_active = False
+                if platform in ("kick", "twitch"):
+                    try:
+                        push_active = bool(runtime.get(f"{platform}_push:{channel_key}", False))
+                    except Exception:
+                        push_active = False  # Manager unavailable during shutdown
+                effective_base = max(poll_base_seconds, 600.0) if push_active else poll_base_seconds
+                sleep_time = jittered_sleep(effective_base, poll_jitter_percent)
                 detail = f"next check ~{int(sleep_time)}s"
                 if platform == "fishtank" and getattr(fishtank_auth, "last_detail", None):
                     detail = f"{fishtank_auth.last_detail} - {detail}"
-                if platform == "kick":
-                    # Push coverage flag is set by KickPushListener in the
-                    # main process via the shared runtime dict.  When the
-                    # socket is down the tag simply disappears and the detail
-                    # reads exactly like pre-1.7.0 — that absence IS the
-                    # degraded-mode indicator.
-                    try:
-                        if runtime.get(f"kick_push:{channel_key}", False):
-                            detail = f"push: listening · {detail}"
-                    except Exception:
-                        pass  # Manager unavailable during shutdown
-                if platform == "twitch":
-                    try:
-                        if runtime.get(f"twitch_push:{channel_key}", False):
-                            detail = f"push: listening \u00b7 {detail}"
-                    except Exception:
-                        pass
+                if push_active:
+                    detail = f"push: listening \u00b7 {detail}"
                 new_status = {"status": "Offline", "detail": detail, "size": "", "time": "", "progress": 0}
                 if new_status != last_status:
                     status_queue.put((channel_key, new_status))
@@ -2983,6 +3059,7 @@ def record_worker(args):
                             raw_file, mp4_file, pending_dir, ffmpeg_path, logger,
                             timeout, username, platform, start_wall, elapsed,
                             stream_title, progress_cb=_on_remux_progress,
+                            low_priority=True, remux_sem=remux_sem,
                         )
                         if success:
                             closing_parts.append({
@@ -3107,8 +3184,10 @@ def record_worker(args):
                     max_file_size_gb=max_file_size_gb,
                     stream_info=stream_info,
                     ffmpeg_path=config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg') or 'ffmpeg',
-                    watch_resolution_changes=parser_getboolean(
-                        config, 'Recording', 'split_on_resolution_change', True),
+                    watch_resolution_changes=(
+                        platform == "tiktok"
+                        and parser_getboolean(config, 'Recording', 'split_on_resolution_change', True)
+                    ),
                     bg_remux_state=bg_remux_state,
                     remux_lock=remux_lock,
                     on_size_limit=_on_size_limit,
@@ -3391,7 +3470,7 @@ def record_worker(args):
             success, mp4_size, error = process_finished_raw(
                 raw_file, mp4_file, pending_dir, ffmpeg_path, logger,
                 scaled_timeout, username, platform, start_wall, elapsed,
-                stream_title,
+                stream_title, remux_sem=remux_sem,
             )
 
             if success:
@@ -3498,6 +3577,11 @@ def record_worker(args):
     # segments from the current session.
     _join_background_remuxes()
     _finalize_pending_group()
+
+    if handed_back:
+        status_queue.put((channel_key, {
+            "status": "Offline", "detail": "idle",
+            "size": "", "time": "", "progress": 0, "event": "worker_done"}))
 
     logger.info("Worker STOPPED")
 

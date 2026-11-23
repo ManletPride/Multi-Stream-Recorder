@@ -78,14 +78,25 @@ def load_key(*, create: bool = True) -> bytes:
     """
     folder = key_dir()
     path = _key_path()
-    if os.path.isfile(path):
-        _tighten(folder, 0o700)
-        _tighten(path, 0o600)
-        with open(path, "rb") as fh:
-            key = fh.read()
-        if len(key) != 32:
-            raise CryptoError("the secret key file is not usable")
-        return key
+    if os.path.lexists(path):
+        if os.path.islink(path):
+            raise CryptoError("the secret key file must not be a symbolic link")
+        if os.name != "nt":
+            try:
+                if os.lstat(path).st_uid != os.getuid():
+                    raise CryptoError("the secret key file is not owned by this user")
+            except CryptoError:
+                raise
+            except OSError as exc:
+                raise CryptoError("the secret key file is not usable") from exc
+        if os.path.isfile(path):
+            _tighten(folder, 0o700)
+            _tighten(path, 0o600)
+            with open(path, "rb") as fh:
+                key = fh.read()
+            if len(key) != 32:
+                raise CryptoError("the secret key file is not usable")
+            return key
     if not create:
         raise CryptoError("the secret key file is missing")
     # 0o700 on Windows (Python 3.14) becomes an ACL that denies later reads.
@@ -111,39 +122,56 @@ def _stream(key: bytes, nonce: bytes, size: int) -> bytes:
     return bytes(out[:size])
 
 
-def encrypt(data: bytes) -> bytes:
-    """``version | nonce | mac | ciphertext``. Empty input is refused."""
+def _mac_input(version: bytes, nonce: bytes, cipher: bytes, aad: bytes) -> bytes:
+    if version == b"\x02":
+        return version + len(aad).to_bytes(4, "big") + aad + nonce + cipher
+    return version + nonce + cipher
+
+
+def encrypt(data: bytes, *, aad: bytes = b"") -> bytes:
+    """``version | nonce | mac | ciphertext``. Empty input is refused.
+
+    When *aad* is given, version ``0x02`` binds the ciphertext to that context
+    so a ciphertext cannot be transplanted into another config field or file.
+    """
     if not isinstance(data, (bytes, bytearray)) or not data:
         raise CryptoError("nothing to encrypt")
+    if isinstance(aad, str):
+        aad = aad.encode("utf-8")
     key = load_key()
     nonce = os.urandom(16)
     stream = _stream(key, nonce, len(data))
     cipher = bytes(a ^ b for a, b in zip(data, stream))
+    version = b"\x02" if aad else b"\x01"
     mac_key = hmac.new(key, b"msr-filecrypt-mac", hashlib.sha256).digest()
-    mac = hmac.new(mac_key, b"\x01" + nonce + cipher, hashlib.sha256).digest()
-    return b"\x01" + nonce + mac + cipher
+    mac = hmac.new(mac_key, _mac_input(version, nonce, cipher, aad), hashlib.sha256).digest()
+    return version + nonce + mac + cipher
 
 
-def decrypt(blob: bytes) -> bytes:
-    if not blob or blob[0:1] != b"\x01" or len(blob) < 1 + 16 + 32 + 1:
+def decrypt(blob: bytes, *, aad: bytes = b"") -> bytes:
+    if not blob or blob[0:1] not in (b"\x01", b"\x02") or len(blob) < 1 + 16 + 32 + 1:
         raise CryptoError("not an encrypted secret")
+    if isinstance(aad, str):
+        aad = aad.encode("utf-8")
+    version = blob[0:1]
     key = load_key(create=False)
     nonce, mac, cipher = blob[1:17], blob[17:49], blob[49:]
     mac_key = hmac.new(key, b"msr-filecrypt-mac", hashlib.sha256).digest()
-    expect = hmac.new(mac_key, b"\x01" + nonce + cipher, hashlib.sha256).digest()
+    # Version 0x02 strictly binds to *aad*; legacy 0x01 blobs decrypt without AAD for migration.
+    expect = hmac.new(mac_key, _mac_input(version, nonce, cipher, aad), hashlib.sha256).digest()
     if not hmac.compare_digest(mac, expect):
         raise CryptoError("the secret could not be decrypted")
     stream = _stream(key, nonce, len(cipher))
     return bytes(a ^ b for a, b in zip(cipher, stream))
 
 
-def encrypt_text(text: str) -> str:
-    return base64.b64encode(encrypt(text.encode("utf-8"))).decode("ascii")
+def encrypt_text(text: str, *, aad: bytes = b"") -> str:
+    return base64.b64encode(encrypt(text.encode("utf-8"), aad=aad)).decode("ascii")
 
 
-def decrypt_text(b64: str) -> str:
+def decrypt_text(b64: str, *, aad: bytes = b"") -> str:
     try:
         raw = base64.b64decode(b64.strip(), validate=True)
     except Exception as exc:
         raise CryptoError("the secret could not be decrypted") from exc
-    return decrypt(raw).decode("utf-8")
+    return decrypt(raw, aad=aad).decode("utf-8")

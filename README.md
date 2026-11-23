@@ -1,10 +1,10 @@
 # Multi-Stream Recorder
 
-A Windows-first desktop app (Python + Tkinter) that watches a list of live channels and records each one automatically when it goes live, producing clean MP4 files. It records many channels at once, each in its own worker process, and you can cut clips while a stream is still recording.
+A Windows-first desktop app (Python + Tkinter, also supporting Linux and macOS) that watches a list of live channels and records each one automatically when it goes live, producing clean MP4 files. Offline channels share a lightweight polling coordinator and each live stream records in its own worker process; you can cut clips while a stream is still recording.
 
 Supported: **Kick**, **Twitch**, **YouTube**, **Rumble**, **TikTok**, and custom URLs (any site yt-dlp supports, or a direct `.m3u8`).
 
-This README describes **v3.2.0**.
+This README describes **v3.3.0**.
 
 ![Status tab: five channels recording at once](screenshots/main.png)
 
@@ -28,11 +28,11 @@ This README describes **v3.2.0**.
 
 </details>
 
-## What's new in 3.2.0
+## What's new in 3.3.0
 
-- **Telegram uploads** (optional): a finished recording can go to one topic in a group you run. Both switches have to be on: **Options > Telegram** and a per-channel opt-in (right-click **Telegram…**, or `msr_ctl.py edit`). A topic on that channel overrides the global one. Sends use MTProto, about 2 GB per part, split with ffmpeg. The queue sends one file at a time, keeps going after a restart, and shows progress in the log, the Status tab, and `msr_ctl.py telegram status`. Install Telethon (`pip install "Telethon>=1.36,<2"`, or let `run_msr.pyw` install `requirements.txt`) and restart. Without it the section is greyed out and nothing is uploaded.
-- **Linux secrets**: the Twitch sign-in and the Fishtank password are encrypted at rest with the same user key as the Telegram secrets. A value that is still plain is encrypted on the next start.
-- **The per-channel Telegram window** opens at the size of its contents.
+- **Offline channels share one poller.** They are checked in-process, and a recording worker starts only when a channel goes live. Signed-in Twitch checks are batched (up to 100). Kick uses a light HTTP check before streamlink. When Kick or Twitch push is connected, that fallback check waits at least 10 minutes.
+- **A saved secret stays tied to its field.** Linux and macOS still use the 3.2.0 cipher (an HMAC-SHA256 keystream and MAC). The MAC now includes the setting name, so one field's blob cannot be pasted into another. Windows DPAPI takes the same context as optional entropy. A blob from 3.2.0 still opens, and is rewritten in the new form the next time that secret is saved.
+- **Quit asks while a stream is recording.** The smallest window is 1060×620 (it was 1060×720) so it fits a 1080p laptop at 150% scaling. If ffmpeg is missing, the Status tab shows a banner with **Open Options**.
 
 Earlier versions: [CHANGELOG.md](CHANGELOG.md) and [docs/release_notes/](docs/release_notes/).
 
@@ -48,13 +48,13 @@ Earlier versions: [CHANGELOG.md](CHANGELOG.md) and [docs/release_notes/](docs/re
    ```
    git clone https://github.com/ManletPride/Multi-Stream-Recorder.git
    ```
-4. Double-click **`run_msr.pyw`** in the MSR folder.
+4. Double-click **`run_msr.pyw`** in the MSR folder. **`run_msr.bat`** does the same and tries `pyw -3`, then `pythonw`, `py -3`, and `python`.
 
-The first launch shows a small first-time setup window, with each step and a live log, for about a minute while MSR creates its own environment (`.venv` in the MSR folder) and installs its packages there. Later launches start straight away. MSR writes `config.ini` on first start; recordings go to `%USERPROFILE%\Videos\Multi-Stream Recorder` unless you set `streams_dir`.
+The first launch shows a small first-time setup window, with each step and a live log, for about a minute while MSR creates its own environment (`.venv` in the MSR folder) and installs its packages there. Later launches start straight away. MSR writes `config.ini` on first start; recordings go to `%USERPROFILE%\Videos\Multi-Stream Recorder` unless you set `streams_dir`. If ffmpeg is not on PATH, the window still opens and the Status tab shows a banner with **Open Options**.
 
 Want a desktop shortcut with the icon? Run `python create_shortcut.py` once (`--data-dir D:\msr-data` for another data folder). It never replaces an existing shortcut; `--set-icon "path\to\Old.lnk"` only gives an existing one the icon.
 
-**Linux/macOS:** install ffmpeg and Tk from your package manager (`sudo apt install ffmpeg python3-tk python3-venv`, `brew install ffmpeg`), then run `python3 run_msr.pyw`. The environment is `.venv/bin/python`. `python3 create_shortcut.py --linux > ~/.local/share/applications/multi-stream-recorder.desktop` adds a menu entry. On Linux, install the tray libraries and the Hyprland float rule before that first launch: [docs/linux.md](docs/linux.md).
+**Linux/macOS:** install ffmpeg and Tk from your package manager (`sudo apt install ffmpeg python3-tk python3-venv`, `brew install ffmpeg`), then run `python3 run_msr.pyw`. The environment is `.venv/bin/python`. `python3 create_shortcut.py --linux > ~/.local/share/applications/multi-stream-recorder.desktop` adds a menu entry. On Linux the tray libraries are optional (missing build headers do not block setup) and Hyprland needs a float rule: [docs/linux.md](docs/linux.md).
 
 ### MSR's own environment (.venv)
 
@@ -77,7 +77,7 @@ For per-machine launcher settings, create an untracked `run_msr.local.bat` next 
 
 ### Updating
 
-- **MSR itself:** click **vX available** in the status bar (or Updates… > Multi-Stream Recorder). It downloads the release, keeps a backup of the current program files, verifies every file and rolls back if anything fails, then restarts. Your config, cookies, channels and recordings are not touched.
+- **MSR itself:** click **vX available** in the status bar (or Updates… > Multi-Stream Recorder). It downloads the release, keeps a backup of the current program files, verifies every file and rolls back if anything fails, then restarts. A window install restarts through `run_msr.pyw`. Program files the new release no longer ships are removed, and the temporary staging folder is deleted. Your config, cookies, channels and recordings are not touched.
 - **yt-dlp, streamlink and packages:** see [Updating yt-dlp, streamlink and packages](#updating-yt-dlp-streamlink-and-packages).
 - **From git:** `git pull`, then relaunch (fully quit first; a running MSR does not reload its code). The launcher refreshes `.venv` when `requirements.txt` changed.
 
@@ -91,14 +91,15 @@ For per-machine launcher settings, create an untracked `run_msr.local.bat` next 
 - An amber badge marks a row when that site needs cookies you don't have, or yours expired or were rejected.
 
 **Recording**
-- Automatic live detection with jittered polling (default 3 min) and back-off on errors only. The first check runs as soon as you start.
-- **Kick realtime push**: one WebSocket to Kick's realtime service wakes a recorder within seconds of go-live; polling keeps running underneath.
+- **Lightweight idle polling**: offline channels share an in-process polling coordinator with staggered startup — batching up to 100 Twitch channels per Helix `GET /helix/streams` call when signed in, using Kick's lightweight HTTP API before falling back to streamlink, and sharing one Fishtank catalog login. A dedicated capture worker process is spawned only when a channel goes live and hands the channel back cleanly once the stream ends.
+- Automatic live detection with jittered polling (default 3 min) and back-off on errors only. When Kick or Twitch WebSocket push is actively connected, offline fallback polling relaxes to a 10-minute floor.
+- **Kick realtime push**: one WebSocket to Kick's realtime service wakes a channel within seconds of go-live; polling keeps running underneath.
 - **Twitch push** (opt-in): **Options > Twitch > Connect** signs in once with a code at twitch.tv/activate and turns it on. Twitch allows push for up to 10 channels (recording ones first); the rest, and everything else, keep polling. **Manage on Twitch** opens your Twitch connections; **Disconnect** removes MSR's access. After a push connection drops and comes back, MSR runs one catch-up check so a go-live in between isn't missed.
 - **Presence for Off channels**: Off channels are never recorded, but MSR still learns whether they are live, so the Live filter is accurate.
-- **Reconnect grace**: after a stream drops MSR polls every 15 s for 3 minutes, then every 30 s for 10 more, so a short disconnect becomes a new file instead of a missed stream.
-- Splits by size (default 8 GB) and length (`max_record_hours`, default 12) with a few seconds of overlap, and on mid-stream resolution changes.
-- Raw `.ts` is remuxed to `.mp4` (`+faststart`) with a JSON metadata sidecar. The MP4 is checked before the `.ts` is moved away; a failed remux keeps the `.ts` and retries.
-- **Drive loss**: if the recordings drive disappears (USB unplugged, share dropped), recording continues in a fallback folder and is moved back when the drive returns.
+- **Reconnect grace**: after a stream drops MSR polls every 15 s for 3 minutes, then every 30 s for 10 more, so a short disconnect stitches seamlessly instead of losing a stream.
+- Splits by size (default 8 GB) and length (`max_record_hours`, default 12) with a few seconds of overlap, and on mid-stream resolution changes on TikTok (multi-guest battles).
+- Raw `.ts` is remuxed to `.mp4` (`+faststart`) with a JSON metadata sidecar. Background remuxes run at below-normal priority capped at 2 concurrent remuxes so live capture disk I/O stays smooth. The MP4 is checked before the `.ts` is moved away; a failed remux keeps the `.ts` and retries.
+- **Drive loss**: if the recordings drive disappears (USB unplugged, share dropped), recording continues in a fallback folder (`%TEMP%\MultiStreamRecorder` on Windows; `$XDG_CACHE_HOME/multi-stream-recorder` mode `0700` on Linux/macOS so it stays disk-backed rather than RAM-backed `/tmp`) and is moved back when the drive returns.
 - After a crash, recording starts immediately and leftover `.ts` files are remuxed in the background.
 
 **Status tab**
@@ -114,7 +115,7 @@ For per-machine launcher settings, create an untracked `run_msr.local.bat` next 
 - **Play with sound** and a **Volume** slider, so you can cut on dialogue. Playback runs at the recording's frame rate up to 60 fps; tick **Limit preview to 30 fps** on slower PCs (remembered).
 - **Play / pause** is Space, in the editor that has the keyboard (opening it takes focus; another DVR click still opens another editor). **Mark In / Mark Out** (I / O keys), nudge buttons, **Replay In / Out** and the clip length.
 - **Save clip** (Ctrl+S or Enter) makes a lossless stream copy starting at the keyframe at or before your In point (it tells you the real start). Tick **Exact (re-encode)** for frame-exact edges. Clips never overwrite each other.
-- The editor only reads the file, so the recording keeps going. On Windows the sound is ffmpeg and Windows' own audio output. On Linux it is ffmpeg piped to `pw-play`, `pw-cat` or `paplay` (PipeWire or PulseAudio, usually already installed). With none of those on PATH the picture still plays, in real time, with no sound.
+- The editor only reads the file, so the recording keeps going. On Windows the sound is ffmpeg and Windows' own audio output. On Linux it is ffmpeg piped to `pw-play`, `pw-cat` or `paplay` (PipeWire or PulseAudio, usually already installed). With none of those on PATH the picture still plays in real time with no sound, and the editor's status line shows a hint to install `pipewire-utils` or `pulseaudio-utils`.
 
 **Library tab**
 - How much space your recordings take: total, per site (donut), top channels (bars), per month, and a sortable channel table with **Open folder**. **Copy summary** gives plain text; **Count hours** (optional) adds recorded time. The scan runs in the background, only reads sizes and can be cancelled.
@@ -125,9 +126,9 @@ For per-machine launcher settings, create an untracked `run_msr.local.bat` next 
   - MSR never touches a channel that is recording, files changed in the last 10 minutes, or anything outside the Processed / Recorded / PendingDeletion / Clips folders. Every action is logged to `library_actions.log`.
 
 **Options tab**
-- Grouped settings (Recording, YouTube, Checking, Folders, Clips, Cleanup, Sounds, Fishtank login, Other, Advanced timing) with a hint for each and whether it applies now, at the next start or after a restart. The recordings folder can't be changed while recording.
+- Grouped settings (Recording, YouTube, Checking, Folders, Clips, Cleanup, Sounds, Fishtank login, Other, Advanced timing) with a hint for each and whether it applies now, at the next start or after a restart. The recordings folder can't be changed while recording. The Telegram setup fields stay collapsed behind **▸ Configure** until enabled.
 - Fishtank **Test login** (the password is never shown; blank = keep), ffmpeg **Check**, **Updates** shortcut, and a warning when `cookies.txt` is in a synced folder.
-- **Sounds** (all off by default): go-live chime, problem alert, clip tick, each with a Test button; quiet while Windows is locked.
+- **Sounds** (all off by default, Windows-only): go-live chime, problem alert, clip tick, each with a Test button; quiet while Windows is locked (Linux notes that system alert sounds are Windows-only).
 
 **Health**
 - A one-line status in the bottom bar, with details and an Updates button. Checked at start (tools, recordings folder writable and free space, Twitch sign-in) and every `[Health] check_minutes` (10, 0 = off): free space, stalled recordings, sites whose checks all fail. It also notes when yt-dlp or streamlink is more than 14 days behind a newer release.
@@ -137,8 +138,9 @@ For per-machine launcher settings, create an untracked `run_msr.local.bat` next 
 
 **Look and housekeeping**
 - **Themes**: the **Theme...** button opens a list with a live preview: PowerShell Blue (default), Neutral Dark, Light, High Contrast, Midnight Purple, Paper, plus ten based on [Omarchy](https://omarchy.org/themes/) palettes (Arc Blueberry, Catppuccin Mocha OLED, Rose Pine, Gruvbox Material, Dracula, Flexoki Dark, Vesper, Tokyo Night OLED, Tokyo Day, Solarized Light; credits in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)). Add your own as `themes/*.json` in the data folder.
-- **App icon** and its own taskbar entry; the tray icon shows a red dot while recording.
-- Windows remember their size and place and can be dragged by their background.
+- **App icon** and its own taskbar/dock entry (`StartupWMClass=Multi-Stream Recorder` on Linux); the tray icon shows a red dot while recording, and minimizing hides to tray when `[GUI] minimize_to_tray` is enabled and a tray icon is docked.
+- **Safe quitting**: closing the window (`X`, `Ctrl+Q`, or tray **Quit**) asks for confirmation whenever streams are actively recording and saves window geometry/column widths first.
+- Windows remember their size and place (minimum `1060×620` for 1080p laptops at 150% DPI scaling) and can be dragged by their background.
 - **Restore previous...** (the `...` button beside About): the last 20 versions of `channels.json` and `config.ini`, with passwords never stored in the copies.
 - One instance per recordings folder; a second launch focuses the existing window.
 - `stream_recorder.log` rotates (default 20 MB, 3 backups). Stream URLs, tokens and cookie headers are redacted everywhere.
@@ -162,9 +164,9 @@ Use **+ Add channel**. Accepted forms:
 | --- | --- |
 | Kick | `gmhikaru`, `kick:gmhikaru` or `https://kick.com/gmhikaru` |
 | Twitch | `twitch:chess` or a twitch.tv URL |
-| YouTube | `youtube:@LofiGirl`, a channel ID, or a watch URL |
-| Rumble | `rumble:NewsmaxTV` or a rumble.com channel URL |
-| TikTok | `tiktok:qvc` (with or without `@`) |
+| YouTube | `youtube:@LofiGirl`, a channel ID, or a YouTube channel/watch/live/`youtu.be` URL (auto-detected) |
+| Rumble | `rumble:NewsmaxTV` or a `rumble.com/c/...` / `rumble.com/user/...` URL (auto-detected) |
+| TikTok | `tiktok:qvc` (with or without `@`) or a `tiktok.com/@user` URL (auto-detected) |
 | Fishtank | `fishtank:director` or a raw stream id |
 | Custom | any URL yt-dlp supports, or an `.m3u8` |
 
@@ -199,7 +201,7 @@ Or leave the password out and set the `MSR_FISHTANK_PASSWORD` environment variab
 | Section / key | Default | Meaning |
 | --- | --- | --- |
 | `Paths/streams_dir` | Videos\Multi-Stream Recorder | Where `Recorded`, `Processed`, `Clips` and the log go |
-| `Paths/fallback_dir` | (blank) | Where recording continues if `streams_dir` becomes unreachable. Blank = a folder in the system temp folder; `off` = pause instead. Moved back when the drive returns |
+| `Paths/fallback_dir` | (blank) | Where recording continues if `streams_dir` becomes unreachable. Blank = `%TEMP%\MultiStreamRecorder` on Windows or `$XDG_CACHE_HOME/multi-stream-recorder` (mode `0700`) on Linux/macOS; `off` = pause instead. Moved back when the drive returns |
 | `Paths/cookies_file` | auto | Explicit cookies.txt path |
 | `Recording/quality` | best | Stream quality |
 | `Recording/max_file_size_gb` | 8 | Size split (0 = off) |
@@ -279,8 +281,8 @@ Run these with the environment's Python: `.venv\Scripts\python Multi-Stream-Reco
 Everything you do in the window can be done without it. A running copy (window or `--headless`) accepts commands on a local control channel, and `msr_ctl.py` is the command-line client. With nothing running, `msr_ctl.py` edits `channels.json` / `config.ini` directly.
 
 - **Start here:** [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md). `python msr_ctl.py help --json` lists every command with its arguments, safety level and an example.
-- **Local only:** `127.0.0.1` on a random port, with a random token in `msr_control.json` in the data folder (readable only by your user, removed when MSR quits). Turn it off with `[Control] enabled = false` or `MSR_CONTROL=0`.
-- **Live status:** `msr_status.json` in the data folder (every 3 s): channels, recordings, errors, health (tools, disk space, cookie expiry), with no passwords, cookie values or tokens.
+- **Local only:** `127.0.0.1` on a random port, with a random token in `msr_control.json` in the data folder (readable only by your user, removed when MSR quits). Remote `config set` blocks host-path and executable settings (`Advanced.ffmpeg_path`, `Clipping.clips_dir`, `Paths.channels_file`, `Paths.fallback_dir`, `GUI.window_state_file`) — edit those locally in Options or `config.ini`. Turn control off with `[Control] enabled = false` or `MSR_CONTROL=0`.
+- **Live status:** `msr_status.json` in the data folder (written when status changes, with a 60 s idle heartbeat): channels, recordings, errors, health (tools, disk space, cookie expiry), with no passwords, cookie values, raw custom-URL query tokens, or tokens.
 - `msr_ctl.py` runs with any Python 3.10+; `deps` commands switch to `.venv` by themselves. Add `--json` for machine-readable output.
 
 ```
@@ -334,7 +336,7 @@ Click the version text at the bottom left, or **Updates…** next to About. The 
 
 - **First launch stays on "first-time setup" or says it could not set up .venv**: check your internet connection; details are in `msr_venv_error.txt` in the MSR folder. MSR retries at the next launch. On Debian/Ubuntu install `python3-venv`.
 - **"yt-dlp/streamlink not available" in the log**: open **Updates…** and check the rows; the log's `Environment:` line shows which Python MSR runs on.
-- **ffmpeg not found**: install it and sign out/in (or reboot) so PATH updates, or set `Advanced/ffmpeg_path`.
+- **ffmpeg not found**: the GUI still opens with a banner and **Open Options** button so you can pick `Advanced/ffmpeg_path`, or install ffmpeg (`winget install Gyan.FFmpeg` / `sudo apt install ffmpeg`) and sign out/in (or reboot) so PATH updates.
 - **YouTube drops every ~15 s**: install Deno. **"No video formats found!"**: leave `youtube_player_client` blank and update yt-dlp in **Updates…**.
 - **Kick 403 / not recording**: update streamlink in **Updates…**, and delete any old third-party `kick.py` in `%APPDATA%\streamlink\plugins\`.
 - **Kick push not listening** (no `push: listening` in the status column): check that websocket-client and curl_cffi are installed (Updates…). Recording still works through polling.

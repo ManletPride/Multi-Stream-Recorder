@@ -246,5 +246,23 @@ class EditorZoomTests(unittest.TestCase):
         self.assertFalse(self.ed.timeline.find_withtag("wave"))
 
 
+class WaveformSliceTests(unittest.TestCase):
+    def test_window_columns_zoomed_slice_matches_full_bounds(self):
+        from msr import waveform as wf
+        w = wf.Wave()
+        # 100 seconds at 10 Hz = 1000 samples; put a peak only at t=50.5s
+        samples = bytearray([0] * 1000)
+        samples[505] = 200
+        w.extend(samples)
+        # Zoomed window 50..51s across 10 pixels -> peak lands in column 5
+        cols = w.window_columns(50.0, 51.0, 10)
+        self.assertEqual(len(cols), 10)
+        self.assertGreater(cols[5], 0.5)
+        self.assertEqual(cols[0], 0.0)
+        # Out-of-bounds negative start and past-end bounds still work
+        edge = w.window_columns(-1.0, 1.0, 4)
+        self.assertEqual(edge, [0.0, 0.0, 0.0, 0.0])
+
+
 if __name__ == "__main__":
     unittest.main()

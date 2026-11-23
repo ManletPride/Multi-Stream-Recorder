@@ -265,5 +265,52 @@ class CtlHandoffTests(unittest.TestCase):
             self.assertIsNone(msr_ctl._deps_in_venv(["deps", "list"], run=None))
 
 
+class OptionalLinuxTrayVenvTests(Base):
+    def test_split_optional_linux_requirements_only_on_linux(self):
+        reqs = os.path.join(self.root, "requirements.txt")
+        with open(reqs, "w", encoding="utf-8") as fh:
+            fh.write("yt-dlp>=2025.11.12\nPyGObject>=3.50; sys_platform == \"linux\"  # tray\n")
+        core_l, opt_l = venv.split_optional_linux_requirements(reqs, platform="linux")
+        self.assertEqual([ln.strip() for ln in core_l if ln.strip()], ["yt-dlp>=2025.11.12"])
+        self.assertEqual(opt_l, ['PyGObject>=3.50; sys_platform == "linux"'])
+        self.assertEqual(venv.split_optional_linux_requirements(reqs, platform="win32"), ([], []))
+        self.assertEqual(venv.split_optional_linux_requirements(reqs, platform="darwin"), ([], []))
+
+    def test_failed_pygobject_build_does_not_fail_linux_venv_setup(self):
+        reqs = os.path.join(self.root, "requirements.txt")
+        with open(reqs, "w", encoding="utf-8") as fh:
+            fh.write("yt-dlp>=2025.11.12\nPyGObject>=3.50; sys_platform == \"linux\"\n")
+
+        base_tools = FakeTools()
+        seen_cmds = []
+
+        def run(cmd, **kw):
+            seen_cmds.append(list(cmd))
+            if any("PyGObject" in str(a) for a in cmd):
+                return subprocess.CompletedProcess(cmd, 1, "", "ERROR: Dependency 'girepository-2.0' not found")
+            return base_tools(cmd, **kw)
+
+        with mock.patch.object(venv.sys, "platform", "linux"):
+            ok, msg = venv.ensure(self.root, run=run)
+        self.assertTrue(ok, msg)
+        self.assertEqual(msg, "")
+        self.assertEqual(venv.check(self.root), ("ready", ""))
+        self.assertEqual(len(seen_cmds), 3)  # venv, core pip -r, optional PyGObject
+        self.assertFalse(os.path.exists(os.path.join(venv.venv_dir(self.root), ".msr_core_requirements.txt")))
+        with open(venv.setup_log_path(self.root), encoding="utf-8") as fh:
+            log_text = fh.read()
+        self.assertIn("PyGObject", log_text)
+        self.assertIn("recording works normally", log_text)
+
+    def test_core_pip_failure_still_fails_even_when_pygobject_present(self):
+        reqs = os.path.join(self.root, "requirements.txt")
+        with open(reqs, "w", encoding="utf-8") as fh:
+            fh.write("yt-dlp>=2025.11.12\nPyGObject>=3.50; sys_platform == \"linux\"\n")
+        with mock.patch.object(venv.sys, "platform", "linux"):
+            ok, msg = venv.ensure(self.root, run=FakeTools(pip_rc=1, pip_err="ERROR: Could not fetch URL"))
+        self.assertFalse(ok)
+        self.assertIn("offline", msg)
+
+
 if __name__ == "__main__":
     unittest.main()

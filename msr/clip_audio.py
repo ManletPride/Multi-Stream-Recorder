@@ -60,6 +60,28 @@ def pcm_command(ffmpeg: str, video: Path, start: float, speed: float, gain: floa
     return cmd + ["-f", "s16le", "-acodec", "pcm_s16le", "-ac", str(CHANNELS), "-ar", str(RATE), "pipe:1"]
 
 
+_GAIN_LUT_CACHE: dict[float, array.array] = {}
+_GAIN_LUT_MAX = 8
+
+
+def _gain_lut(gain: float) -> array.array:
+    """Cached 65,536-entry int16 scaling LUT indexed directly by signed int16 samples."""
+    key = round(float(gain), 4)
+    lut = _GAIN_LUT_CACHE.get(key)
+    if lut is not None:
+        return lut
+    # Positive indices 0..32767 map directly; indices 32768..65535 map signed
+    # negative samples (-32768..-1) via Python's negative-index wraparound.
+    pos = [_clip_sample(int(i * key)) for i in range(32768)]
+    neg = [_clip_sample(int((i - 65536) * key)) for i in range(32768, 65536)]
+    lut = array.array("h", pos)
+    lut.extend(neg)
+    if len(_GAIN_LUT_CACHE) >= _GAIN_LUT_MAX:
+        _GAIN_LUT_CACHE.pop(next(iter(_GAIN_LUT_CACHE)))
+    _GAIN_LUT_CACHE[key] = lut
+    return lut
+
+
 def apply_gain(data: bytes, gain: float) -> bytes:
     """Scale 16-bit samples. About 1.0 returns the bytes untouched; 0 is silence.
 
@@ -74,7 +96,8 @@ def apply_gain(data: bytes, gain: float) -> bytes:
     samples.frombytes(data[:n])
     if sys.byteorder != "little":  # pragma: no cover
         samples.byteswap()
-    out = array.array("h", [_clip_sample(int(s * gain)) for s in samples])
+    lut = _gain_lut(gain)
+    out = array.array("h", map(lut.__getitem__, samples))
     if sys.byteorder != "little":  # pragma: no cover
         out.byteswap()
     return out.tobytes()
@@ -422,9 +445,11 @@ class PipeSink:
     """
 
     available = True
+    _verified_argv: list[str] | None = None   # cached working player argv so seeks skip the 450 ms silence probe
 
     def __init__(self, *, spawn=None, clock=None, which=None, probe_s: float = 0.45,
                  latency_ms: int = LATENCY_MS, stall_s: float = STALL_S) -> None:
+        self._custom_hooks = spawn is not None or which is not None
         self._spawn = spawn or self._spawn_player
         self._clock = clock or time.monotonic
         self._which = which or shutil.which
@@ -453,6 +478,16 @@ class PipeSink:
 
     def open(self) -> bool:
         """Start the first player that stays up and reads PCM. False leaves nothing running."""
+        use_cache = not self._custom_hooks and self._probe_s > 0
+        cached = PipeSink._verified_argv if use_cache else None
+        if cached:
+            if self._start_process(list(cached)) and self._proc is not None and self._proc.poll() is None:
+                self._argv = list(cached)
+                self.available = True
+                return True
+            self._kill_proc()
+            self._close_fds()
+            PipeSink._verified_argv = None
         for name in PLAYERS:
             exe = self._which(name)
             if not exe:
@@ -471,6 +506,8 @@ class PipeSink:
                             self._close_fds()
                             continue
                     self._argv = argv
+                    if use_cache:
+                        PipeSink._verified_argv = list(argv)
                     self.available = True
                     return True
                 self._kill_proc()
@@ -779,6 +816,16 @@ class PipeSink:
         except Exception:
             pass
         self._paused = False
+
+
+def linux_audio_hint(which=shutil.which, platform: str | None = None) -> str:
+    """User-facing hint when Linux lacks pw-play/pw-cat/paplay, else empty string."""
+    plat = sys.platform if platform is None else platform
+    if not plat.startswith("linux"):
+        return ""
+    if any(which(name) for name in PLAYERS):
+        return ""
+    return "No Linux audio player (pw-play / paplay) found — preview plays silently. Install pipewire-utils or pulseaudio-utils for sound."
 
 
 def make_sink():

@@ -327,6 +327,11 @@ examples:
         streams_dir=[streams_dir, _fallback_root(config.get('Paths', 'fallback_dir', fallback=''), streams_dir)])
 
     errors, warnings = validate_startup(config)
+    if not args.headless and errors and not _deps.HAS_FFMPEG:
+        ff_errors = [e for e in errors if e.lower().startswith("ffmpeg")]
+        if ff_errors:
+            warnings.extend(ff_errors)
+            errors = [e for e in errors if e not in ff_errors]
 
     for w in warnings:
         logging.warning(f"STARTUP WARNING: {w.splitlines()[0]}")

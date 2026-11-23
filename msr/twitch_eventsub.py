@@ -90,12 +90,28 @@ def token_path(data_dir):
 from msr.dpapi import available as dpapi_available, crypt as _dpapi  # noqa: E402
 
 
+_TOKEN_AAD = b"twitch_token"
+
+
+def _dpapi_encrypt(raw):
+    try:
+        return "v2:" + base64.b64encode(_dpapi(raw, True, entropy=_TOKEN_AAD)).decode("ascii")
+    except TypeError:
+        return base64.b64encode(_dpapi(raw, True)).decode("ascii")
+
+
+def _dpapi_decrypt(val):
+    if isinstance(val, str) and val.startswith("v2:"):
+        return _dpapi(base64.b64decode(val[3:]), False, entropy=_TOKEN_AAD)
+    return _dpapi(base64.b64decode(val), False)
+
+
 def _encode(tok):
     raw = json.dumps(tok).encode("utf-8")
     if not dpapi_available():
         from msr import filecrypt
-        return json.dumps({"v": 2, "box": filecrypt.encrypt_text(raw.decode("utf-8"))}).encode("utf-8")
-    return json.dumps({"v": 2, "dpapi": base64.b64encode(_dpapi(raw, True)).decode("ascii")}).encode("utf-8")
+        return json.dumps({"v": 2, "box": filecrypt.encrypt_text(raw.decode("utf-8"), aad=_TOKEN_AAD)}).encode("utf-8")
+    return json.dumps({"v": 2, "dpapi": _dpapi_encrypt(raw)}).encode("utf-8")
 
 
 _noted = set()
@@ -121,7 +137,7 @@ def load_token(data_dir):
             _note_once("Twitch: saved sign-in is encrypted for Windows - click Connect Twitch")
             return None
         try:
-            tok = json.loads(_dpapi(base64.b64decode(doc["dpapi"]), False).decode("utf-8"))
+            tok = json.loads(_dpapi_decrypt(doc["dpapi"]).decode("utf-8"))
         except Exception:
             _note_once("Twitch: saved sign-in can't be read by this Windows user/PC - click Connect Twitch")
             return None
@@ -131,7 +147,7 @@ def load_token(data_dir):
             return None
         try:
             from msr import filecrypt
-            tok = json.loads(filecrypt.decrypt_text(doc["box"]))
+            tok = json.loads(filecrypt.decrypt_text(doc["box"], aad=_TOKEN_AAD))
         except Exception:
             _note_once("Twitch: saved sign-in can't be decrypted - click Connect Twitch")
             return None
@@ -187,10 +203,11 @@ def save_token(data_dir, tok):
 
 
 def clear_token(data_dir):
-    try:
-        os.remove(token_path(data_dir))
-    except OSError:
-        pass
+    with token_lock(data_dir):
+        try:
+            os.remove(token_path(data_dir))
+        except OSError:
+            pass
 
 
 def _token_record(resp, client_id, now):
@@ -286,18 +303,41 @@ def revoke(tok, request=http_request):
 # -- one refresh at a time (refresh tokens are single-use) --
 
 _proc_lock = threading.RLock()
+_held_locks = threading.local()
 
 
 def _lock_path(data_dir):
-    key = os.path.normcase(os.path.abspath(data_dir or "."))
-    return os.path.join(tempfile.gettempdir(), f"msr-twitch-{sha1(key.encode()).hexdigest()[:12]}.lock")
+    return os.path.join(os.path.abspath(data_dir or "."), ".twitch_token.lock")
 
 
 @contextmanager
 def token_lock(data_dir, timeout=30.0):
     """Thread + cross-process lock around read-refresh-save of the token file."""
     with _proc_lock:
-        fh = open(_lock_path(data_dir), "a+b")
+        path = _lock_path(data_dir)
+        held = getattr(_held_locks, "counts", None)
+        if held is None:
+            held = {}
+            _held_locks.counts = held
+        key = os.path.normcase(path)
+        if held.get(key, 0) > 0:
+            held[key] += 1
+            try:
+                yield
+            finally:
+                held[key] -= 1
+            return
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        if os.name == "nt":
+            fh = open(path, "a+b")
+        else:
+            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(path, flags, 0o600)
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+            fh = os.fdopen(fd, "r+b")
         locked = False
         try:
             end = time.monotonic() + timeout
@@ -316,7 +356,11 @@ def token_lock(data_dir, timeout=30.0):
                     if time.monotonic() >= end:
                         raise TimeoutError("Twitch token lock busy") from None
                     time.sleep(0.05)
-            yield
+            held[key] = 1
+            try:
+                yield
+            finally:
+                held.pop(key, None)
         finally:
             if locked:
                 try:
@@ -393,6 +437,31 @@ def lookup_user_ids(tok, logins, request=http_request):
         for u in resp.get("data") or []:
             if u.get("login") and u.get("id"):
                 out[u["login"].lower()] = str(u["id"])
+    return out
+
+
+def get_live_streams(tok, logins, request=http_request):
+    """Batch ``GET /helix/streams`` -> ``{login_lower: stream_dict}`` for live logins.
+
+    Checks up to 100 Twitch logins per HTTP call. Offline logins are simply
+    absent from the returned dict. Raises ``TwitchAuthError`` on HTTP 401 so
+    callers can refresh via ``TokenStore.get_fresh(force=True, used=...)``.
+    """
+    out = {}
+    unique = list(dict.fromkeys(l.strip().lower() for l in logins if l and l.strip()))
+    for i in range(0, len(unique), 100):
+        batch = unique[i:i + 100]
+        q = urllib.parse.urlencode([("user_login", l) for l in batch])
+        try:
+            _, resp = request("GET", f"{HELIX}/streams?{q}", headers=_helix_headers(tok))
+        except TwitchHTTPError as e:
+            if e.status == 401:
+                raise TwitchAuthError("token refused by Helix") from None
+            raise
+        for item in resp.get("data") or []:
+            login = (item.get("user_login") or "").strip().lower()
+            if login and (item.get("type") or "live").lower() == "live":
+                out[login] = item
     return out
 
 

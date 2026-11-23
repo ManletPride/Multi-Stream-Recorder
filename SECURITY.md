@@ -44,6 +44,11 @@ Left unencrypted on purpose: `cookies.txt`, the Fishtank email, the Twitch publi
 - Channel names cannot contain `:` `/` `\` that would turn into extra directories.
 - Logs go through `redact_for_log` (argv, stderr, exceptions, worker channel tag).
 - Twitch reconnect URLs must be `wss://*.twitch.tv`; only `twitch.tv/activate` links are opened.
+- Worker processes only receive the credentials they need: Telegram credentials stay in the main process, `[Fishtank]` credentials are only handed to Fishtank workers, and `MSR_FISHTANK_PASSWORD` is stripped from child tool environments (`ffmpeg`, `ffprobe`, `streamlink`, `yt-dlp`, `pip`, `git`, etc.).
+- Encrypted secrets (v2) are context-bound to their config field or file purpose. On Linux and macOS the cipher is unchanged from 3.2.0 (an HMAC-SHA256 keystream and an HMAC-SHA256 MAC); v2 puts the field name in the MAC. Windows uses DPAPI optional entropy (`v2:` prefix). A v1 blob still decrypts.
+- Automatic backups of `config.ini` (`msr_history/` and `config.ini.broken-*`) strip secret values before writing.
+- Remote control (`msr_ctl.py` / `ControlServer`) refuses changes to host paths and executable binaries (`Advanced.ffmpeg_path`, `Clipping.clips_dir`, `Paths.channels_file`, `Paths.fallback_dir`, `GUI.window_state_file`) with `forbidden`.
+- On POSIX systems, default fallback storage and live preview thumbnail caches live under private `0700` `$XDG_CACHE_HOME/multi-stream-recorder/` directories (cleaned on exit for previews), and the Twitch token lock file lives in the data folder (`.twitch_token.lock`) rather than world-shared `/tmp`.
 - The Options tab warns when `cookies.txt` is in a synced folder (OneDrive, Dropbox...).
 - MSR **never** refreshes `cookies.txt`. When tokens expire, you re-export from a logged-in browser.
 
@@ -51,9 +56,14 @@ A custom URL is fetched and recorded as you pasted it. Only add URLs you trust.
 
 ## Threat model (short)
 
-This is a same-user desktop app. Someone with your Windows account can already read your files. The design goals are:
+This is a same-user desktop app. Someone with your OS user account can already read your files. The design goals are:
 
 1. A hostile livestream playlist must not pull `file://` paths into a recording.
 2. A malicious `channels.json` must not write outside the recordings folder.
 3. Sharing a log or screenshot should not leak JWTs, session cookies, or a Telegram bot token.
 4. A Telegram upload goes only to the configured group, into the global topic or that channel's topic, from a bot login. MSR does not read group messages and does not log in as the user. The local file is deleted only when that option is on and every part was confirmed.
+
+### Multi-user Linux caveats
+
+- **`/proc/<pid>/cmdline` visibility:** While recording streams that authenticate through `ffmpeg` command-line arguments — specifically Fishtank stream URLs carrying `?jwt=...` and split-track merges or streams passing `-headers` (`Cookie:` / auth headers) — those arguments are visible in `/proc/<pid>/cmdline` (and tools like `ps`) to other local users on Linux systems whose `/proc` is mounted without `hidepid` (e.g., `hidepid=2` or `hidepid=invisible`). Logs and status files redact these values, and `MSR_FISHTANK_PASSWORD` is stripped from child environments, but `ffmpeg` itself requires per-input URLs and headers on its command line. On a shared Linux host without `hidepid`, keep that exposure in mind before recording authenticated streams.
+- **Linux key file vs. OS keyring:** On Linux and other non-Windows systems, encrypted secrets (`*_box`, `twitch_token.json`, `telegram_session.json`) are unlocked by `$XDG_CONFIG_HOME/multi-stream-recorder/secret.key` (mode `0600` in a `0700` directory) rather than a desktop keyring daemon (such as Freedesktop Secret Service / GNOME Keyring / KWallet). That avoids D-Bus/keyring dependencies so headless and minimal setups work out of the box, and keeps a copied `config.ini` unreadable without `secret.key`, though any process running as the same Linux user can read `secret.key` (matching the same-user boundary of Windows DPAPI).

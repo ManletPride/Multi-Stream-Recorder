@@ -22,6 +22,7 @@ from msr.util import (
     kill_process_tree,
     layout_bases,
     matching_dirs,
+    parse_channel_key,
     recorded_scan_bases,
     reuse_dir,
     reuse_path,
@@ -30,7 +31,7 @@ from msr.kick_realtime import (
     BROWSER_HEADERS, CENTRIFUGO_MAX_SUBS, cf_connect, cf_refresh, cf_subscribe,
     cf_unsubscribe, negotiate, new_client_id, parse_centrifugo_message, pusher_url,
 )
-from msr.worker import record_worker, remux_to_mp4, save_metadata, verify_remux_output
+from msr.worker import MAX_CONCURRENT_REMUXES, record_worker, remux_to_mp4, save_metadata, verify_remux_output
 
 # ────────────────────────────────────────────────
 #          Background Cleanup Thread
@@ -541,24 +542,36 @@ def purge_old_pending_files(root_path, max_age_days, logger=None):
             return 0
         pending_base = others[0]
 
+    if os.path.islink(pending_base):
+        if logger:
+            logger.warning("PendingDeletion purge: skipping symlinked PendingDeletion folder")
+        return 0
+
     if logger:
         logger.info(f"PendingDeletion purge: scanning for files older than {max_age_days} day(s)...")
 
+    import stat as _stat
     cutoff = time.time() - (max_age_days * 86400)
     deleted = 0
     skipped = 0
     empty_dirs = []
 
-    for dirpath, dirnames, filenames in os.walk(pending_base, topdown=False):
+    for dirpath, dirnames, filenames in os.walk(pending_base, topdown=False, followlinks=False):
+        if os.path.islink(dirpath):
+            continue
         for filename in filenames:
             filepath = os.path.join(dirpath, filename)
             try:
-                stat = os.stat(filepath)
+                if os.path.islink(filepath):
+                    continue
+                st = os.stat(filepath)
+                if _stat.S_ISLNK(st.st_mode):
+                    continue
                 # Use the most recent of mtime and ctime.  On Windows, ctime is the
                 # file-creation time (reset when the file is moved), so it correctly
                 # reflects when the file landed in PendingDeletion rather than when
                 # the original recording started.
-                file_age_ts = max(stat.st_mtime, stat.st_ctime)
+                file_age_ts = max(st.st_mtime, st.st_ctime)
                 if file_age_ts < cutoff:
                     os.remove(filepath)
                     deleted += 1
@@ -908,11 +921,18 @@ class KickPushListener:
         if self._healthy:
             self.logger.debug(f"Kick push: socket closed ({code})")
 
+    def _ws_send(self, ws, payload):
+        lock = getattr(self, "_send_lock", None)
+        if lock is None:
+            lock = self._send_lock = threading.Lock()
+        with lock:
+            ws.send(payload)
+
     def _on_open(self, ws):
         if self._protocol == "centrifugo":
             # Subscriptions wait for the connect reply.
             try:
-                ws.send(cf_connect(self._next_cmd_id(), self._conn.get("token", "")))
+                self._ws_send(ws, cf_connect(self._next_cmd_id(), self._conn.get("token", "")))
             except Exception as e:
                 self._log_failure(f"connect send failed ({e})")
             return
@@ -934,9 +954,29 @@ class KickPushListener:
             t.start()
         else:
             self.logger.info(
-            f"Kick push: connected ({self._protocol}) — subscribing {len(wanted)} channel(s)")
-        for slug in wanted:
-            self._subscribe(slug)
+                f"Kick push: connected ({self._protocol}) — subscribing {len(wanted)} channel(s)")
+        cached = [s for s in wanted if s in self._ids]
+        uncached = [s for s in wanted if s not in self._ids]
+        for slug in cached:
+            self._subscribe(slug, save_cache=False)
+        if uncached:
+            threading.Thread(
+                target=self._subscribe_batch, args=(uncached,),
+                daemon=True, name="kick-push-resolve",
+            ).start()
+
+    def _subscribe_batch(self, slugs):
+        """Resolve uncached slugs off the WebSocket reader thread and save the ID cache once."""
+        resolved_any = False
+        for slug in slugs:
+            if self._stop.is_set() or not self._connected:
+                break
+            before = slug in self._ids
+            self._subscribe(slug, save_cache=False)
+            if not before and slug in self._ids:
+                resolved_any = True
+        if resolved_any:
+            self._save_id_cache()
 
     def _next_cmd_id(self):
         self._cmd_id += 1
@@ -960,7 +1000,7 @@ class KickPushListener:
                 raise RuntimeError("no token")
             self._conn["token"] = tok
             self._token_expires = 0  # set again from the refresh reply
-            ws.send(cf_refresh(self._next_cmd_id(), tok))
+            self._ws_send(ws, cf_refresh(self._next_cmd_id(), tok))
         except Exception as e:
             self._log_failure(f"token refresh failed ({e}); reconnecting")
             try:
@@ -974,10 +1014,9 @@ class KickPushListener:
             if not self._connected or self._ws is None:
                 continue
             self._maybe_refresh_token()
-            for slug in self.pending_slugs():
-                if self._stop.is_set():
-                    return
-                self._subscribe(slug)
+            pending = self.pending_slugs()
+            if pending:
+                self._subscribe_batch(pending)
 
     def _note_attempt(self, slug):
         gap = self._retry_gap.get(slug, PUSH_RETRY_MIN // 2) * 2
@@ -1013,7 +1052,7 @@ class KickPushListener:
             t = fr["type"]
             if t == "ping":
                 try:
-                    ws.send("{}")
+                    self._ws_send(ws, "{}")
                 except Exception:
                     pass
             elif t == "reply":
@@ -1114,12 +1153,22 @@ class KickPushListener:
 
     # ── subscription helpers ──
 
-    def _subscribe(self, slug):
+    def _subscribe(self, slug, save_cache=True):
         ws = self._ws
         if ws is None:
             return  # not connected — _on_open will subscribe everything wanted
+        if self._protocol == "centrifugo":
+            if slug in self._cf_pending.values():
+                return  # still waiting for the reply
+            if len(self._cf_channels) + len(self._cf_pending) >= CENTRIFUGO_MAX_SUBS:
+                if not self._limit_logged:
+                    self._limit_logged = True
+                    self.logger.warning(
+                        f"Kick push: more than {CENTRIFUGO_MAX_SUBS} Kick channels — "
+                        f"the rest rely on polling")
+                return
         self._note_attempt(slug)
-        cid = self._resolve_channel_id(slug)
+        cid = self._resolve_channel_id(slug, save_cache=save_cache)
         if cid is None:
             self.logger.info(
                 f"Kick push: no channel id for {slug} — polling only, "
@@ -1128,20 +1177,11 @@ class KickPushListener:
         self._id_to_slug[cid] = slug
         try:
             if self._protocol == "centrifugo":
-                if slug in self._cf_pending.values():
-                    return  # still waiting for the reply
-                if len(self._cf_channels) + len(self._cf_pending) >= CENTRIFUGO_MAX_SUBS:
-                    if not self._limit_logged:
-                        self._limit_logged = True
-                        self.logger.warning(
-                            f"Kick push: more than {CENTRIFUGO_MAX_SUBS} Kick channels — "
-                            f"the rest rely on polling")
-                    return
                 cmd = self._next_cmd_id()
                 self._cf_pending[cmd] = slug
-                ws.send(cf_subscribe(cmd, f"channel.{cid}"))
+                self._ws_send(ws, cf_subscribe(cmd, f"channel.{cid}"))
                 return
-            ws.send(json.dumps({
+            self._ws_send(ws, json.dumps({
                 "event": "pusher:subscribe",
                 "data": {"auth": "", "channel": f"channel.{cid}"},
             }))
@@ -1160,9 +1200,9 @@ class KickPushListener:
         try:
             if self._protocol == "centrifugo":
                 if chan:
-                    ws.send(cf_unsubscribe(self._next_cmd_id(), chan))
+                    self._ws_send(ws, cf_unsubscribe(self._next_cmd_id(), chan))
                 return
-            ws.send(json.dumps({
+            self._ws_send(ws, json.dumps({
                 "event": "pusher:unsubscribe",
                 "data": {"channel": f"channel.{cid}"},
             }))
@@ -1171,7 +1211,7 @@ class KickPushListener:
 
     # ── channel id resolution + cache ──
 
-    def _resolve_channel_id(self, slug):
+    def _resolve_channel_id(self, slug, save_cache=True):
         cid = self._ids.get(slug)
         if cid is not None:
             return cid
@@ -1196,7 +1236,8 @@ class KickPushListener:
             except Exception:
                 pass
         self._ids[slug] = cid
-        self._save_id_cache()
+        if save_cache:
+            self._save_id_cache()
         return cid
 
     def _load_id_cache(self):
@@ -1247,6 +1288,10 @@ class StreamRecorder:
     log_sink = None
     log_queue = None
     _log_bridge = None
+    # Lightweight in-process polling coordinator for idle channels (None on bare test instances).
+    poller = None
+    # Shared cross-worker semaphore capping simultaneous background remuxes.
+    remux_sem = None
 
     def __init__(self, channels, config, presence=None, watch_channels=None, log_sink=None):
         self.channels = channels
@@ -1296,6 +1341,8 @@ class StreamRecorder:
         except Exception:
             self.runtime['telegram_upload'] = False
 
+        # Shared cap on simultaneous remuxes across all worker processes.
+        self.remux_sem = self.manager.BoundedSemaphore(MAX_CONCURRENT_REMUXES)
         # Per-channel wake events.  Setting one snaps that worker out of its
         # offline/error sleep so it checks the stream immediately ("Check Now").
         # Events are reused across worker respawns for the same channel.
@@ -1330,9 +1377,18 @@ class StreamRecorder:
         self.kick_push = KickPushListener(self, config, presence=presence)
         # Twitch push (EventSub WebSocket): opt-in, needs a one-time authorization.
         from msr.twitch_push import TwitchPushListener
+        data_dir = os.path.dirname(os.path.abspath(getattr(config, 'config_file', 'config.ini')))
         self.twitch_push = TwitchPushListener(
             self, config, presence=presence,
-            data_dir=os.path.dirname(os.path.abspath(getattr(config, 'config_file', 'config.ini'))))
+            data_dir=data_dir)
+        # Lightweight polling coordinator: polls offline channels in-process using
+        # batch Twitch Helix / Kick HTTP / a small bounded thread pool, spawning
+        # mp.Process capture workers only when a channel goes live.
+        from msr.poller import PollCoordinator
+        self.poller = PollCoordinator(
+            config, self.runtime, self.status_queue, self._launch_live_worker,
+            presence=presence, data_dir=data_dir,
+        )
 
     def _sync_kick_push(self):
         """Align the push listener's subscriptions with the currently active
@@ -1378,27 +1434,39 @@ class StreamRecorder:
         return ev
 
     def check_now(self, channel_name):
-        """Wake a single channel's worker so it checks the stream immediately."""
+        """Wake a single channel (live worker or idle poller) so it checks immediately."""
         if not self.is_running or channel_name in self.stopped_channels:
             return
+        woke = False
+        poller = getattr(self, "poller", None)
+        if poller is not None and poller.wake_channel(channel_name, manual=True):
+            woke = True
         ev = self.wake_events.get(channel_name)
         if ev is not None:
             ev.set()
-            logging.info(f"Check Now: waking worker for {channel_name}")
+            woke = True
+        if woke:
+            logging.info(f"Check Now: waking {channel_name}")
 
     def check_all_now(self):
-        """Wake every active (non-stopped) worker for an immediate check.
+        """Wake every active (non-stopped) channel for an immediate check.
 
         Wakes are spread over a few seconds so all channels don't hit their
         platforms in the same instant (same reasoning as the startup stagger).
         """
         if not self.is_running:
             return
+        poller = getattr(self, "poller", None)
+        idle_woken = poller.wake_many(manual=True) if poller is not None else []
+        idle_set = set(idle_woken)
         targets = [ch for ch in self.wake_events
-                   if ch not in self.stopped_channels]
+                   if ch not in self.stopped_channels and ch not in idle_set]
+        total = len(idle_woken) + len(targets)
+        if not total:
+            return
+        logging.info(f"Check All Now: waking {total} channel(s)")
         if not targets:
             return
-        logging.info(f"Check All Now: waking {len(targets)} worker(s)")
 
         def _staggered_wake(channels):
             random.shuffle(channels)
@@ -1413,45 +1481,62 @@ class StreamRecorder:
                          daemon=True, name="check-all-now").start()
 
     def catch_up_check(self, channels, source="push"):
-        """Wake idle workers once after a push socket came back (events sent while it
+        """Wake idle channels once after a push socket came back (events sent while it
         was down are not replayed). Skips stopped and already-recording channels;
         wakes are shuffled and spread over up to CATCHUP_SPREAD_MAX seconds."""
         if not self.is_running:
             return []
         busy = ("Recording", "Remuxing...", "Processing...")
-        targets = [ch for ch in channels
-                   if ch in self.wake_events and ch not in self.stopped_channels
-                   and (self.status_dict.get(ch) or {}).get("status") not in busy]
-        if not targets:
+        poller = getattr(self, "poller", None)
+        eligible = [
+            ch for ch in channels
+            if ch not in self.stopped_channels
+            and (self.status_dict.get(ch) or {}).get("status") not in busy
+        ]
+        poller_targets = (
+            poller.wake_many(eligible, spread_max=CATCHUP_SPREAD_MAX)
+            if poller is not None and poller.is_running else []
+        )
+        poller_set = set(poller_targets)
+        worker_targets = [
+            ch for ch in eligible
+            if ch in self.wake_events and ch not in poller_set
+        ]
+        all_targets = poller_targets + worker_targets
+        if not all_targets:
             return []
-        random.shuffle(targets)
-        step = min(1.5, CATCHUP_SPREAD_MAX / max(1, len(targets)))
-        logging.info(f"{source}: catch-up check of {len(targets)} channel(s) "
-                     f"over ~{step * (len(targets) - 1):.0f} s")
+        if worker_targets:
+            random.shuffle(worker_targets)
+            step = min(1.5, CATCHUP_SPREAD_MAX / max(1, len(worker_targets)))
+            logging.info(f"{source}: catch-up check of {len(all_targets)} channel(s) "
+                         f"over ~{step * (len(worker_targets) - 1):.0f} s")
 
-        def run():
-            for i, ch in enumerate(targets):
-                if not self.is_running:
-                    return
-                ev = self.wake_events.get(ch)
-                if ev is not None and ch not in self.stopped_channels:
-                    ev.set()
-                if i < len(targets) - 1:
-                    time.sleep(step * random.uniform(0.7, 1.3))
-        threading.Thread(target=run, daemon=True, name="push-catch-up").start()
-        return targets
+            def run():
+                for i, ch in enumerate(worker_targets):
+                    if not self.is_running:
+                        return
+                    ev = self.wake_events.get(ch)
+                    if ev is not None and ch not in self.stopped_channels:
+                        ev.set()
+                    if i < len(worker_targets) - 1:
+                        time.sleep(step * random.uniform(0.7, 1.3))
+            threading.Thread(target=run, daemon=True, name="push-catch-up").start()
+        else:
+            logging.info(f"{source}: catch-up check of {len(all_targets)} channel(s)")
+        return all_targets
 
     def set_poll_interval(self, minutes):
-        """Update the poll interval live.  Sleeping workers pick up the new
-        value on their next cycle; we also wake them (staggered) so a change
-        like Relaxed→Fast takes effect immediately instead of after up to
-        five more minutes of the old interval.
+        """Update the poll interval live.  Sleeping workers and the idle poller
+        pick up the new value immediately instead of waiting out the old interval.
         """
         try:
             self.runtime['poll_interval_minutes'] = float(minutes)
         except Exception:
             return
         logging.info(f"Runtime poll interval set to {minutes} min")
+        poller = getattr(self, "poller", None)
+        if poller is not None and poller.is_running:
+            poller.on_poll_interval_changed(float(minutes))
         self.check_all_now()
 
     def update_status_from_queue(self):
@@ -1472,6 +1557,8 @@ class StreamRecorder:
                 # guard skip the channel's directory until session end.
                 if ch in self.stopped_channels:
                     continue
+                if isinstance(new_status, dict) and new_status.get("event") == "worker_done":
+                    self._supervision()["handed_back"].add(ch)
                 self.status_dict[ch] = new_status
                 hook = self.__dict__.get("on_status")  # agent control: msr.agent_status.Tracker.seen
                 if hook is not None:
@@ -1501,6 +1588,11 @@ class StreamRecorder:
         st = self.status_dict.get(channel_name, {})
         size_str = st.get("size", "")
         time_str = st.get("time", "")
+
+        # Pause idle polling first so the coordinator cannot launch a worker while we stop.
+        poller = getattr(self, "poller", None)
+        if poller is not None:
+            poller.pause_channel(channel_name)
 
         # Find every process registered for this channel
         procs = self.processes.get(channel_name, [])
@@ -1601,6 +1693,9 @@ class StreamRecorder:
             # between kill and bookkeeping teardown.
             self.stopped_channels.add(channel_name)
             self.stop_channel(channel_name)
+        poller = getattr(self, "poller", None)
+        if poller is not None:
+            poller.remove_channel(channel_name)
         with self._spawn_lock:
             self.processes.pop(channel_name, None)
         self.wake_events.pop(channel_name, None)
@@ -1670,18 +1765,24 @@ class StreamRecorder:
             sv["fast"].pop(channel_name, None)
             sv["restart_at"].pop(channel_name, None)
 
-            # Build config dict the same way run() does (no Telegram secrets).
-            config_dict = self._worker_config()
+            # Build config dict the same way run() does (scoped to this channel's platform).
+            config_dict = self._worker_config(channel_name)
 
             # Initialize status
             self.status_dict[channel_name] = {
                 "status": "Initializing", "detail": "", "size": "", "time": "", "progress": 0
             }
 
-            # Spawn exactly one worker
-            proc = self._spawn_worker(channel_name, config_dict)
-            self.processes[channel_name] = [proc]
-            logging.info(f"Started process for {channel_name} (PID {proc.pid})")
+            poller = getattr(self, "poller", None)
+            if poller is not None and poller.is_running:
+                self.processes[channel_name] = []
+                poller.add_channel(channel_name, immediate=True)
+                logging.info(f"Monitoring {channel_name} via idle polling coordinator")
+            else:
+                # Spawn exactly one worker
+                proc = self._spawn_worker(channel_name, config_dict)
+                self.processes[channel_name] = [proc]
+                logging.info(f"Started process for {channel_name} (PID {proc.pid})")
 
             # Re-subscribe push for this channel (covers restart of a stopped
             # channel and brand-new channels added mid-session)
@@ -1736,8 +1837,14 @@ class StreamRecorder:
         # next start picks it up.
         self._startup_cleanup_cancel.set()
 
-        # Stop the Kick push listener first — no point waking workers that
-        # are about to be killed
+        # Stop push listeners and idle polling coordinator first — no point
+        # waking or spawning workers that are about to be killed.
+        poller = getattr(self, "poller", None)
+        if poller is not None:
+            try:
+                poller.stop()
+            except Exception:
+                pass
         try:
             self.kick_push.stop()
         except Exception:
@@ -1922,6 +2029,7 @@ class StreamRecorder:
                 "fast": {},         # channel -> consecutive fast exits
                 "restart_at": {},   # channel -> time.monotonic() when it may start again
                 "killed": set(),    # pids we ended on purpose (stop / restart of a channel)
+                "handed_back": set(),  # channels whose worker exited cleanly back to the poller
                 "problems": {},     # what -> [last logged, suppressed count]
             }
         return state
@@ -1944,18 +2052,48 @@ class StreamRecorder:
                       "carrying on", exc_info=exc)
         entry[0], entry[1] = now, 0
 
-    def _worker_config(self):
-        """Config handed to a worker process. The Telegram bot token and api hash stay in this process."""
+    @staticmethod
+    def _channel_platform(channel):
+        parsed = parse_channel_key(channel) if channel else None
+        return parsed[0] if parsed else None
+
+    def _worker_config(self, channel=None, *, exit_when_offline=False):
+        """Config handed to a worker process. Telegram secrets stay in this process,
+        and ``[Fishtank]`` credentials are only handed to Fishtank workers."""
         from msr.telegram_queue import config_for_worker
-        out = config_for_worker(self.config)
+        out = config_for_worker(self.config, platform=self._channel_platform(channel))
         cookies_file = find_cookies_file(self.config)
         if cookies_file:
             out.setdefault('Paths', {})['cookies_file'] = cookies_file
+        if exit_when_offline:
+            out['_Worker'] = {'exit_when_offline': 'true'}
         return out
 
+    def _launch_live_worker(self, ch):
+        """Callback invoked by ``PollCoordinator`` when *ch* goes live."""
+        with self._spawn_lock:
+            if not self.is_running or self.should_stop.is_set() or ch in self.stopped_channels:
+                return False
+            existing = [p for p in self.processes.get(ch, []) if p.is_alive()]
+            if existing:
+                return True
+            sv = self._supervision()
+            sv["handed_back"].discard(ch)
+            sv["restart_at"].pop(ch, None)
+            cfg = self._worker_config(ch, exit_when_offline=True)
+            proc = self._spawn_worker(ch, cfg)
+            self.processes[ch] = [proc]
+            logging.info(f"Started live capture worker for {ch} (PID {proc.pid})")
+            return True
+
     def _spawn_worker(self, ch, config_dict):
+        if (isinstance(config_dict, dict)
+                and self._channel_platform(ch) != "fishtank"
+                and "Fishtank" in config_dict):
+            config_dict = {k: v for k, v in config_dict.items() if k != "Fishtank"}
         worker_args = (ch, config_dict, self.should_stop, self.status_queue,
-                       self._get_wake_event(ch), self.runtime, self.log_queue)
+                       self._get_wake_event(ch), self.runtime, self.log_queue,
+                       self.remux_sem)
         proc = mp.Process(target=record_worker, args=(worker_args,))
         proc.daemon = True
         proc.start()
@@ -2015,13 +2153,32 @@ class StreamRecorder:
                 self.stopped_channels.add(ch)
                 return
             code = last_proc.exitcode
+            if code == 0 and ch in sv["handed_back"]:
+                sv["handed_back"].discard(ch)
+                sv["fast"].pop(ch, None)
+                logging.info(f"Worker for {ch} returned to idle polling coordinator")
+                poller = getattr(self, "poller", None)
+                if poller is not None and poller.is_running:
+                    poller.resume_channel(ch)
+                return
             reason = ("was killed from outside" if code in (-15, 15, -9) else
                       "crashed" if code else "exited normally")
             self._schedule_restart(ch, now, code, reason)
         if now < sv["restart_at"][ch]:
             return
         del sv["restart_at"][ch]
-        proc = self._spawn_worker(ch, config_dict)
+        poller = getattr(self, "poller", None)
+        use_handoff = bool(poller is not None and poller.is_running)
+        if use_handoff and getattr(self, "config", None) is not None:
+            spawn_cfg = self._worker_config(ch, exit_when_offline=True)
+        elif (self._channel_platform(ch) == "fishtank"
+              and isinstance(config_dict, dict)
+              and "Fishtank" not in config_dict
+              and getattr(self, "config", None) is not None):
+            spawn_cfg = self._worker_config(ch)
+        else:
+            spawn_cfg = config_dict
+        proc = self._spawn_worker(ch, spawn_cfg)
         self.processes[ch] = [proc]
         logging.info(f"Restarted process for {ch} (PID {proc.pid})")
 
@@ -2073,17 +2230,23 @@ class StreamRecorder:
         # recorders are launched.  Returns the files to process later.
         startup_leftovers = self._plan_startup_cleanup()
 
-        logging.info(f"Launching {len(self.channels)} recording processes")
-
         config_dict = self._worker_config()
         cookies_file = config_dict.get('Paths', {}).get('cookies_file')
         if cookies_file:
             logging.info(f"Using cookies file: {cookies_file}")
 
-        for ch in self.channels:
-            proc = self._spawn_worker(ch, config_dict)
-            self.processes[ch] = [proc]
-            logging.info(f"Started process for {ch} (PID {proc.pid})")
+        poller = getattr(self, "poller", None)
+        if poller is not None:
+            logging.info(f"Monitoring {len(self.channels)} channel(s) via lightweight polling coordinator")
+            for ch in self.channels:
+                self.processes[ch] = []
+            poller.start(self.channels)
+        else:
+            logging.info(f"Launching {len(self.channels)} recording processes")
+            for ch in self.channels:
+                proc = self._spawn_worker(ch, self._worker_config(ch))
+                self.processes[ch] = [proc]
+                logging.info(f"Started process for {ch} (PID {proc.pid})")
 
         # Start the Kick push listener (harmless no-op without Kick channels
         # or without websocket-client installed)

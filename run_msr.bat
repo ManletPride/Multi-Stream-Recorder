@@ -18,8 +18,28 @@ if defined MSR_DATA (
 )
 rem Default: run_msr.pyw sets up / uses MSR's own .venv (first launch installs it, see README).
 if not defined MSR_PYTHON (
-  start "" pythonw "%~dp0run_msr.pyw" %*
-  exit /b 0
+  where pyw >nul 2>&1 && (
+    py -3 -c "import sys" >nul 2>&1 && (
+      start "" pyw -3 "%~dp0run_msr.pyw" %*
+      exit /b 0
+    )
+  )
+  pythonw -c "import sys" >nul 2>&1 && (
+    start "" pythonw "%~dp0run_msr.pyw" %*
+    exit /b 0
+  )
+  py -3 -c "import sys" >nul 2>&1 && (
+    start "" py -3 "%~dp0run_msr.pyw" %*
+    exit /b 0
+  )
+  python -c "import sys" >nul 2>&1 && (
+    start "" python "%~dp0run_msr.pyw" %*
+    exit /b 0
+  )
+  echo Python 3 was not found on PATH ^(checked pyw, pythonw, py -3, python^).
+  echo Install Python 3 from https://www.python.org/downloads/ and check "Add python.exe to PATH".
+  pause
+  exit /b 1
 )
 if defined MSR_DATA (
   start "" "%MSR_PYTHON%" "%~dp0Multi-Stream-Recorder.py" --data-dir "%MSR_DATA%" %*

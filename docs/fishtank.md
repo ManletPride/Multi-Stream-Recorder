@@ -1,9 +1,16 @@
 > **Status:** Fishtank.live support is built in, but the show is between seasons and has no live cameras right now. Its camera list changes every season, so it may need an update when a new one starts.
 
+## Login
+
+Configure your Fishtank account in **Options > Fishtank**, via `MSR_FISHTANK_PASSWORD`, or in `config.ini`:
+
+```ini
+[Fishtank]
+email = you@example.com
 password = yourpassword
 ```
 
-A free account is sufficient. The program handles authentication automatically — it logs in, obtains a stream token, and refreshes it as needed. No manual cookie export is required. MSR encrypts that password the next time it saves `config.ini` (Windows DPAPI, or a user-only key on Linux) and leaves the `password` line blank.
+A free account is sufficient. The program handles authentication automatically — it logs in, obtains a stream token, and refreshes it as needed. No manual cookie export is required. MSR encrypts that password the next time it saves `config.ini` (Windows DPAPI, or a user-only key on Linux) and leaves the `password` line blank. `[Fishtank]` credentials are passed only to Fishtank workers, and `MSR_FISHTANK_PASSWORD` is stripped from child tool environments.
 
 ## Adding cameras
 
@@ -103,7 +110,7 @@ Short aliases also work — `cam` for Cameraman, `dirc` for Director, `dmrm` for
 
 ## How It Works
 
-Detection and recording both use fishtank.live's HLS streams served by MistServer. On each poll the program queries the live-streams API to see which ids are `online`, then records via ffmpeg's HLS downloader. The JWT comes from the login API and is refreshed automatically — a background thread renews it with a 5-minute buffer, which matters for cameras that get short-lived 30-minute tokens (Cameraman in Season 5).
+Detection and recording both use fishtank.live's HLS streams served by MistServer. While cameras are offline, the in-process polling coordinator shares a single authenticated Fishtank session and queries the live-streams API to see which ids are `online`, spawning a recording worker only when a camera goes live and recording via ffmpeg's HLS downloader. The JWT comes from the login API and is refreshed automatically — a background thread renews it with a 5-minute buffer, which matters for cameras that get short-lived 30-minute tokens (Cameraman in Season 5).
 
 Before each recording starts, MSR fetches the HLS master playlist and selects the highest-bandwidth variant, rather than whichever rendition the server lists first.
 
@@ -111,13 +118,13 @@ After each remux, MSR checks that the MP4 has an audio track. Fishtank's CDN occ
 
 ## Platform Notes
 
-**Kick**: Uses streamlink for both detection and recording (`quality = best` in `config.ini`, which is streamlink's best available rendition). Streamlink 8.x includes a built-in Cloudflare JS challenge solver that handles Kick's aggressive bot detection. Cookies are optional. With `websocket-client` and `curl_cffi` installed, Kick channels also get push notifications (see *Kick Push Notifications* above). **Important**: Remove any old third-party `kick.py` plugins from `%APPDATA%\streamlink\plugins\` — they override the built-in plugin and break Cloudflare bypass.
+**Kick**: Uses a lightweight HTTP API check for offline polling and streamlink for recording (`quality = best` in `config.ini`, which is streamlink's best available rendition). Streamlink 8.x includes a built-in Cloudflare JS challenge solver that handles Kick's aggressive bot detection. Cookies are optional. With `websocket-client` and `curl_cffi` installed, Kick channels also get instant push notifications (see `README.md`). **Important**: Remove any old third-party `kick.py` plugins from `%APPDATA%\streamlink\plugins\` — they override the built-in plugin and break Cloudflare bypass.
 
-**Twitch**: Uses streamlink with `--twitch-disable-ads` and `--twitch-low-latency`. Cookies are optional but enable subscriber-only features.
+**Twitch**: When signed in via **Options > Twitch**, offline channels are checked in batches using Twitch's Helix API (`GET /helix/streams`, up to 100 channels per request) alongside optional EventSub instant push notifications. Recording uses streamlink with `--twitch-disable-ads` and `--twitch-low-latency`. Cookies are optional but enable subscriber-only features.
 
-**TikTok**: Uses yt-dlp for detection and streamlink for recording. Add channels by selecting **tiktok** from the platform dropdown and entering the username (with or without `@`). Valid TikTok session cookies are required — export them from a logged-in browser session using the Get cookies.txt extension and place the file in your streams directory. The `msToken` and `ttwid` cookies are the critical ones; when they expire, re-export.
+**TikTok**: Uses yt-dlp for detection (separate from recording stream-URL resolution) and streamlink/yt-dlp for recording. Add channels by selecting **tiktok** from the platform dropdown and entering the username (with or without `@`), or by pasting a TikTok URL directly. Valid TikTok session cookies are required — export them from a logged-in browser session using the Get cookies.txt extension and place the file in your streams directory. The `msToken` and `ttwid` cookies are the critical ones; when they expire, re-export.
 
 TikTok's CDN delivers mobile-portrait video (typically 540×960 or 720×1280) at 25 fps. This is normal — it reflects what the streamer's phone is broadcasting.
 
-**US-TTP regional detection**: A majority of US-based TikTok streamers (especially gaming streamers) run on TikTok's US regional infrastructure (`webcast.us.tiktok.com`). yt-dlp's TikTok extractor currently hardcodes the global endpoint (`webcast.tiktok.com`), which returns "offline" for these accounts even when they are actively live. MSR includes a fallback that directly queries both regional Webcast API endpoints whenever yt-dlp reports a TikTok channel as offline. If the fallback confirms the stream is live, recording proceeds normally — no user action required. The log will note `"Webcast API confirms LIVE"` when this override fires.
+**US-TTP regional detection**: A majority of US-based TikTok streamers (especially gaming streamers) run on TikTok's US regional infrastructure (`webcast.us.tiktok.com`). yt-dlp's TikTok extractor currently hardcodes the global endpoint (`webcast.tiktok.com`), which returns "offline" for these accounts even when they are actively live. MSR includes a fallback that directly queries regional Webcast API endpoints when yt-dlp reports a TikTok channel as offline (with cached cookie parsing, immediate short-circuiting on confirmed offline `status == 4` rooms, and a per-channel 5-minute cooldown between fallback probes). If the fallback confirms the stream is live, recording proceeds normally — no user action required. The log will note `"Webcast API confirms LIVE"` when this override fires.
 

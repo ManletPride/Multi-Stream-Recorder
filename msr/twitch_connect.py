@@ -78,7 +78,8 @@ def disconnect(data_dir, api=te):
             api.revoke(tok)
         except Exception:
             ok = False
-    api.clear_token(data_dir)
+    with te.token_lock(data_dir):
+        api.clear_token(data_dir)
     return ok
 
 
@@ -142,7 +143,8 @@ class ConnectJob:
                 if tok:
                     info = self.api.validate(tok)
                     tok["user_id"], tok["login"] = info.get("user_id"), info.get("login")
-                    self.api.save_token(self.data_dir, tok)
+                    with te.token_lock(self.data_dir):
+                        self.api.save_token(self.data_dir, tok)
                     self.events.put(("connected", tok["login"]))
                     return
             self.events.put(("expired",))

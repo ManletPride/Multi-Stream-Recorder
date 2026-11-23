@@ -447,5 +447,19 @@ class FfmpegPathTests(unittest.TestCase):
                 self.assertFalse({"HAS_FFMPEG", "FFMPEG_VERSION"} & names)
 
 
+    def test_gui_mode_allows_missing_ffmpeg_as_warning(self):
+        deps.HAS_FFMPEG, deps.FFMPEG_VERSION, deps.FFMPEG_PATH = False, None, "ffmpeg"
+        with mock.patch.object(deps.subprocess, "run", side_effect=FileNotFoundError("x")):
+            errors, warnings = util.validate_startup(self.config("ffmpeg"), allow_missing_ffmpeg=True)
+        self.assertFalse([e for e in errors if "ffmpeg" in e.lower()], errors)
+        self.assertTrue(any("ffmpeg" in w.lower() for w in warnings), warnings)
+        self.assertFalse(deps.HAS_FFMPEG)
+
+    def test_run_msr_bat_has_python_fallbacks(self):
+        bat = (ROOT / "run_msr.bat").read_text(encoding="utf-8")
+        for token in ("pyw", "pythonw", "py -3", "python"):
+            self.assertIn(token, bat)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -155,6 +155,37 @@ class Update30To3xTests(unittest.TestCase):
             apply_update.apply_staged_update(staging, self.install)
         self.assertEqual(_read(os.path.join(self.install, "run_msr.pyw")), PROGRAM_30["run_msr.pyw"])
 
+    def test_retired_program_files_removed_and_staging_cleaned(self):
+        retired = os.path.join(self.install, "msr", "old_removed_module.py")
+        retired_dir_file = os.path.join(self.install, "docs", "obsolete", "old.md")
+        _write(retired, "OLD = 1\n")
+        _write(retired_dir_file, "old doc\n")
+        work = tempfile.mkdtemp(prefix="msr-update-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(work, ignore_errors=True))
+        staging = os.path.join(work, "staging")
+        update.extract_allowlisted(self.zip, staging)
+        apply_update.apply_staged_update(staging, self.install)
+        self.assertFalse(os.path.exists(retired))
+        self.assertFalse(os.path.exists(retired_dir_file))
+        self.assertFalse(os.path.exists(os.path.dirname(retired_dir_file)))
+        # User files stay intact
+        for rel, data in USER_FILES.items():
+            self.assertEqual(_read(os.path.join(self.install, rel)), data, rel)
+        apply_update._cleanup_staging(staging)
+        self.assertFalse(os.path.exists(work))
+
+    def test_spawn_updater_prefers_run_msr_pyw_for_gui_not_headless(self):
+        staging = self._stage()
+        with mock.patch("subprocess.Popen") as popen:
+            update.spawn_updater(staging, target_dir=self.install, python_exe="py", pid=1)
+        cmd = popen.call_args.args[0]
+        self.assertTrue(cmd[cmd.index("--launcher") + 1].endswith("run_msr.pyw"))
+        with mock.patch("subprocess.Popen") as popen:
+            update.spawn_updater(staging, target_dir=self.install, python_exe="py", pid=1,
+                                 launcher_args=["--headless"])
+        cmd = popen.call_args.args[0]
+        self.assertTrue(cmd[cmd.index("--launcher") + 1].endswith("Multi-Stream-Recorder.py"))
+
 
 class RemovedSettingTests(unittest.TestCase):
     def test_old_concurrent_fragments_loads_quietly(self):

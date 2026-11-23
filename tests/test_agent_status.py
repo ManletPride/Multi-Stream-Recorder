@@ -22,7 +22,7 @@ sys.path.insert(0, ROOT)
 import msr.control as control  # noqa: E402
 from msr import agent_status  # noqa: E402
 from msr.config import Config  # noqa: E402
-from tests.test_control import (SECRET_EMAIL, SECRET_PASSWORD, Headless, in_dir,  # noqa: E402
+from tests.test_control import (SECRET_EMAIL, SECRET_PASSWORD, FakeRecorder, Headless, in_dir,  # noqa: E402
                                 make_data, msr_ctl, roster)
 
 COOKIE_VALUE = "cookie-value-must-not-leak"
@@ -700,6 +700,41 @@ class CatalogAndApiTests(unittest.TestCase):
                 self.assertIn("api_mismatch", err.getvalue())
             finally:
                 h.close()
+
+
+class IdleChurnOptimizationTests(unittest.TestCase):
+    def test_status_writer_skips_unchanged_idle_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data, _ = make_data(tmp, ["kickone"])
+            cfg = Config(os.path.join(data, "config.ini"))
+            app = control.HeadlessApp(cfg, FakeRecorder)
+            self.addCleanup(app.close)
+            sw = control.StatusWriter(app, interval=3.0)
+            with mock.patch.object(control, "_write_private", wraps=control._write_private) as spy:
+                self.assertTrue(sw.write_once(force=True))
+                self.assertFalse(sw.write_once(force=False))
+                self.assertFalse(sw.write_once(force=False))
+                self.assertEqual(spy.call_count, 1)
+                # Forced write (e.g. poke or shutdown) always writes
+                self.assertTrue(sw.write_once(running=False, force=True))
+                self.assertEqual(spy.call_count, 2)
+
+    def test_cookie_health_caches_by_file_mtime_and_size(self):
+        from msr import agent_status, util
+        with tempfile.TemporaryDirectory() as tmp:
+            data, streams = make_data(tmp, ["kickone"])
+            jar = os.path.join(streams, "cookies.txt")
+            with open(jar, "w", encoding="utf-8") as fh:
+                fh.write("# Netscape HTTP Cookie File\n.kick.com\tTRUE\t/\tTRUE\t0\tsid\t1\n")
+            cfg = Config(os.path.join(data, "config.ini"))
+            agent_status._cookie_health_cache.clear()
+            with mock.patch.object(util, "validate_cookies", wraps=util.validate_cookies) as spy:
+                r1 = agent_status.cookie_health(cfg)
+                r2 = agent_status.cookie_health(cfg)
+                self.assertTrue(r1["found"])
+                self.assertEqual(r1, r2)
+                self.assertEqual(spy.call_count, 1)
+            agent_status._cookie_health_cache.clear()
 
 
 if __name__ == "__main__":

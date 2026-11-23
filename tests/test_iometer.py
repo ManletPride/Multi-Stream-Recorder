@@ -503,5 +503,19 @@ class WritebackWindowTests(unittest.TestCase):
         self.assertIn("12.1 MB/s", tip)
 
 
+class PartitionCacheTests(unittest.TestCase):
+    def test_cached_partitions_avoids_repeated_psutil_calls(self):
+        from msr import iometer as im
+        fake_psutil = mock.Mock()
+        fake_psutil.disk_partitions.return_value = []
+        im._partitions_cache.clear()
+        with mock.patch.object(im, "HAS_PSUTIL", True), mock.patch.object(im, "psutil", fake_psutil):
+            for _ in range(5):
+                im._cached_partitions(False)
+                im._cached_partitions(True)
+        self.assertEqual(fake_psutil.disk_partitions.call_count, 2)
+        im._partitions_cache.clear()
+
+
 if __name__ == "__main__":
     unittest.main()

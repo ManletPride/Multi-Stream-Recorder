@@ -128,6 +128,8 @@ class Uploader:
         self._member_until = 0.0
         self._logged_delete = False
         self._logged_missing = ""
+        self._settings_key = None
+        self._settings_cached = None
         if transport is None:
             from msr.telegram_api import BotSession
             transport = BotSession()
@@ -203,6 +205,7 @@ class Uploader:
                 log.debug("Telegram: could not update the worker flag", exc_info=True)
         if upload_enabled(self.config):
             self.start()
+        self._wake.set()
         if delete_after_upload(self.config) and not self._logged_delete:
             self._logged_delete = True
             log.warning("Telegram: the local recording is deleted after every part is confirmed. "
@@ -251,13 +254,36 @@ class Uploader:
                 "delete_after_upload": delete_after_upload(self.config),
             }
 
+    def _raw_settings_key(self):
+        """Raw (un-decrypted) Telegram config snapshot used to avoid decrypting secrets while idle."""
+        cfg = getattr(self.config, "config", self.config)
+        keys = ("enabled", "api_id", "api_hash", "api_hash_dpapi", "api_hash_box",
+                "bot_token", "bot_token_dpapi", "bot_token_box",
+                "chat_id", "topic_id", "owner_id", "delete_after_upload")
+        try:
+            return tuple(cfg.get("Telegram", k, fallback="") for k in keys)
+        except Exception:
+            return None
+
+    def _get_settings(self, *, fresh: bool = False):
+        key = self._raw_settings_key()
+        if not fresh and key is not None and key == self._settings_key and self._settings_cached is not None:
+            return self._settings_cached
+        settings = read_settings(self.config)
+        self._settings_key = key
+        self._settings_cached = settings
+        return settings
+
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
                 self.step()
             except Exception:
                 log.exception("Telegram uploads")
-            self._stop.wait(self._pause())
+            if self._stop.is_set():
+                break
+            self._wake.wait(self._pause())
+            self._wake.clear()
 
     def _pause(self) -> float:
         if not self._tests.empty():
@@ -265,7 +291,7 @@ class Uploader:
         with self._lock:
             nxt = self.store.next_time(self.clock())
         if nxt is None:
-            return 1.0
+            return 5.0
         return max(0.1, min(2.0, nxt - self.clock()))
 
     def _set(self, state: str, line: str, error: str = "") -> None:
@@ -291,7 +317,7 @@ class Uploader:
                     self._logged_missing = line
                     log.info("Telegram: %s", line)
                 return "missing"
-            settings = read_settings(self.config)
+            settings = self._get_settings()
             why = settings.missing()
             if why:
                 self._set("incomplete", why, why)
@@ -509,7 +535,9 @@ class Uploader:
             part["size"] = job["size"]
             return
         estimate = int(part.get("expect") or int(self.limit * 0.90))
-        free = self.free_bytes(os.path.dirname(job["path"]) or ".")
+        parts_root = self._parts_root()
+        space_dir = parts_root if os.path.isdir(parts_root) else (self.data_dir or os.path.dirname(job["path"]) or ".")
+        free = self.free_bytes(space_dir)
         if free < estimate + 32 * 1024 * 1024:
             job["state"] = "pending"
             job["next_try"] = self.clock() + 300
@@ -751,7 +779,7 @@ class Uploader:
             if not self._installed_fn():
                 box.put({"ok": False, "error": "Telethon is not installed. pip install Telethon, then restart MSR."})
                 return
-            settings = read_settings(self.config)
+            settings = self._get_settings()
             why = settings.missing()
             if why:
                 box.put({"ok": False, "error": why})

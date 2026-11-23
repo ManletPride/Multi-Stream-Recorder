@@ -104,25 +104,92 @@ def build_channel_key(name, platform):
 
 
 def guess_platform_from_text(text):
-    """Split ``twitch:foo`` typed into the Add box into ``("twitch", "foo")``.
+    """Split ``twitch:foo`` or a pasted channel URL into ``(platform, name)``.
 
     Plain names return ``(None, text)``; full http(s) URLs return
-    ``("custom", url)`` unless a known site matches a simple pattern.
+    ``("custom", url)`` unless a known site matches a supported channel/video shape.
     """
+    from urllib.parse import parse_qs, urlsplit
     t = (text or "").strip()
     low = t.lower()
-    m = re.match(r"^https?://(?:www\.)?(kick\.com|twitch\.tv|rumble\.com/c)/([^/?#]+)/?$", t, re.I)
-    if m:
-        site = m.group(1).lower()
-        plat = {"kick.com": "kick", "twitch.tv": "twitch", "rumble.com/c": "rumble"}[site]
-        return plat, m.group(2)
     if low.startswith(("http://", "https://")):
+        try:
+            parts = urlsplit(t)
+        except ValueError:
+            return "custom", t
+        host = (parts.hostname or "").lower()
+        for prefix in ("www.", "m.", "mobile."):
+            if host.startswith(prefix):
+                host = host[len(prefix):]
+        segs = [s for s in parts.path.split("/") if s]
+        if host == "kick.com" and len(segs) == 1:
+            return "kick", segs[0]
+        if host == "twitch.tv" and len(segs) == 1:
+            return "twitch", segs[0]
+        if host == "rumble.com" and len(segs) >= 2 and segs[0].lower() in ("c", "user"):
+            if len(segs) == 2 or (len(segs) == 3 and segs[2].lower() == "live"):
+                return "rumble", segs[1]
+        if host == "youtube.com":
+            if segs and segs[0].startswith("@") and (
+                len(segs) == 1 or (len(segs) == 2 and segs[1].lower() in ("live", "streams", "featured", "videos"))
+            ):
+                return "youtube", segs[0]
+            if len(segs) >= 2 and segs[0].lower() == "channel" and segs[1].startswith("UC") and (
+                len(segs) == 2 or (len(segs) == 3 and segs[2].lower() in ("live", "streams"))
+            ):
+                return "youtube", segs[1]
+            if len(segs) == 1 and segs[0].lower() == "watch":
+                vid = (parse_qs(parts.query).get("v") or [""])[0].strip()
+                if re.fullmatch(r"[A-Za-z0-9_-]{11}", vid):
+                    return "youtube", vid
+            if len(segs) == 2 and segs[0].lower() == "live" and re.fullmatch(r"[A-Za-z0-9_-]{11}", segs[1]):
+                return "youtube", segs[1]
+        if host == "youtu.be" and len(segs) == 1 and re.fullmatch(r"[A-Za-z0-9_-]{11}", segs[0]):
+            return "youtube", segs[0]
+        if host == "tiktok.com" and segs and segs[0].startswith("@") and (
+            len(segs) == 1 or (len(segs) == 2 and segs[1].lower() == "live")
+        ):
+            handle = segs[0].lstrip("@")
+            if handle:
+                return "tiktok", handle
         return "custom", t
     if ":" in t:
         p, rest = t.split(":", 1)
         if p.lower() in PLATFORM_LABELS:
             return p.lower(), rest.strip()
     return None, t
+
+
+def preflight_dependency_issues(enabled_channels, *, has_streamlink, has_ytdlp, has_ffmpeg, has_deno=True):
+    """Return user-facing dependency warnings for the enabled channels before starting a session."""
+    streamlink_channels = []
+    ytdlp_channels = []
+    youtube_channels = []
+    for ch in enabled_channels:
+        plat, _ = split_channel_key(ch)
+        if plat in ("kick", "twitch"):
+            streamlink_channels.append(ch)
+        elif plat in ("youtube", "tiktok", "rumble", "custom"):
+            ytdlp_channels.append(ch)
+        if plat == "youtube":
+            youtube_channels.append(ch)
+
+    issues = []
+    if streamlink_channels and not has_streamlink:
+        names = ", ".join(streamlink_channels[:3])
+        issues.append(f"Kick/Twitch channels ({names}) require streamlink, which is not installed.")
+    if ytdlp_channels and not has_ytdlp:
+        names = ", ".join(ytdlp_channels[:3])
+        issues.append(f"YouTube/TikTok/Rumble/custom channels ({names}) require yt-dlp, which is not installed.")
+    if youtube_channels and not has_deno:
+        names = ", ".join(youtube_channels[:3])
+        issues.append(
+            f"YouTube channels ({names}) work best with Deno installed — without Deno, YouTube recordings "
+            "may drop out every ~15 seconds (https://deno.com)."
+        )
+    if not has_ffmpeg:
+        issues.append("ffmpeg is not installed — recordings cannot be remuxed to MP4.")
+    return issues
 
 
 # ── Live state (drives the Recording group and the Live filter) ──

@@ -136,6 +136,7 @@ class LogFollower:
         self.buffer: list[str] = []  # every message, so a filter can be changed or removed
         self.words: list[str] = []
         self.level = LEVEL_ALL
+        self._shown_count = 0
         # Real Text widgets get colours for warnings/errors and the search hits; the unit
         # tests' fake has no tags.
         self._tags = hasattr(text, "tag_configure") and hasattr(text, "search")
@@ -174,7 +175,7 @@ class LogFollower:
 
     def _report(self) -> None:
         if self.on_stats is not None:
-            shown = sum(1 for m in self.buffer if matches(m, self.words, self.level)) if self.filtering else len(self.buffer)
+            shown = self._shown_count if self.filtering else len(self.buffer)
             self.on_stats(shown, len(self.buffer))
 
     def set_filter(self, query: str = "", level: str = LEVEL_ALL) -> None:
@@ -185,9 +186,11 @@ class LogFollower:
             return
         self.words, self.level = words, level
         pinned = self.is_at_bottom()
+        visible = self._visible(self.buffer)
+        self._shown_count = len(visible)
         self.text.configure(state="normal")
         self.text.delete("1.0", "end")
-        self._insert(self._visible(self.buffer))
+        self._insert(visible)
         self.text.configure(state="disabled")
         if pinned and self.enabled():
             self.text.see("end")
@@ -214,15 +217,28 @@ class LogFollower:
         if not messages:
             return
         pinned = self.is_at_bottom()  # decided before the new lines move the view
+        filtering = self.filtering
+        visible = self._visible(messages)
         self.buffer.extend(messages)
+        if filtering:
+            self._shown_count += len(visible)
         if len(self.buffer) > MAX_LINES:
-            del self.buffer[:len(self.buffer) - KEEP_LINES]
-        messages = self._visible(messages)
-        if not messages:
+            evict = len(self.buffer) - KEEP_LINES
+            if filtering:
+                self._shown_count = max(
+                    0,
+                    self._shown_count - sum(
+                        1 for m in self.buffer[:evict] if matches(m, self.words, self.level)
+                    ),
+                )
+            del self.buffer[:evict]
+        if not filtering:
+            self._shown_count = len(self.buffer)
+        if not visible:
             self._report()
             return
         self.text.configure(state="normal")
-        self._insert(messages)
+        self._insert(visible)
         lines = self._line_count()
         if lines > MAX_LINES:
             self.text.delete("1.0", f"{lines - KEEP_LINES}.0")
@@ -231,7 +247,7 @@ class LogFollower:
             self.text.see("end")
             self._set_behind(0)
         else:
-            self._set_behind(self.behind + len(messages))
+            self._set_behind(self.behind + len(visible))
         self._report()
 
     def on_scroll(self, first, last) -> None:
@@ -246,6 +262,7 @@ class LogFollower:
 
     def clear(self) -> None:
         self.buffer.clear()
+        self._shown_count = 0
         self._report()
         self.text.configure(state="normal")
         self.text.delete("1.0", "end")

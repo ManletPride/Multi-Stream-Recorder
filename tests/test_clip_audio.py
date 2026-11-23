@@ -389,3 +389,13 @@ class VolumeFilterTests(unittest.TestCase):
         worst = max(abs(int(out[i]) - int(samples[i] * 0.8)) for i in range(len(samples)))
         self.assertLessEqual(worst, 1)
         self.assertEqual(len(out), len(samples))          # the filter adds no delay samples
+
+
+class LinuxAudioHintTests(unittest.TestCase):
+    def test_hint_when_no_linux_player_present(self):
+        hint = clip_audio.linux_audio_hint(which=lambda _n: None, platform="linux")
+        self.assertIn("pw-play", hint)
+        self.assertIn("paplay", hint)
+        self.assertEqual(clip_audio.linux_audio_hint(which=lambda n: "/usr/bin/pw-play" if n == "pw-play" else None,
+                                                     platform="linux"), "")
+        self.assertEqual(clip_audio.linux_audio_hint(which=lambda _n: None, platform="win32"), "")

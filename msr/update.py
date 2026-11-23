@@ -72,7 +72,7 @@ MAX_MEMBER_BYTES = 8 * 1024 * 1024
 
 
 def zipball_url_is_allowed(url):
-    """True if *url* is HTTPS GitHub (API, web, or codeload)."""
+    """True if *url* is HTTPS GitHub for this repository (or GitHub's signed redirect host)."""
     try:
         parsed = urlparse(url)
     except Exception:
@@ -80,7 +80,15 @@ def zipball_url_is_allowed(url):
     if parsed.scheme != "https":
         return False
     host = (parsed.hostname or "").lower()
-    return host in ALLOWED_HOSTS
+    if host not in ALLOWED_HOSTS:
+        return False
+    if host == "objects.githubusercontent.com":
+        return True
+    path = (parsed.path or "").lower()
+    repo_slug = f"/{GITHUB_OWNER}/{GITHUB_REPO}/".lower()
+    if host == "api.github.com":
+        return path.startswith(f"/repos{repo_slug}")
+    return path.startswith(repo_slug)
 
 
 def zipball_url_for_tag(tag):
@@ -142,8 +150,7 @@ def extract_allowlisted(zip_path, staging_dir):
             size = info.file_size
             if size > MAX_MEMBER_BYTES:
                 raise ValueError(f"update member too large: {rel}")
-            total += size
-            if total > MAX_UNCOMPRESSED_BYTES:
+            if total + size > MAX_UNCOMPRESSED_BYTES:
                 raise ValueError("update zip uncompressed size is too large")
             dest = os.path.normpath(os.path.join(staging_dir, rel))
             staging_abs = os.path.abspath(staging_dir)
@@ -154,8 +161,19 @@ def extract_allowlisted(zip_path, staging_dir):
             except ValueError:
                 continue
             os.makedirs(os.path.dirname(dest), exist_ok=True)
+            member_written = 0
             with zf.open(info, "r") as src, open(dest, "wb") as out:
-                shutil.copyfileobj(src, out)
+                while True:
+                    chunk = src.read(64 * 1024)
+                    if not chunk:
+                        break
+                    member_written += len(chunk)
+                    total += len(chunk)
+                    if member_written > MAX_MEMBER_BYTES:
+                        raise ValueError(f"update member too large: {rel}")
+                    if total > MAX_UNCOMPRESSED_BYTES:
+                        raise ValueError("update zip uncompressed size is too large")
+                    out.write(chunk)
             written.append(rel)
     if not written:
         raise ValueError("update zip had no Multi-Stream-Recorder files")
@@ -229,7 +247,12 @@ def spawn_updater(staging_dir, target_dir=None, python_exe=None, launcher=None,
     """
     target_dir = os.path.abspath(target_dir or application_dir())
     python_exe = python_exe or sys.executable
-    launcher = launcher or os.path.join(target_dir, "Multi-Stream-Recorder.py")
+    if launcher is None:
+        gui_launcher = os.path.join(target_dir, "run_msr.pyw")
+        if "--headless" not in launcher_args and os.path.isfile(gui_launcher):
+            launcher = gui_launcher
+        else:
+            launcher = os.path.join(target_dir, "Multi-Stream-Recorder.py")
     pid = os.getpid() if pid is None else pid
     helper_src = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "apply_update.py")
@@ -375,7 +398,8 @@ def fetch_latest_release(running_version, opener=None):
 
 
 def _git_env():
-    env = os.environ.copy()
+    from msr.config import clean_subprocess_env
+    env = clean_subprocess_env()
     # A credential prompt would block the worker thread with no window to type into.
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GCM_INTERACTIVE"] = "never"

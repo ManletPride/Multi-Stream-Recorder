@@ -9,6 +9,7 @@ never shown or logged.
 import logging
 import os
 import re
+import sys
 import threading
 import tkinter as tk
 import webbrowser
@@ -309,23 +310,43 @@ class OptionsPanel:
         head.pack(fill=tk.X)
         enabled = str(self.config.get("Telegram", "enabled", "false")).strip().lower() in ("1", "true", "yes", "on")
         self.tg_enabled = tk.BooleanVar(value=enabled)
+
+        def _on_tg_toggle_enabled():
+            on = bool(self.tg_enabled.get())
+            self._commit("Telegram", "enabled", "true" if on else "false")
+            if on:
+                self._set_tg_expanded(True)
+
         cb = remember(ttk.Checkbutton(
             head, text="Upload finished recordings", variable=self.tg_enabled,
-            command=lambda: self._commit("Telegram", "enabled", "true" if self.tg_enabled.get() else "false")))
+            command=_on_tg_toggle_enabled))
         cb.pack(side=tk.LEFT)
         self.tip(cb, "After a recording is remuxed, MSR uploads it in the background.\n"
                      "A channel is included only when this is on and that channel's\n"
                      "Telegram box is ticked. Off until you turn this on.")
         self.vars[("Telegram", "enabled")] = self.tg_enabled
 
+        self._tg_details = ttk.Frame(box)
+        self._tg_expanded = False
+        self._tg_toggle_btn = ttk.Button(
+            head, text="\u25b8 Configure",
+            command=lambda: self._set_tg_expanded(not self._tg_expanded),
+        )
+        self._tg_toggle_btn.pack(side=tk.LEFT, padx=(10, 0))
+        if not installed:
+            self._tg_head_note = ttk.Label(head, text="(Telethon not installed)", foreground=t["warn"])
+            self._tg_head_note.pack(side=tk.LEFT, padx=(8, 0))
+        else:
+            self._tg_head_note = None
+
         hint = ("Telethon is not installed, so this is off. Install it (pip install Telethon) and restart MSR."
                 if not installed else
                 "Bot token only — MSR never logs in as you. Files over 2000 MB are split, without re-encoding.")
-        self.tg_intro = ttk.Label(box, text=hint, wraplength=640, foreground=t["warn" if not installed else "muted"])
-        self.tg_intro.pack(fill=tk.X, pady=(2, 4))
+        self.tg_intro = ttk.Label(self._tg_details, text=hint, wraplength=640, foreground=t["warn" if not installed else "muted"])
+        self.tg_intro.pack(fill=tk.X, pady=(4, 4))
         self._tg_labels.append(self.tg_intro)
 
-        grid = ttk.Frame(box)
+        grid = ttk.Frame(self._tg_details)
         grid.pack(fill=tk.X)
         grid.columnconfigure(2, weight=1)
         self._tg_grid = grid
@@ -374,7 +395,7 @@ class OptionsPanel:
 
         delete = str(self.config.get("Telegram", "delete_after_upload", "false")).strip().lower() in ("1", "true", "yes", "on")
         self.tg_delete = tk.BooleanVar(value=delete)
-        del_row = ttk.Frame(box)
+        del_row = ttk.Frame(self._tg_details)
         del_row.pack(fill=tk.X, pady=(4, 0))
         del_cb = remember(ttk.Checkbutton(
             del_row, text="Delete the local file after Telegram confirms every part",
@@ -386,12 +407,12 @@ class OptionsPanel:
         self.tip(del_cb, "Off unless you tick this. The file is removed only after every part\n"
                          "has been confirmed. A failed or partial upload keeps it.")
         self.tg_delete_warn = ttk.Label(
-            box, text="Off by default. A failed or partial upload keeps the recording. Deleting it cannot be undone.",
+            self._tg_details, text="Off by default. A failed or partial upload keeps the recording. Deleting it cannot be undone.",
             foreground=t["warn"], wraplength=640)
         self.tg_delete_warn.pack(fill=tk.X)
         self._tg_labels.append(self.tg_delete_warn)
 
-        actions = ttk.Frame(box)
+        actions = ttk.Frame(self._tg_details)
         actions.pack(fill=tk.X, pady=(4, 0))
         self.tg_test = remember(ttk.Button(actions, text="Send test message", command=self._telegram_test))
         self.tg_test.pack(side=tk.LEFT)
@@ -399,8 +420,20 @@ class OptionsPanel:
         self.tg_status = ttk.Label(actions, text="", foreground=t["muted"])
         self.tg_status.pack(side=tk.LEFT, padx=(10, 0))
         self._tg_labels.append(self.tg_status)
+        self._set_tg_expanded(enabled)
         if self.telegram_status is not None:
             self.frame.after(1000, self._poll_telegram)
+
+    def _set_tg_expanded(self, expanded):
+        self._tg_expanded = bool(expanded)
+        if self._tg_expanded:
+            if not self._tg_details.winfo_manager():
+                self._tg_details.pack(fill=tk.X)
+            self._tg_toggle_btn.configure(text="\u25be Hide settings")
+        else:
+            if self._tg_details.winfo_manager():
+                self._tg_details.pack_forget()
+            self._tg_toggle_btn.configure(text="\u25b8 Configure")
 
     def _commit_telegram(self, key, var, secret):
         if secret:
@@ -438,7 +471,10 @@ class OptionsPanel:
             return
         cur = self.config.get("Telegram", key, "")
         if isinstance(var, tk.BooleanVar):
-            var.set(str(cur).strip().lower() in ("1", "true", "yes", "on"))
+            on = str(cur).strip().lower() in ("1", "true", "yes", "on")
+            var.set(on)
+            if key == "enabled" and on:
+                self._set_tg_expanded(True)
         else:
             var.set(str(cur or ""))
 
@@ -471,23 +507,30 @@ class OptionsPanel:
         try:
             if not self.frame.winfo_exists():
                 return
+            visible = bool(self.frame.winfo_viewable())
         except tk.TclError:
             return
-        if self.telegram_status is not None:
+        enabled = False
+        if self.telegram_status is not None and visible:
             try:
                 info = self.telegram_status() or {}
             except Exception:
                 info = {}
+            enabled = bool(info.get("enabled"))
             line = str(info.get("line") or "")
             error = str(info.get("error") or "")
             t = _themes.current()
             colour = t["error"] if info.get("state") in ("paused", "missing") and error else t["muted"]
-            try:
-                self.tg_status.configure(text=line, foreground=colour)
-            except tk.TclError:
-                return
+            sig = (line, colour)
+            if sig != getattr(self, "_tg_status_sig", None):
+                self._tg_status_sig = sig
+                try:
+                    self.tg_status.configure(text=line, foreground=colour)
+                except tk.TclError:
+                    return
+        delay = 1000 if (visible and enabled) else 5000
         try:
-            self.frame.after(1000, self._poll_telegram)
+            self.frame.after(delay, self._poll_telegram)
         except tk.TclError:
             pass
 
@@ -518,6 +561,21 @@ class OptionsPanel:
             self.cookie_warn = ttk.Label(box, text="", foreground=t["warn"])
             self.cookie_warn.grid(row=len(rows), column=0, columnspan=3, sticky="w")
             self._cookie_warning()
+        elif title == "Sounds" and sys.platform != "win32":
+            self._sounds_note = ttk.Label(
+                box,
+                text="System sound alerts use Windows sounds and are silent on Linux.",
+                foreground=t["muted"],
+            )
+            self._sounds_note.grid(row=len(rows), column=0, columnspan=3, sticky="w", pady=(2, 0))
+
+    def _run_sound_test(self, ev):
+        if not self.sound_test:
+            return
+        res = self.sound_test(ev)
+        if res is False:
+            self._say("System sound alerts are Windows-only." if sys.platform != "win32"
+                      else "Could not play system sound.")
 
     def _build_row(self, box, i, spec, t):
         s, k, kind = spec["section"], spec["key"], spec["kind"]
@@ -534,7 +592,7 @@ class OptionsPanel:
                 self.hints[(s, k)] = hint
             if kind == "sound":
                 ttk.Button(box, text="Test", width=6,
-                           command=lambda ev=spec["choices"][0]: self.sound_test and self.sound_test(ev)
+                           command=lambda ev=spec["choices"][0]: self._run_sound_test(ev)
                            ).grid(row=i, column=1, sticky="w", padx=6, pady=1)
         else:
             ttk.Label(box, text=spec["label"]).grid(row=i, column=0, sticky="w", pady=1)
@@ -910,6 +968,10 @@ class OptionsPanel:
         self.link.configure(foreground=t["link"])
         for h in self.hints.values():
             h.configure(foreground=t["muted"])
+        if getattr(self, "_tg_head_note", None) is not None:
+            self._tg_head_note.configure(foreground=t["warn"])
+        if getattr(self, "_sounds_note", None) is not None:
+            self._sounds_note.configure(foreground=t["muted"])
         if getattr(self, "tg_intro", None) is not None:
             self.tg_intro.configure(foreground=t["warn" if not self._tg_installed else "muted"])
         if getattr(self, "tg_delete_warn", None) is not None:
