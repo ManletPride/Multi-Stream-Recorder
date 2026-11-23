@@ -55,7 +55,8 @@ class ArgsTests(unittest.TestCase):
         cmd = platforms.build_recording_command_ytdlp_from_start(
             "https://youtube.com/watch?v=abcdefghijk", os.path.join("R", "chan_2026"), cfg(), False, False,
             cookies_file="c.txt")
-        self.assertEqual(cmd[:2], ["yt-dlp", "https://youtube.com/watch?v=abcdefghijk"])
+        self.assertEqual(cmd[0], "yt-dlp")
+        self.assertEqual(cmd[-2:], ["--", "https://youtube.com/watch?v=abcdefghijk"])
         self.assertIn("--live-from-start", cmd)
         self.assertEqual(cmd[cmd.index("-o") + 1], os.path.join("R", "chan_2026") + ".%(ext)s")
         self.assertEqual(cmd[cmd.index("--merge-output-format") + 1], "mp4")

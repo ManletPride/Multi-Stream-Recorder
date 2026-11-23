@@ -35,6 +35,7 @@ class Recording:
     clips: list = field(default_factory=list)   # ClipRef cut from this recording
     related: list = field(default_factory=list)  # clip files in the same folders, folded under this row
     orphan: bool = False  # a clip file whose source recording is not listed
+    _meta: dict | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -112,7 +113,7 @@ def make_recording(path: str, size: int, mtime: float, raw: bool) -> Recording:
         seconds = None
     title = meta.get("stream_title") or meta.get("title") or ""
     when = _meta_start(meta) or stamp_from_name(name) or mtime
-    return Recording(path, name, when, seconds, str(title).strip(), size, raw)
+    return Recording(path, name, when, seconds, str(title).strip(), size, raw, _meta=meta)
 
 
 def _folder_list(value) -> list[str]:
@@ -227,9 +228,31 @@ def link_clips(recs: list[Recording], clips: list[ClipRef]) -> list[ClipRef]:
 
 def _clip_source(r: Recording):
     """(source name, source stem, link or None) when this listed file is a clip, else None."""
-    link = core.read_clip_link(r.path)
-    if link is not None:
-        return link["source_name"], link["stem"], link
+    meta = r._meta
+    if meta is not None:
+        # Reuse the already-loaded sidecar from make_recording() instead of opening .meta.json twice.
+        if meta.get("kind") == core.CLIP_META_KIND and meta.get("source_name"):
+            link = {
+                "source_name": str(meta["source_name"]),
+                "source": str(meta.get("source") or ""),
+                "stem": core.safe_stem(meta["source_name"]),
+                "in": float(meta.get("in") or 0.0),
+                "out": float(meta.get("out") or 0.0),
+                "guessed": False,
+            }
+            return link["source_name"], link["stem"], link
+        # No clip sidecar — fall back to filename-only clip pattern without re-opening disk
+        m = core._CLIP_NAME_RE.match(os.path.basename(r.path))
+        if m:
+            link = {
+                "source_name": "", "source": "", "stem": m.group("stem"),
+                "in": core._dash_time(m.group("a")), "out": core._dash_time(m.group("b")), "guessed": True,
+            }
+            return link["source_name"], link["stem"], link
+    else:
+        link = core.read_clip_link(r.path)
+        if link is not None:
+            return link["source_name"], link["stem"], link
     m = _DERIVED_RE.match(os.path.splitext(r.name)[0])
     return ("", m.group("stem"), m.group("kind").lower()) if m else None
 

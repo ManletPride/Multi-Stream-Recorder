@@ -74,18 +74,22 @@ def enabled(config) -> bool:
 
 def _write_private(path, data: bytes) -> None:
     """Atomic write; the file is readable by this user only (POSIX 0600; Windows: a protected
-    DACL for the current user, set before the rename so the token is never exposed; fail-soft)."""
+    DACL for the current user, set BEFORE writing secret bytes so the token is never exposed)."""
     folder = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(dir=folder, prefix=os.path.basename(path) + ".", suffix=".tmp")
     try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
         if os.name != "nt":
             os.chmod(tmp, 0o600)
-        elif os.path.basename(path) == CONTROL_FILE:
-            from msr.winacl import restrict_to_current_user
-            if not restrict_to_current_user(tmp):
-                logging.debug(f"Control: {CONTROL_FILE} keeps the folder's permissions")
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+        else:
+            os.close(fd)
+            if os.path.basename(path) == CONTROL_FILE:
+                from msr.winacl import restrict_to_current_user
+                if not restrict_to_current_user(tmp):
+                    logging.warning(f"Control: could not restrict ACL on {CONTROL_FILE}; it keeps the folder's permissions")
+            with open(tmp, "wb") as fh:
+                fh.write(data)
         from msr.history import _replace
         _replace(tmp, path)  # retried: a reader may hold the old file open for a moment on Windows
     except BaseException:
@@ -355,6 +359,9 @@ def validate_setting(section, key, value) -> str:
     if (section, key) in (("Paths", "streams_dir"), ("Recording", "filename_pattern"),
                           ("Advanced", "ffmpeg_path")) and not value:
         raise ControlError(f"{section}.{key} cannot be empty.", "invalid")
+    if (section, key) == ("GUI", "window_state_file"):
+        if not value or "/" in value or "\\" in value or value in (".", "..") or os.path.basename(value) != value:
+            raise ControlError("window_state_file must be a plain filename inside the data folder.", "invalid")
     if section == "Telegram" and key not in ("enabled", "delete_after_upload"):
         from msr.telegram_queue import SettingError, normalize_setting
         try:
@@ -374,6 +381,18 @@ def setting_applies(section, key) -> str:
     if section == "Control":
         return "restart"
     return "next_start"
+
+
+# Settings that execute a configured binary or widen file write/delete roots.
+# Still editable locally in the GUI Options tab (direct control.apply_setting),
+# but blocked over the remote control API (cmd_config_set / msr_ctl config set).
+REMOTE_BLOCKED_SETTINGS = frozenset({
+    ("advanced", "ffmpeg_path"),
+    ("clipping", "clips_dir"),
+    ("paths", "channels_file"),
+    ("paths", "fallback_dir"),
+    ("gui", "window_state_file"),
+})
 
 
 def apply_setting(config, section, key, value, recording=False, live=None) -> str:
@@ -820,6 +839,8 @@ def live_status(app) -> dict:
 class StatusWriter(threading.Thread):
     """Rewrites msr_status.json every few seconds (and at once on ``poke()``)."""
 
+    HEARTBEAT_SECONDS = 60.0   # rewrite unchanged msr_status.json at most once a minute
+
     def __init__(self, app, interval=STATUS_INTERVAL):
         super().__init__(daemon=True, name="control-status")
         self.app = app
@@ -828,6 +849,8 @@ class StatusWriter(threading.Thread):
         self._halt = threading.Event()
         self._poke = threading.Event()
         self._last_error = 0.0
+        self._last_sig = None
+        self._last_written_at = 0.0
 
     def poke(self):
         self._poke.set()
@@ -859,24 +882,43 @@ class StatusWriter(threading.Thread):
                 pass
         tracker.refresh(self.app)
 
-    def write_once(self, running=True):
+    @staticmethod
+    def _payload_signature(data):
+        """Canonical JSON without volatile wall-clock timestamps so unchanged idle ticks skip disk writes."""
+        stripped = dict(data)
+        stripped.pop("written_at", None)
+        if isinstance(stripped.get("app"), dict):
+            app = dict(stripped["app"])
+            app.pop("uptime_seconds", None)
+            stripped["app"] = app
+        return json.dumps(stripped, sort_keys=True, separators=(",", ":"))
+
+    def write_once(self, running=True, force=True):
         data = live_status(self.app)
         data["app"]["running"] = running
+        sig = self._payload_signature(data)
+        now = time.monotonic()
+        if not force and sig == self._last_sig and (now - self._last_written_at) < self.HEARTBEAT_SECONDS:
+            return False
         _write_private(self.path, json.dumps(data, indent=2).encode("utf-8"))
+        self._last_sig = sig
+        self._last_written_at = now
+        return True
 
     def run(self):
+        poked = True   # always write the initial snapshot on start
         while not self._halt.is_set():
             try:
                 rec = self.app.recorder
                 if self.app.mode == "headless" and is_running_session(rec):
                     rec.update_status_from_queue()
                 self.feed()
-                self.write_once()
+                self.write_once(force=poked)
             except Exception as e:
                 if time.time() - self._last_error > 300:
                     self._last_error = time.time()
                     logging.warning(f"Control: could not write {STATUS_FILE}: {e}")
-            self._poke.wait(self.interval)
+            poked = self._poke.wait(self.interval)
             self._poke.clear()
 
     def stop(self):
@@ -1366,7 +1408,10 @@ class Controller:
             rows = depsupdate.rows(True, ffmpeg_path=ffmpeg)
             try:
                 state = self.app.config.get("GUI", "window_state_file", fallback="window_state.json")
-                depsupdate.remember(os.path.join(self.app.data_dir, state), rows)
+                data_abs = os.path.abspath(self.app.data_dir)
+                state_path = os.path.abspath(os.path.join(data_abs, os.path.basename(state or "window_state.json")))
+                if os.path.commonpath([data_abs, state_path]) == data_abs:
+                    depsupdate.remember(state_path, rows)
             except Exception:
                 pass
             return {"items": rows, "updates": depsupdate.updates_available(rows)}
@@ -1418,10 +1463,15 @@ class Controller:
         return value
 
     def cmd_config_set(self, args):
-        """Same checks and save as the Options tab (control.apply_setting)."""
+        """Same checks and save as the Options tab (control.apply_setting), minus host-path/binary settings."""
         section, key = str(args.get("section") or ""), str(args.get("key") or "").lower()
         if not section or not key or "value" not in args:
             raise ControlError("Give section, key and value.", "bad_request")
+        if (section.lower(), key) in REMOTE_BLOCKED_SETTINGS:
+            raise ControlError(
+                f"{section}.{key} cannot be changed via the control API; edit it in Options or config.ini.",
+                "forbidden",
+            )
         value = self._save_setting(section, key, args["value"])
         logging.info(f"Setting {section}.{key} changed by control")
         return {"section": section, "key": key, "value": masked(key, value),
@@ -1936,7 +1986,7 @@ class Controller:
         if after in (None, "") and key is not None and "live" in kinds:
             st = str((_status_copy(self.app.recorder).get(key) or {}).get("status", ""))
             if st.lower().startswith("recording"):  # already live and recording: nothing to wait for
-                return {"seq": tracker.seq, "event": "live", "channel": key, "already": True,
+                return {"seq": tracker.seq, "event": "live", "channel": display_name(key), "already": True,
                         "source": "recording", "time": time.time(),
                         "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
         if after in (None, "") and key is not None and "finished" in kinds:
@@ -2229,7 +2279,13 @@ class ControlServer:
         except (OSError, ValueError):
             pass
 
+    MAX_CLIENTS = 32
+    PREAUTH_DEADLINE_S = 5.0
+
     def _serve(self):
+        sem = getattr(self, "_client_sem", None)
+        if sem is None:
+            sem = self._client_sem = threading.BoundedSemaphore(self.MAX_CLIENTS)
         while not self._closing.is_set():
             try:
                 conn, addr = self._sock.accept()
@@ -2240,24 +2296,38 @@ class ControlServer:
             if addr[0] not in ("127.0.0.1", "::1"):
                 conn.close()
                 continue
-            threading.Thread(target=self._client, args=(conn,), daemon=True, name="control-client").start()
+            if not sem.acquire(blocking=False):
+                conn.close()
+                continue
+            def _run(c=conn):
+                try:
+                    self._client(c)
+                finally:
+                    sem.release()
+            threading.Thread(target=_run, daemon=True, name="control-client").start()
 
     def _client(self, conn):
         with conn:
-            conn.settimeout(30)
+            deadline = time.monotonic() + self.PREAUTH_DEADLINE_S
             try:
                 buf = b""
                 while b"\n" not in buf:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("request timed out")
+                    conn.settimeout(min(remaining, 2.0))
                     chunk = conn.recv(65536)
                     if not chunk:
                         break
                     buf += chunk
                     if len(buf) > MAX_REQUEST:
                         raise ValueError("request too large")
+                conn.settimeout(30)
                 line = buf.split(b"\n", 1)[0]
                 req = self._parse(line)
                 if req is not None and req.get("cmd") == "subscribe" and self._authorized(req):
-                    self._subscribe(conn, req.get("args") or {})
+                    sub_args = req.get("args")
+                    self._subscribe(conn, sub_args if isinstance(sub_args, dict) else {})
                     return
                 reply = self.dispatch(line)
             except (OSError, ValueError) as e:
@@ -2340,7 +2410,7 @@ class ControlServer:
                     return
                 for ev in tracker.events_after(after, min(1.0, heartbeat)):
                     after = max(after, ev["seq"])
-                    if ev["event"] in wanted and (channel is None or ev["channel"] == channel):
+                    if ev["event"] in wanted and (channel is None or ev["channel"] in (channel, display_name(channel))):
                         send({"type": "event", "event": ev})
                 if time.monotonic() - last_beat >= heartbeat:
                     send({"type": "heartbeat", "seq": tracker.seq, "time": round(time.time(), 1)})

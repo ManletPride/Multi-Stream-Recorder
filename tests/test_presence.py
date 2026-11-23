@@ -198,5 +198,18 @@ class TestModel(unittest.TestCase):
         self.assertEqual(pr.combined_state("offline", {"live": False}, False), "offline")
 
 
+class HandlerLeakTests(unittest.TestCase):
+    def test_poll_twitch_does_not_leak_null_handlers(self):
+        import logging
+        from unittest import mock
+        from msr import presence, platforms
+        quiet = logging.getLogger("msr.presence.quiet")
+        quiet.handlers.clear()
+        with mock.patch.object(platforms, "check_stream_streamlink", return_value=(False, None, None)):
+            for _ in range(5):
+                presence.poll_twitch("demo")
+        self.assertEqual(len(quiet.handlers), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -156,7 +156,7 @@ def _annotate_msr(msr: dict, running: str) -> None:
     version check keeps its own error text, unless the files on disk are already newer.
     """
     try:
-        from msr.update import GIT_NOTE, RESTART_TITLE, disk_version, source_note
+        from msr.update import GIT_NOTE, RESTART_TITLE, ZIP_NOTE, disk_version, source_note
         from msr.util import application_dir
         folder = application_dir()
         note = source_note(folder, running)
@@ -251,8 +251,8 @@ def updates_available(rs: list[dict]) -> list[str]:
 
 # ------------------------------------------------------------------ pip
 def pip_command(python: str, spec: str) -> list[str]:
-    return [python, "-m", "pip", "install", "--upgrade", "--disable-pip-version-check", "--no-input",
-            "--progress-bar", "off", spec]
+    return [python, "-m", "pip", "install", "--isolated", "--upgrade", "--disable-pip-version-check",
+            "--no-input", "--progress-bar", "off", spec]
 
 
 def classify_pip_error(text: str) -> str:

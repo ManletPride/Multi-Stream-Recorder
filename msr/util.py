@@ -257,12 +257,14 @@ def read_layout_paths(root: str, *parts: str, reuse: bool | None = None) -> list
     return current or [spelled]
 
 
-def validate_startup(config):
+def validate_startup(config, allow_missing_ffmpeg=False):
     """Validate dependencies and config at startup.
 
     Returns (errors: list[str], warnings: list[str]).
     Errors are fatal — the program cannot work.  Warnings are non-fatal
-    but the user should be aware.
+    but the user should be aware.  When *allow_missing_ffmpeg* is True
+    (GUI mode), a missing ffmpeg is downgraded to a warning so the window
+    still opens and the user can point Options -> ffmpeg at the binary.
     """
     errors = []
     warnings = []
@@ -274,19 +276,24 @@ def validate_startup(config):
     ffmpeg_path = (config.get('Advanced', 'ffmpeg_path', fallback='ffmpeg') or 'ffmpeg').strip() or 'ffmpeg'
     if deps.configure_ffmpeg(ffmpeg_path) is None:
         if ffmpeg_path == 'ffmpeg':
-            errors.append(
-                "ffmpeg not found in PATH.  ffmpeg is required for remuxing recordings.\n"
-                "  Install: https://ffmpeg.org/download.html\n"
-                "  Windows: download, extract, add bin/ folder to system PATH\n"
-                "  Or set ffmpeg_path in the [Advanced] section of config.ini"
+            install_hint = (
+                "  Windows: winget install Gyan.FFmpeg  (or https://ffmpeg.org/download.html)\n"
+                if os.name == 'nt' else
+                "  Linux: sudo apt install ffmpeg  (or use your distro's package manager)\n"
+            )
+            msg = (
+                "ffmpeg not found in PATH.  ffmpeg is required for remuxing recordings and clips.\n"
+                f"{install_hint}"
+                "  Or set ffmpeg_path in Options -> Other -> ffmpeg (or [Advanced] in config.ini)"
             )
         else:
-            errors.append(
+            msg = (
                 f"ffmpeg did not run from the configured ffmpeg_path.\n"
                 f"  Current value: {ffmpeg_path}\n"
-                "  Fix ffmpeg_path in the [Advanced] section of config.ini, or install ffmpeg "
-                "and set it back to: ffmpeg"
+                "  Fix ffmpeg_path in Options -> Other -> ffmpeg (or [Advanced] in config.ini), "
+                "or install ffmpeg and set it back to: ffmpeg"
             )
+        (warnings if allow_missing_ffmpeg else errors).append(msg)
     else:
         ffprobe_path = ffprobe_from_ffmpeg(ffmpeg_path)
         if not deps.check_ffprobe(ffprobe_path):
@@ -1965,8 +1972,12 @@ _SENSITIVE_QUERY_KEYS = {
 }
 _SENSITIVE_QUERY_SUBSTR = ('token', 'jwt', 'secret', 'passwd', 'password', 'signature')
 _SENSITIVE_HEADER_RE = re.compile(
-    r'(?i)(\b(?:Authorization|Cookie|Set-Cookie|X-Api-Key)\s*:\s*)(.*?)(?=\r\n|$)',
+    r'(?i)(\b(?:Authorization|Cookie|Set-Cookie|X-Api-Key|X-Auth-Token|X-Access-Token|X-Session-Token|X-CSRF-Token)\s*:\s*)(.*?)(?=\r|\n|$)',
 )
+_SENSITIVE_ARG_HEADER_RE = re.compile(
+    r'(?i)((?:^|\s)(?:Authorization|Cookie|Set-Cookie|X-Api-Key|X-Auth-Token|X-Access-Token|X-Session-Token|X-CSRF-Token)=)([^\r\n]+)',
+)
+_URL_USERINFO_RE = re.compile(r'(https?://)([^/@\s]+)@')
 _QUERY_PARAM_RE = re.compile(r'([?&])([^=&\s]+)=([^&\s]*)')
 # Bot API URLs embed the token in the path (api.telegram.org/bot<token>/...).
 # The token itself is digits, a colon, then a long secret. Scrub both.
@@ -2029,6 +2040,7 @@ def redact_for_log(text):
     if not text:
         return text
     text = str(text)
+    text = _URL_USERINFO_RE.sub(r'\1***@', text)
     # Signed stream URLs (YouTube googlevideo with the user's IP, Twitch/Kick m3u8 tokens,
     # CloudFront policies...) are replaced as a whole; anything else keeps the masking below.
     text = _URL_RE.sub(lambda m: _summarize_signed_url(m.group(0)) or m.group(0), text)
@@ -2042,6 +2054,7 @@ def redact_for_log(text):
 
     text = _QUERY_PARAM_RE.sub(_param, text)
     text = _SENSITIVE_HEADER_RE.sub(r'\1***', text)
+    text = _SENSITIVE_ARG_HEADER_RE.sub(r'\1***', text)
     text = _BOT_URL_RE.sub("https://api.telegram.org/bot***/...", text)
     text = _BOT_TOKEN_RE.sub("***", text)
     return text
@@ -2212,9 +2225,22 @@ def resolve_log_dir(root_path):
         problem = "it is not writable"
     except (OSError, ValueError, TypeError) as e:
         problem = getattr(e, "strerror", None) or type(e).__name__
-    for candidate in (os.getcwd(), os.path.join(tempfile.gettempdir(), "MultiStreamRecorder")):
+    if os.name == "nt":
+        fallback_log = os.path.join(tempfile.gettempdir(), "MultiStreamRecorder")
+    else:
+        xdg_cache = (os.environ.get("XDG_CACHE_HOME") or "").strip()
+        cache_base = os.path.abspath(os.path.expanduser(xdg_cache)) if xdg_cache else os.path.join(os.path.expanduser("~"), ".cache")
+        fallback_log = os.path.join(cache_base, "multi-stream-recorder")
+    for candidate in (os.getcwd(), fallback_log):
         try:
-            os.makedirs(candidate, exist_ok=True)
+            if os.name != "nt" and candidate == fallback_log:
+                os.makedirs(candidate, mode=0o700, exist_ok=True)
+                try:
+                    os.chmod(candidate, 0o700)
+                except OSError:
+                    pass
+            else:
+                os.makedirs(candidate, exist_ok=True)
             if os.access(candidate, os.W_OK):
                 return candidate, problem
         except OSError:

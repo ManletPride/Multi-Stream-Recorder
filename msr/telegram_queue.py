@@ -266,11 +266,13 @@ def normalize_setting(key: str, value: str) -> str:
     return value
 
 
-def config_for_worker(config) -> dict:
-    """The config dict handed to a recording process, without the bot token or api hash.
+def config_for_worker(config, *, platform: str | None = None) -> dict:
+    """The config dict handed to a recording process, without secrets it does not need.
 
-    Workers only need ``Telegram.enabled`` (and the live runtime flag). The token
-    never crosses into the child process.
+    Workers never receive the Telegram bot token or api hash (only
+    ``Telegram.enabled`` and the live runtime flag). ``[Fishtank]`` credentials
+    are also stripped unless ``platform == "fishtank"`` so non-Fishtank workers
+    never hold them.
     """
     parser = config.config
     out = {section: dict(parser.items(section)) for section in parser.sections()}
@@ -280,6 +282,8 @@ def config_for_worker(config) -> dict:
             low = key.lower()
             if "hash" in low or "token" in low:
                 tg.pop(key, None)
+    if (platform or "").strip().lower() != "fishtank":
+        out.pop("Fishtank", None)
     return out
 
 
@@ -818,6 +822,9 @@ def session_path(data_dir: str) -> str:
     return os.path.join(data_dir or ".", SESSION_FILE)
 
 
+_SESSION_AAD = b"telegram_session"
+
+
 def save_session(data_dir: str, session: str, fp: str) -> None:
     """The Telethon session string, encrypted, mode 0600.
 
@@ -827,10 +834,10 @@ def save_session(data_dir: str, session: str, fp: str) -> None:
     """
     payload = json.dumps({"v": 1, "fp": fp, "session": session})
     if dpapi.available():
-        body = json.dumps({"v": 1, "dpapi": dpapi.encrypt_text(payload)}).encode("utf-8")
+        body = json.dumps({"v": 1, "dpapi": dpapi.encrypt_text(payload, entropy=_SESSION_AAD)}).encode("utf-8")
     else:
         from msr import filecrypt
-        body = json.dumps({"v": 1, "box": filecrypt.encrypt_text(payload)}).encode("utf-8")
+        body = json.dumps({"v": 1, "box": filecrypt.encrypt_text(payload, aad=_SESSION_AAD)}).encode("utf-8")
     path = session_path(data_dir)
     _write_private(path, body)
     if os.name == "nt":
@@ -857,14 +864,14 @@ def load_session(data_dir: str, fp: str) -> str | None:
             logging.info("Telegram: the saved bot session is encrypted for Windows and cannot be read here")
             return None
         try:
-            doc = json.loads(dpapi.decrypt_text(doc["dpapi"]))
+            doc = json.loads(dpapi.decrypt_text(doc["dpapi"], entropy=_SESSION_AAD))
         except Exception:
             logging.warning("Telegram: the saved bot session cannot be decrypted; the bot will sign in again")
             return None
     elif "box" in doc:
         from msr import filecrypt
         try:
-            doc = json.loads(filecrypt.decrypt_text(doc["box"]))
+            doc = json.loads(filecrypt.decrypt_text(doc["box"], aad=_SESSION_AAD))
         except Exception:
             logging.warning("Telegram: the saved bot session cannot be decrypted; the bot will sign in again")
             return None

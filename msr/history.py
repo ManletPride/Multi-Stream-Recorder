@@ -55,13 +55,33 @@ def _ini_lines(text):
 
 
 def strip_secrets(data: bytes) -> bytes:
-    """An ``.ini`` copy with every password/secret/token value replaced by ``KEPT_OUT``."""
+    """An ``.ini`` copy with every password/secret/token value replaced by ``KEPT_OUT``.
+
+    Also strips indented multiline continuation lines belonging to a secret option.
+    """
     text = data.decode("utf-8-sig", errors="replace")
     out = []
+    in_secret_continuation = False
     for line, _section, key, prefix, value in _ini_lines(text):
-        if key and value.strip() and _SECRET_KEY.search(key):
-            ending = line[len(line.rstrip("\r\n")):]
-            line = f"{prefix}{KEPT_OUT}{ending}"
+        if key is not None:
+            is_secret = bool(_SECRET_KEY.search(key))
+            in_secret_continuation = is_secret
+            if is_secret and value.strip():
+                ending = line[len(line.rstrip("\r\n")):]
+                line = f"{prefix}{KEPT_OUT}{ending}"
+            out.append(line)
+            continue
+        if in_secret_continuation:
+            stripped = line.lstrip(" \t")
+            is_indented = len(stripped) < len(line) and stripped.strip() and not stripped.startswith(("#", ";", "["))
+            if is_indented:
+                # Replace continuation value lines of a multiline secret option
+                if out and KEPT_OUT not in out[-1]:
+                    ending = out[-1][len(out[-1].rstrip("\r\n")):]
+                    out[-1] = out[-1].rstrip("\r\n") + KEPT_OUT + ending
+                continue
+            if stripped.strip() or line.lstrip().startswith("["):
+                in_secret_continuation = False
         out.append(line)
     return "".join(out).encode("utf-8")
 
@@ -184,14 +204,21 @@ def snapshot(path, *, keep: int = KEEP, min_interval: float = 0, now: datetime |
             if min_interval and 0 <= (now - newest.stamp).total_seconds() < min_interval:
                 return None
         folder = history_folder(path)
-        folder.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            folder.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            folder.mkdir(parents=True, mode=0o700, exist_ok=True)
+        else:
+            folder.mkdir(parents=True, exist_ok=True)
         target = folder / f"{now.strftime(_STAMP)}.bak"
         while target.exists():  # two saves in the same microsecond
             now = now.replace(microsecond=(now.microsecond + 1) % 1_000_000)
             target = folder / f"{now.strftime(_STAMP)}.bak"
-        target.write_bytes(data)
         if os.name != "nt":
-            os.chmod(target, 0o600)  # owner only (Windows: the folder's ACL applies)
+            fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+        else:
+            target.write_bytes(data)
         for old in list_versions(path)[keep:]:
             try:
                 old.path.unlink()
@@ -319,9 +346,10 @@ def summarize(name: str, version: bytes, current: bytes | None) -> str:
             return "Saved data"
         if new is None or current is None:
             return f"{len(old)} channels"
-        added = [n for n in old if n not in new]
-        removed = [n for n in new if n not in old]
-        flipped = [n for n in old if n in new and old[n] != new[n]]
+        from msr.status import display_name as _safe_channel
+        added = [_safe_channel(n) for n in old if n not in new]
+        removed = [_safe_channel(n) for n in new if n not in old]
+        flipped = [_safe_channel(n) for n in old if n in new and old[n] != new[n]]
         parts = []
         if added:
             parts.append(f"brings back {len(added)} ({_list(added)})")

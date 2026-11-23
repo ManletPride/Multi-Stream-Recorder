@@ -302,11 +302,17 @@ class Guard:
             return "The original place is the PendingDeletion folder itself."
         if len(rel) < 2:
             return "The original place is not a channel folder."
+        if os.path.lexists(top) and is_link_path(top):
+            return "The destination library folder is a link or junction."
+        if lib.classify(rel[-1], category) not in DELETABLE_KINDS:
+            return "That destination file type is not a recording, clip or screenshot."
         current = top
         for part in rel[:-1]:
             current = os.path.join(current, part)
             if os.path.lexists(current) and is_link_path(current):
                 return "A folder on the way is a link or junction."
+        if self.data_dir and inside(self.data_dir, top) and inside(path, self.data_dir):
+            return "The destination is inside MSR's data folder."
         if self.channel_busy(rel[0], "/".join(rel[1:-1])):
             return "This channel is recording right now."
         if os.path.lexists(path):
@@ -607,10 +613,19 @@ def pending_mover(guard: Guard, clock: Callable[[], float] = time.time) -> Calla
         pending_top = guard.library.pending_top
         if not pending_top:
             raise OSError("There is no recordings folder to hold PendingDeletion.")
+        if os.path.lexists(pending_top) and is_link_path(pending_top):
+            raise OSError("PendingDeletion is a link or junction.")
         folder = os.path.join(pending_top, *item.rel[:-1])
         if not inside(folder, pending_top) and _norm(folder) != _norm(pending_top):
             raise OSError("The PendingDeletion path would leave its folder.")
+        cur = pending_top
+        for part in item.rel[:-1]:
+            cur = os.path.join(cur, part)
+            if os.path.lexists(cur) and is_link_path(cur):
+                raise OSError("A folder inside PendingDeletion is a link or junction.")
         os.makedirs(folder, exist_ok=True)
+        if not inside(os.path.realpath(folder), os.path.realpath(pending_top)) and _norm(os.path.realpath(folder)) != _norm(os.path.realpath(pending_top)):
+            raise OSError("The PendingDeletion destination resolves outside its folder.")
         dest = unique_path(folder, os.path.basename(item.path))
         shutil.move(item.path, dest)
         now = clock()

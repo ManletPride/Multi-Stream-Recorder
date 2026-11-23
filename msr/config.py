@@ -4,6 +4,7 @@ import io
 import logging
 import os
 import shutil
+import subprocess
 import configparser
 
 from msr import dpapi, history, storage
@@ -98,6 +99,56 @@ def _coerce_specs():
 
 
 FISHTANK_PASSWORD_ENV = "MSR_FISHTANK_PASSWORD"
+SUBPROCESS_SECRET_ENV = (FISHTANK_PASSWORD_ENV,)
+
+
+def clean_subprocess_env(env=None):
+    """Return a copy of *env* (default ``os.environ``) with MSR secret env vars removed.
+
+    External child tools (``ffmpeg``, ``ffprobe``, ``streamlink``, ``yt-dlp``,
+    ``pip``, ``git``, file browsers) never need ``MSR_FISHTANK_PASSWORD`` and
+    should not inherit it in their process environment.
+    """
+    src = os.environ if env is None else env
+    return {k: v for k, v in src.items() if k not in SUBPROCESS_SECRET_ENV}
+
+
+def install_subprocess_env_filter(subprocess_module=subprocess):
+    """Strip ``SUBPROCESS_SECRET_ENV`` from every ``subprocess.Popen`` (once).
+
+    Composes cleanly with ``msr.nowindow.install()`` on Windows and works on all
+    platforms. When no secret env var is set, ``args`` and ``kwargs`` are left
+    untouched. Returns True if installed on this call.
+    """
+    popen = subprocess_module.Popen
+    if getattr(popen, "_msr_env_filtered", False):
+        return False
+
+    class _FilteredEnvPopen(popen):
+        _msr_env_filtered = True
+
+        def __init__(self, *args, **kwargs):
+            if len(args) > 10:
+                env = args[10]
+                if env is None:
+                    if any(k in os.environ for k in SUBPROCESS_SECRET_ENV):
+                        args = (*args[:10], clean_subprocess_env(), *args[11:])
+                elif any(k in env for k in SUBPROCESS_SECRET_ENV):
+                    args = (*args[:10], clean_subprocess_env(env), *args[11:])
+            else:
+                env = kwargs.get("env")
+                if env is None:
+                    if any(k in os.environ for k in SUBPROCESS_SECRET_ENV):
+                        kwargs["env"] = clean_subprocess_env()
+                elif any(k in env for k in SUBPROCESS_SECRET_ENV):
+                    kwargs["env"] = clean_subprocess_env(env)
+            super().__init__(*args, **kwargs)
+
+    subprocess_module.Popen = _FilteredEnvPopen
+    return True
+
+
+install_subprocess_env_filter()
 
 
 # Credentials are not stored in the clear. Windows: ``<key>_dpapi`` (DPAPI), and
@@ -121,9 +172,13 @@ def _note_once(msg):
         logging.getLogger().warning(msg)
 
 
-def _decrypt_box(blob: str):
+def _secret_aad(section: str, key: str) -> bytes:
+    return f"config:{str(section).lower()}.{str(key).lower()}".encode("utf-8")
+
+
+def _decrypt_box(blob: str, aad: bytes = b""):
     from msr import filecrypt
-    return filecrypt.decrypt_text(blob)
+    return filecrypt.decrypt_text(blob, aad=aad)
 
 
 def read_secret(config, section, key):
@@ -136,11 +191,12 @@ def read_secret(config, section, key):
     plain = str(config.get(section, key, fallback='') or '')
     if plain.strip():
         return plain
+    aad = _secret_aad(section, key)
     box = str(config.get(section, key + '_box', fallback='') or '').strip()
     enc = str(config.get(section, key + '_dpapi', fallback='') or '').strip()
     if box and not dpapi.available():
         try:
-            return _decrypt_box(box)
+            return _decrypt_box(box, aad=aad)
         except Exception:
             _note_once(f"{section} {key} in config.ini can't be decrypted on this PC/user - "
                        "please enter it again in Options")
@@ -152,7 +208,7 @@ def read_secret(config, section, key):
         return ''
     if dpapi.available():
         try:
-            return dpapi.decrypt_text(enc)
+            return dpapi.decrypt_text(enc, entropy=aad)
         except Exception:
             pass
     _note_once(f"{section} {key} in config.ini can't be decrypted on this PC/user - "
@@ -356,9 +412,23 @@ class Config:
             n += 1
             target = f"{self.config_file}.broken-{stamp}-{n}"
         try:
-            shutil.copy2(self.config_file, target)
+            with open(self.config_file, "rb") as src:
+                raw = src.read()
+            cleaned = history.strip_secrets(raw)
+            if os.name != "nt":
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "wb") as dst:
+                    dst.write(cleaned)
+            else:
+                with open(target, "wb") as dst:
+                    dst.write(cleaned)
+                try:
+                    from msr.winacl import restrict_to_current_user
+                    restrict_to_current_user(target)
+                except Exception:
+                    pass
             logging.warning(
-                f"config.ini had a problem ({self.load_problem}); the original is saved as "
+                f"config.ini had a problem ({self.load_problem}); a secret-stripped copy is saved as "
                 f"{os.path.basename(target)} before it is rewritten")
         except OSError as e:
             logging.warning(f"Could not save a copy of the unreadable config.ini first: {e}")
@@ -399,7 +469,7 @@ class Config:
         if dpapi.available():
             for section, key in self._plain_secrets():
                 try:
-                    enc = dpapi.encrypt_text(self.get(section, key))
+                    enc = dpapi.encrypt_text(self.get(section, key), entropy=_secret_aad(section, key))
                 except Exception:
                     logging.warning(f"Could not encrypt {section} {key}; left as it was")
                     continue
@@ -409,7 +479,7 @@ class Config:
         from msr import filecrypt
         for section, key in self._plain_secrets():
             try:
-                enc = filecrypt.encrypt_text(self.get(section, key))
+                enc = filecrypt.encrypt_text(self.get(section, key), aad=_secret_aad(section, key))
             except Exception:
                 logging.warning(
                     f"{section}.{key} could not be encrypted and was left unchanged. "

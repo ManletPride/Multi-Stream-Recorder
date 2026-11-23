@@ -159,6 +159,12 @@ class Case(unittest.TestCase):
         self.assertEqual(self.saved[-1], ("Control", "enabled", "false"))
         self.assertIn("restarting MSR", p.message.cget("text"))
 
+    def test_telegram_details_start_collapsed_when_disabled(self):
+        p = self.make()
+        self.assertEqual(p._tg_details.winfo_manager(), "")
+        p._set_tg_expanded(True)
+        self.assertEqual(p._tg_details.winfo_manager(), "pack")
+
 
 if __name__ == "__main__":
     unittest.main()

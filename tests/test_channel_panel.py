@@ -42,8 +42,83 @@ class TestPlatformDisplay(unittest.TestCase):
         self.assertEqual(cp.guess_platform_from_text("twitch:foo"), ("twitch", "foo"))
         self.assertEqual(cp.guess_platform_from_text("https://kick.com/bar"), ("kick", "bar"))
         self.assertEqual(cp.guess_platform_from_text("https://www.twitch.tv/baz/"), ("twitch", "baz"))
+        self.assertEqual(cp.guess_platform_from_text("https://m.twitch.tv/baz"), ("twitch", "baz"))
+        self.assertEqual(cp.guess_platform_from_text("https://rumble.com/c/NewsmaxTV"), ("rumble", "NewsmaxTV"))
+        self.assertEqual(cp.guess_platform_from_text("https://rumble.com/user/NewsmaxTV/live"), ("rumble", "NewsmaxTV"))
+        self.assertEqual(cp.guess_platform_from_text("https://www.youtube.com/@LofiGirl"), ("youtube", "@LofiGirl"))
+        self.assertEqual(cp.guess_platform_from_text("https://www.youtube.com/@LofiGirl/live"), ("youtube", "@LofiGirl"))
+        self.assertEqual(cp.guess_platform_from_text("https://m.youtube.com/@LofiGirl/streams"), ("youtube", "@LofiGirl"))
+        self.assertEqual(cp.guess_platform_from_text("https://www.youtube.com/channel/UC1234567890abcdef"),
+                         ("youtube", "UC1234567890abcdef"))
+        self.assertEqual(cp.guess_platform_from_text("https://www.youtube.com/watch?v=FaE2vM9h0ok&t=5s"),
+                         ("youtube", "FaE2vM9h0ok"))
+        self.assertEqual(cp.guess_platform_from_text("https://youtu.be/FaE2vM9h0ok?si=abc"),
+                         ("youtube", "FaE2vM9h0ok"))
+        self.assertEqual(cp.guess_platform_from_text("https://www.youtube.com/live/FaE2vM9h0ok"),
+                         ("youtube", "FaE2vM9h0ok"))
+        self.assertEqual(cp.guess_platform_from_text("https://www.tiktok.com/@qvc"), ("tiktok", "qvc"))
+        self.assertEqual(cp.guess_platform_from_text("https://www.tiktok.com/@qvc/live?foo=1"), ("tiktok", "qvc"))
         self.assertEqual(cp.guess_platform_from_text("https://x.com/live"), ("custom", "https://x.com/live"))
+        self.assertEqual(cp.guess_platform_from_text("https://www.youtube.com/playlist?list=PL123"),
+                         ("custom", "https://www.youtube.com/playlist?list=PL123"))
         self.assertEqual(cp.guess_platform_from_text("plain"), (None, "plain"))
+
+
+class TestPreflightAndGuiGuards(unittest.TestCase):
+    def test_kick_requires_streamlink_not_ytdlp(self):
+        issues = cp.preflight_dependency_issues(
+            ["gmhikaru"], has_streamlink=False, has_ytdlp=True, has_ffmpeg=True, has_deno=False)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("streamlink", issues[0])
+        # Kick-only with streamlink installed should NOT warn about missing yt-dlp or deno
+        self.assertEqual(
+            cp.preflight_dependency_issues(["gmhikaru"], has_streamlink=True, has_ytdlp=False,
+                                           has_ffmpeg=True, has_deno=False),
+            [],
+        )
+
+    def test_youtube_warns_on_missing_ytdlp_and_deno(self):
+        issues = cp.preflight_dependency_issues(
+            ["youtube:@LofiGirl"], has_streamlink=False, has_ytdlp=False, has_ffmpeg=True, has_deno=False)
+        blob = "\n".join(issues)
+        self.assertIn("yt-dlp", blob)
+        self.assertIn("Deno", blob)
+        self.assertNotIn("streamlink", blob)
+
+    def test_fishtank_needs_neither_streamlink_nor_ytdlp(self):
+        self.assertEqual(
+            cp.preflight_dependency_issues(["fishtank:director"], has_streamlink=False, has_ytdlp=False,
+                                           has_ffmpeg=True, has_deno=False),
+            [],
+        )
+
+    def test_gui_status_timer_single_chain_and_quit_confirmation(self):
+        import ast
+        from pathlib import Path
+        gui_path = Path(__file__).resolve().parent.parent / "msr" / "gui.py"
+        src = gui_path.read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        # Only _schedule_status_refresh may call root.after(..., refresh_status)
+        direct_calls = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_schedule_status_refresh":
+                continue
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "after" and len(node.args) >= 2
+                    and isinstance(node.args[1], ast.Name) and node.args[1].id == "refresh_status"):
+                direct_calls.append(node.lineno)
+        # Exclude the single line inside _schedule_status_refresh
+        sched = next(n for n in ast.walk(tree)
+                     if isinstance(n, ast.FunctionDef) and n.name == "_schedule_status_refresh")
+        outside = [ln for ln in direct_calls if not (sched.lineno <= ln <= sched.end_lineno)]
+        self.assertEqual(outside, [], f"direct root.after(..., refresh_status) outside helper: {outside}")
+        # Ctrl+Q goes through on_close(), which prompts before quitting active recordings
+        self.assertIn('root.bind("<Control-q>", lambda e: on_close())', src)
+        on_close = next(n for n in ast.walk(tree)
+                        if isinstance(n, ast.FunctionDef) and n.name == "on_close")
+        close_src = ast.get_source_segment(src, on_close) or ""
+        self.assertIn("ask_yes_no", close_src)
+        self.assertIn("_active_recording_count", close_src)
 
 
 class TestLiveState(unittest.TestCase):

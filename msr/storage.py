@@ -87,10 +87,28 @@ def classify(exc):
 def probe_dir(path):
     """Create ``path`` if needed and write/remove a tiny file in it."""
     try:
-        os.makedirs(path, exist_ok=True)
+        if os.path.islink(path):
+            return Probe(False, "denied", REASONS["denied"])
+        if os.name != "nt":
+            base = _default_fallback_base()
+            if _inside(path, base):
+                os.makedirs(base, mode=0o700, exist_ok=True)
+                try:
+                    os.chmod(base, 0o700)
+                except OSError:
+                    pass
+            os.makedirs(path, mode=0o700, exist_ok=True)
+        else:
+            os.makedirs(path, exist_ok=True)
         probe = os.path.join(path, PROBE_NAME)
-        with open(probe, "wb") as fh:
-            fh.write(b"ok")
+        if os.name != "nt":
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(probe, flags, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(b"ok")
+        else:
+            with open(probe, "wb") as fh:
+                fh.write(b"ok")
         try:
             os.remove(probe)
         except OSError:
@@ -120,6 +138,20 @@ def is_drive_error(exc, path):
     return classify(exc) in UNAVAILABLE_KINDS and not quick_check(path).ok
 
 
+def _default_fallback_base():
+    """Parent folder for the default fallback recordings directory.
+
+    Windows uses %TEMP%\\MultiStreamRecorder (already per-user and disk-backed).
+    POSIX uses $XDG_CACHE_HOME/multi-stream-recorder (~/.cache/multi-stream-recorder):
+    user-private (0700) and disk-backed instead of world-writable / tmpfs /tmp.
+    """
+    if os.name == "nt":
+        return os.path.join(tempfile.gettempdir(), "MultiStreamRecorder")
+    xdg = (os.environ.get("XDG_CACHE_HOME") or "").strip()
+    base = os.path.abspath(os.path.expanduser(xdg)) if xdg else os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "multi-stream-recorder")
+
+
 def fallback_root(setting, primary=None):
     """The fallback recording folder for a ``[Paths] fallback_dir`` value (None = disabled).
 
@@ -133,7 +165,7 @@ def fallback_root(setting, primary=None):
         return os.path.abspath(os.path.expandvars(os.path.expanduser(value.strip('"'))))
     key = os.path.normcase(os.path.abspath(primary or "default"))
     tag = hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()[:8]
-    return os.path.join(tempfile.gettempdir(), "MultiStreamRecorder", f"Recordings-{tag}")
+    return os.path.join(_default_fallback_base(), f"Recordings-{tag}")
 
 
 def _inside(path, folder):
@@ -240,8 +272,15 @@ def reconcile_fallback(fallback, primary, logger=None, min_age=MIN_AGE_SECONDS, 
     moved_ts = []
     from msr.util import linux_reuses_dir_case, reuse_path
     reuse_case = linux_reuses_dir_case()
+    if not fallback or os.path.islink(fallback):
+        return ReturnSummary(0, 0, 0, [])
+    fallback_real = os.path.realpath(fallback)
+    entries = []
     try:
-        entries = [(d, n) for d, _dirs, names in os.walk(fallback) for n in names]
+        for d, dirs, names in os.walk(fallback, followlinks=False):
+            dirs[:] = [sub for sub in dirs if not os.path.islink(os.path.join(d, sub))]
+            for n in names:
+                entries.append((d, n))
     except OSError:
         entries = []
     for folder, name in entries:
@@ -251,6 +290,11 @@ def reconcile_fallback(fallback, primary, logger=None, min_age=MIN_AGE_SECONDS, 
             continue
         src = os.path.join(folder, name)
         try:
+            if os.path.islink(src):
+                continue
+            src_real = os.path.realpath(src)
+            if os.path.commonpath([fallback_real, src_real]) != fallback_real:
+                continue
             if now() - os.path.getmtime(src) < min_age:
                 young += 1
                 continue

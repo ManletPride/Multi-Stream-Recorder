@@ -237,5 +237,16 @@ class TestCookieWarningPanel(unittest.TestCase):
         self.assertEqual(p.cookie_warn.cget("text"), "")
 
 
+class TestTokenLockReentrancy(unittest.TestCase):
+    def test_nested_token_lock_same_thread_does_not_deadlock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with te.token_lock(tmp, timeout=0.5):
+                with te.token_lock(tmp, timeout=0.5):
+                    te.save_token(tmp, {"access_token": "a", "refresh_token": "r",
+                                        "client_id": "c", "expires_at": 1})
+                te.clear_token(tmp)
+            self.assertIsNone(te.load_token(tmp))
+
+
 if __name__ == "__main__":
     unittest.main()

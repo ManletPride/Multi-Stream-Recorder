@@ -82,21 +82,29 @@ class Wave:
 
     def window_columns(self, t0: float, t1: float, width: int) -> list[float]:
         """One 0..1 height per pixel for t0..t1: the loudest reading under each column."""
-        with self.lock:
-            data = bytes(self.levels)
-        count = len(data)
-        if width <= 0 or t1 <= t0 or not count:
+        if width <= 0 or t1 <= t0:
             return []
+        with self.lock:
+            total = len(self.levels)
+            if not total:
+                return []
+            lo = max(0, int(t0 * RATE_HZ))
+            hi = min(total, max(lo, int(math.ceil(t1 * RATE_HZ))))
+            data = bytes(self.levels[lo:hi])
         per = (t1 - t0) * RATE_HZ / width
         out = [0.0] * width
+        data_len = len(data)
         for x in range(width):
             first = int(t0 * RATE_HZ + x * per)
-            if first >= count:
+            if first >= total:
                 break
             if first < 0:
                 continue
-            last = min(count, max(first + 1, int(math.ceil(t0 * RATE_HZ + (x + 1) * per))))
-            out[x] = height_of(max(data[first:last]))
+            last = min(total, max(first + 1, int(math.ceil(t0 * RATE_HZ + (x + 1) * per))))
+            a_idx = max(0, first - lo)
+            b_idx = min(data_len, last - lo)
+            if a_idx < b_idx:
+                out[x] = height_of(max(data[a_idx:b_idx]))
         return out
 
 

@@ -190,5 +190,34 @@ class TestListenerCentrifugo(unittest.TestCase):
         self.assertGreater(self.l._token_expires, 0)
 
 
+class BatchAndCapOptimizationTests(unittest.TestCase):
+    def test_subscribe_batch_saves_id_cache_once_and_checks_cap_first(self):
+        from unittest import mock
+        from msr.kick_realtime import CENTRIFUGO_MAX_SUBS
+
+        with tempfile.TemporaryDirectory() as tmp:
+            class C:
+                config_file = os.path.join(tmp, "config.ini")
+
+            listener = KickPushListener(_Rec(), C())
+            listener._protocol = "centrifugo"
+            listener._connected = True
+            listener._ws = _WS()
+            fake_lookup = lambda slug: {"id": 100 + len(slug), "livestream": None}
+            with mock.patch("msr.presence.fetch_kick_channel", side_effect=fake_lookup), \
+                    mock.patch("msr.recorder.HAS_CURL_CFFI", True), \
+                    mock.patch.object(listener, "_save_id_cache", wraps=listener._save_id_cache) as save_spy:
+                listener._subscribe_batch(["alpha", "bravo", "charlie"])
+                self.assertEqual(save_spy.call_count, 1)
+                self.assertEqual(set(listener._ids), {"alpha", "bravo", "charlie"})
+
+            # Once at CENTRIFUGO_MAX_SUBS, _subscribe must not call _resolve_channel_id
+            for i in range(CENTRIFUGO_MAX_SUBS):
+                listener._cf_channels[f"s{i}"] = f"channel.{i}"
+            with mock.patch.object(listener, "_resolve_channel_id") as res_spy:
+                listener._subscribe("overflow_slug")
+                res_spy.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -140,6 +140,15 @@ def apply_staged_update(staging, target):
                if not _same_bytes(os.path.join(staging, rel), os.path.join(target, rel))]
         if bad:
             raise RuntimeError(f"copied files differ from the update: {', '.join(bad[:3])}")
+        retired = set(old_files) - set(new_files)
+        for rel in retired:
+            path = os.path.join(target, rel)
+            try:
+                if os.path.isfile(path) or os.path.islink(path):
+                    os.remove(path)
+            except OSError:
+                pass
+        _prune_empty_program_dirs(target)
     except Exception as exc:
         rollback(target, backup, old_files, new_files)
         raise RuntimeError(f"the update could not be applied and was rolled back ({exc})") from exc
@@ -152,6 +161,37 @@ def apply_staged_update(staging, target):
                     "If you run MSR on your own Python (MSR_NO_VENV), run there:\n"
                     "  python -m pip install -r requirements.txt\n"
                     f"in {target}")
+
+
+def _prune_empty_program_dirs(target):
+    """Remove directories left empty under PROGRAM_DIRS after retiring old files."""
+    for top in PROGRAM_DIRS:
+        base = os.path.join(target, top)
+        if not os.path.isdir(base):
+            continue
+        for dirpath, dirnames, filenames in os.walk(base, topdown=False):
+            if os.path.abspath(dirpath) == os.path.abspath(base):
+                continue
+            rel = os.path.relpath(dirpath, target)
+            parts = rel.replace("\\", "/").split("/")
+            if any(p.lower() in PRIVATE_DIRS for p in parts):
+                continue
+            try:
+                if not os.listdir(dirpath):
+                    os.rmdir(dirpath)
+            except OSError:
+                pass
+
+
+def _cleanup_staging(staging):
+    """Remove the temporary staging folder (and its msr-update-* parent if present)."""
+    try:
+        shutil.rmtree(staging, ignore_errors=True)
+        parent = os.path.dirname(os.path.abspath(staging))
+        if os.path.basename(parent).startswith("msr-update-"):
+            shutil.rmtree(parent, ignore_errors=True)
+    except OSError:
+        pass
 
 
 def rollback(target, backup, old_files, new_files):
@@ -204,6 +244,7 @@ def main(argv=None):
         time.sleep(0.5)
         apply_staged_update(args.staging, args.target)
         relaunch(args.python, args.launcher, args.target, args.arg)
+        _cleanup_staging(args.staging)
     except Exception as exc:
         _write_text(err_path, str(exc))
         return 1

@@ -132,5 +132,27 @@ class FindActiveRecordingFileTests(unittest.TestCase):
             self.assertEqual(found, new_ts)
 
 
+class VerifyDurationReuseTests(unittest.TestCase):
+    def test_verify_remux_output_reuses_known_source_duration(self):
+        import logging
+        import tempfile
+        from unittest import mock
+        from msr import worker
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = os.path.join(tmp, "a.ts")
+            out = os.path.join(tmp, "a.mp4")
+            for p in (raw, out):
+                with open(p, "wb") as fh:
+                    fh.write(b"x" * 20_000)
+            with mock.patch.object(worker, "_probe_duration", return_value=120.0) as probe_spy:
+                ok, reason = worker.verify_remux_output(raw, out, "ffmpeg", logging.getLogger("test"),
+                                                        min_bytes=1024, source_duration=120.0)
+            self.assertTrue(ok, reason)
+            # Only the output MP4 was probed — the raw .ts was NOT re-scanned
+            self.assertEqual(probe_spy.call_count, 1)
+            self.assertEqual(probe_spy.call_args[0][1], out)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -199,6 +199,27 @@ def _windows_physical_drive_for_letter(letter: str) -> str | None:
             pass
 
 
+_PARTITIONS_TTL_S = 30.0
+_partitions_cache: dict[bool, tuple[float, list]] = {}
+_win_drive_fail_cache: dict[str, float] = {}
+_WIN_DRIVE_FAIL_TTL_S = 60.0
+
+
+def _cached_partitions(all_parts: bool):
+    if not HAS_PSUTIL or psutil is None:
+        return []
+    now = time.monotonic()
+    hit = _partitions_cache.get(all_parts)
+    if hit is not None and (now - hit[0]) < _PARTITIONS_TTL_S:
+        return hit[1]
+    try:
+        parts = psutil.disk_partitions(all=all_parts)
+    except Exception:
+        parts = []
+    _partitions_cache[all_parts] = (now, parts)
+    return parts
+
+
 def disk_counter_key(path: str, counters=None) -> str | None:
     """``perdisk=True`` key for the disk that holds *path*, or None."""
     if not path or not HAS_PSUTIL or psutil is None:
@@ -211,24 +232,22 @@ def disk_counter_key(path: str, counters=None) -> str | None:
     if os.name == "nt":
         drive = os.path.splitdrive(os.path.abspath(path))[0]
         letter = (drive or "").rstrip("\\")
+        fail_at = _win_drive_fail_cache.get(letter)
+        if fail_at is not None and (time.monotonic() - fail_at) < _WIN_DRIVE_FAIL_TTL_S:
+            return None
         key = _windows_physical_drive_for_letter(letter)
         if key and key in counters:
+            _win_drive_fail_cache.pop(letter, None)
             return key
+        if key is None and letter:
+            _win_drive_fail_cache[letter] = time.monotonic()
         return None
-    try:
-        parts = psutil.disk_partitions(all=True)
-    except Exception:
-        parts = []
+    parts = _cached_partitions(True)
     return posix_disk_counter_key(path, parts, counters.keys())
 
 
 def _safe_partitions():
-    if not HAS_PSUTIL or psutil is None:
-        return []
-    try:
-        return psutil.disk_partitions(all=False)
-    except Exception:
-        return []
+    return _cached_partitions(False)
 
 
 def _counter_write(io) -> tuple[int, float | None]:
@@ -565,7 +584,6 @@ class IoSampler:
         busy_frac = None
         recv_bps = None
         msr_bps = None
-        label = volume_label(self.path)
 
         if disk is not None:
             label, write_bytes, busy_ms = disk
@@ -585,6 +603,7 @@ class IoSampler:
                 self._trim_disk_window(now)
                 write_bps, busy_frac = posix_disk_window(self._disk_window)
         else:
+            label = volume_label(self.path)
             self._write_bytes = None
             self._busy_ms = None
             self._disk_window.clear()

@@ -142,7 +142,8 @@ def poll_twitch(name):
     from msr.platforms import check_stream_streamlink
     quiet = logging.getLogger("msr.presence.quiet")
     quiet.propagate = False
-    quiet.addHandler(logging.NullHandler())
+    if not quiet.handlers:
+        quiet.addHandler(logging.NullHandler())
     try:
         res = check_stream_streamlink(f"https://twitch.tv/{name}", quiet, 30)
     except Exception:

@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Architecture & Performance
+- **On-demand worker architecture (`msr/poller.py`):** Offline channels are now monitored by a single lightweight in-process `PollingCoordinator` instead of spawning one idle Python worker process per channel. Startup checks are staggered, Twitch channels are checked in batches via Helix `GET /helix/streams` (up to 100 logins per request when signed in), Kick uses a lightweight HTTP API probe, Fishtank shares a single authenticated session across cameras, and a worker process is spawned only when a channel goes live (handing back to the coordinator once the stream ends).
+- **GUI decomposition:** Split `main_gui()` in `msr/gui.py` into dedicated components (`msr/roster_panel.py`, `msr/status_panel.py`, `msr/preview_strip.py`, `msr/bottom_bar.py`), cutting `msr/gui.py` by more than half and removing all `except NameError:` forward-reference guards.
+- **Global remux concurrency cap:** Limited simultaneous `.ts` → `.mp4` remuxes across all workers and background cleanup to 2 (`MAX_CONCURRENT_REMUXES = 2` via a shared `BoundedSemaphore`), preventing disk-I/O thrashing when multiple streams end at once.
+- **Pinned live preview optimization:** Pinning a 960×540 preview now runs a single 960×540 `ffmpeg` grab and downsamples it in-process with Pillow for the 160×90 strip tile instead of spawning a second `ffmpeg` process. Preview thumbnails now live in a private XDG cache directory (`$XDG_CACHE_HOME/multi-stream-recorder/previews`, mode `0700`) and are cleaned up on quit.
+- **Clip Editor inner-loop speedups:** `apply_gain()` in `msr/clip_audio.py` uses a cached 65,536-entry signed-int16 lookup table instead of a per-sample Python loop, and `VideoFeed._read_raw()` in `msr/clip_editor.py` reuses a single pre-allocated `bytearray` instead of reallocating and concatenating chunks per frame.
+- **TikTok offline check efficiency:** Cached `cookies.txt` parsing by `(mtime_ns, size)`, short-circuited webcast fallback on confirmed offline rooms (`status == 4`), and added a 300 s cooldown between webcast fallback probes per channel in `msr/poller.py`.
+- **Lower idle overhead:** `StatusWriter` skips rewriting `msr_status.json` when unchanged (keeping a 60 s heartbeat), `cleanup_queue()` caches the `Recorded/` scan using directory mtimes (60 s idle TTL), `LogFollower` tracks filtered line counts in O(1) instead of rescanning the Text widget, and the Telegram uploader sleeps in `Event.wait()` instead of polling in a tight loop when idle.
+
+### Security
+- **Context-bound encryption (v2):** Encrypted values (`msr/filecrypt.py`, `msr/dpapi.py`) bind each ciphertext to its config key / file purpose via AES-GCM AAD (non-Windows) or DPAPI optional entropy (Windows), preventing ciphertext-swapping across fields while remaining backward-compatible with v1 blobs.
+- **Worker credential scoping & environment hardening:** `[Fishtank]` credentials are passed only to Fishtank workers, Telegram credentials stay in the main process, and `MSR_FISHTANK_PASSWORD` is stripped from child tool environments (`ffmpeg`, `ffprobe`, `streamlink`, `yt-dlp`, `pip`, `git`, and non-Fishtank workers).
+- **Remote control path/binary guards:** `msr_ctl` / `ControlServer` now refuses (`forbidden`) remote `config set` changes to host paths and executable binaries (`Advanced.ffmpeg_path`, `Clipping.clips_dir`, `Paths.channels_file`, `Paths.fallback_dir`, `GUI.window_state_file`).
+- **Backup & temp-path hardening:** `config.ini.broken-*` backups strip secrets just like `msr_history/`; POSIX fallback storage and preview caches use private `0700` XDG cache directories instead of world-shared `/tmp`; the Twitch token lock file moved to `data_dir/.twitch_token.lock`; custom-URL credentials are redacted in status and events.
+- **Documentation:** Documented multi-user Linux `/proc/<pid>/cmdline` visibility and `secret.key` vs. OS keyring tradeoffs in `SECURITY.md`.
+
+### UX & Cross-Platform
+- **Missing-`ffmpeg` GUI banner:** Opening the window without `ffmpeg` now shows an actionable banner with a quick link to Options instead of failing silently later.
+- **Tray & quit behavior:** Added `[GUI] minimize_to_tray` and a quit confirmation prompt when recordings are active; collapsed `[Telegram]` settings by default in Options; clearly marked `[Sounds]` as Windows-only; bumped minimum window size to 1060×620 so controls never clip.
+- **URL auto-detection:** Adding a YouTube, TikTok, or Rumble channel URL automatically maps it to the native platform key instead of `custom:`.
+- **Windows & Linux launchers:** `run_msr.bat` now falls back across `py`, `python`, and `python3`; Linux `.venv` setup installs optional `PyGObject` on a best-effort basis so missing native dev headers never block first-run setup.
+- **Updater housekeeping:** In-app updates now also update `run_msr.pyw`, remove retired source files, and clean up staging directories.
+
+### Fixed
+- **Twitch token refresh deadlock:** Fixed a non-reentrant `token_lock` acquisition path in `msr/twitch_eventsub.py` that could hang when refreshing an expired token under lock.
+- **TikTok stream resolution:** Separated TikTok live-check probes from recording stream-URL resolution so recording starts reliably without stale probe URLs.
+
 ## v3.2.0 (2026-11-21)
 
 Release notes: [docs/release_notes/RELEASE_NOTES_v3.2.0.md](docs/release_notes/RELEASE_NOTES_v3.2.0.md).

@@ -68,6 +68,11 @@ class VideoFeed:
             w, h = size
             self._header = f"P6\n{w} {h}\n255\n".encode("ascii")
             self._frame_bytes = w * h * 3
+            # Pre-allocate one reusable buffer holding header + raw RGB payload so
+            # each decoded frame copies once (bytes(buf)) instead of three times.
+            self._raw_buf = bytearray(len(self._header) + self._frame_bytes)
+            self._raw_buf[:len(self._header)] = self._header
+            self._raw_view = memoryview(self._raw_buf)[len(self._header):]
         try:
             self.proc = (spawn or self._spawn)(cmd)
         except OSError:
@@ -81,14 +86,13 @@ class VideoFeed:
                                 bufsize=1 << 20, **no_window_kwargs())
 
     def _read_raw(self):
-        buf = bytearray(self._frame_bytes)
-        view, got = memoryview(buf), 0
+        view, got = self._raw_view, 0
         while got < self._frame_bytes:
             n = self.proc.stdout.readinto(view[got:])
             if not n:
                 return None
             got += n
-        return self._header + bytes(buf)
+        return bytes(self._raw_buf)
 
     def _run(self):
         n = 0
@@ -179,6 +183,10 @@ class ClipEditor:
         self.shown = 0              # frames shown while playing (measurements, tests)
         self._vinfo_reader = lambda p: core.video_info(p, self.ffprobe)
         self._focus_bind = None
+        self._resume_after_scrub = False
+        self._last_playhead_x: int | None = None
+        self._last_pos_text = ""
+        self._last_playhead_tick = 0.0
 
         self.win, body = dialogs.new_dialog(parent, f"Clip Editor \u2014 {title_name or os.path.basename(src)}",
                                             padding=10)
@@ -225,8 +233,9 @@ class ClipEditor:
         self.timeline = tk.Canvas(body, height=TIMELINE_H, highlightthickness=0, bd=0)
         self.timeline.grid(row=2, column=0, sticky="ew")
         self.timeline.bind("<Configure>", lambda _e: self._draw())
-        self.timeline.bind("<Button-1>", self._scrub)
-        self.timeline.bind("<B1-Motion>", self._scrub)
+        self.timeline.bind("<Button-1>", self._scrub_start)
+        self.timeline.bind("<B1-Motion>", self._scrub_drag)
+        self.timeline.bind("<ButtonRelease-1>", self._scrub_end)
         self.timeline.bind("<Double-Button-1>", lambda _e: self.zoom_reset())
         bind_wheel(self.timeline, self._wheel)
 
@@ -289,7 +298,10 @@ class ClipEditor:
         self.clips_btn = ttk.Button(actions, text="Clips folder", command=self.open_clips)
         self.clips_btn.pack(side="right", padx=(0, 6))
 
-        self.status = ttk.Label(body, text=HINT, wraplength=660)
+        from msr.clip_audio import linux_audio_hint
+        audio_hint = linux_audio_hint()
+        status_text = f"{HINT}\n{audio_hint}" if audio_hint else HINT
+        self.status = ttk.Label(body, text=status_text, wraplength=660)
         self.status.grid(row=7, column=0, sticky="ew", pady=(8, 0))
         body.bind("<Configure>", lambda e: self.status.configure(wraplength=max(200, e.width - 20)), add="+")
 
@@ -398,8 +410,12 @@ class ClipEditor:
             if val is not None and 6 <= x(val) <= w - 6:
                 c.create_line(x(val), 8, x(val), 38, fill=t["fg"], width=2, tags=("mark_" + label,))
                 c.create_text(x(val), 3, text=label, fill=t["fg"], anchor="n", font=("Segoe UI", 7))
-        if 6 <= x(self.pos) <= w - 6:
-            c.create_line(x(self.pos), 6, x(self.pos), 40, fill=t["select_bg"], width=3, tags=("playhead",))
+        px = x(self.pos)
+        if 6 <= px <= w - 6:
+            c.create_line(px, 6, px, 40, fill=t["select_bg"], width=3, tags=("playhead",))
+            self._last_playhead_x = round(px)
+        else:
+            self._last_playhead_x = None
         a, b = view.span(L)
         if view.zoomed() and L > 0:   # where the window sits in the whole file
             c.create_rectangle(6, 43, w - 6, 46, fill=t["chart_track"], outline="")
@@ -517,7 +533,9 @@ class ClipEditor:
 
     def _labels(self) -> None:
         m = self.marks
-        self.pos_label.configure(text=f"{core.fmt_time(self.pos)} / {core.fmt_time(m.length)}")
+        pos_text = f"{core.fmt_time(self.pos)} / {core.fmt_time(m.length)}"
+        self._last_pos_text = pos_text
+        self.pos_label.configure(text=pos_text)
         self.marks_label.configure(text=f"In {core.fmt_time(m.cut_in) if m.cut_in is not None else '--'}   "
                                         f"Out {core.fmt_time(m.cut_out) if m.cut_out is not None else '--'}   "
                                         f"Clip {core.fmt_time(m.clip_length) if m.clip_length else '--'}")
@@ -526,6 +544,28 @@ class ClipEditor:
         state = "normal" if (m.ready and not self._saving and not self._gone) else "disabled"
         self.save_btn.configure(state=state)
         self.live_btn.configure(text="Jump to live" if self.live else "Jump to end")
+
+    def _update_playhead_only(self) -> None:
+        """Fast-path playback update: move only the playhead line and time label (no canvas/waveform rebuild)."""
+        c = self.timeline
+        w = max(20, c.winfo_width())
+        L = self.marks.length or 0.0
+        ww = w - 12
+        px = 6 + self.view.x(self.pos, ww, L) if L > 0 else 6
+        on_screen = 6 <= px <= w - 6
+        has_item = bool(c.find_withtag("playhead"))
+        if on_screen != has_item:
+            self._draw()
+            return
+        if on_screen:
+            rx = round(px)
+            if rx != self._last_playhead_x:
+                c.coords("playhead", px, 6, px, 40)
+                self._last_playhead_x = rx
+        pos_text = f"{core.fmt_time(self.pos)} / {core.fmt_time(L)}"
+        if pos_text != self._last_pos_text:
+            self._last_pos_text = pos_text
+            self.pos_label.configure(text=pos_text)
 
     def say(self, text: str) -> None:
         self.status.configure(text=text)
@@ -540,10 +580,43 @@ class ClipEditor:
         self.view.follow(self.pos, self.marks.length or 0.0)
         self._draw()
 
-    def _scrub(self, event) -> None:
+    def _event_time(self, event) -> float:
         w = max(10, self.timeline.winfo_width())
         L = self.marks.length or 0.0
-        self.seek(self.view.t(event.x - 6, w - 12, L))
+        return self.view.t(event.x - 6, w - 12, L)
+
+    def _scrub(self, event) -> None:
+        self.seek(self._event_time(event))
+
+    def _scrub_start(self, event) -> None:
+        if self.playing:
+            # Pause once on drag-start instead of tearing down audio/video on every motion pixel
+            self._resume_after_scrub = True
+            self._stop_playback(wait=False)
+            self.pos = min(max(0.0, self._event_time(event)), self.marks.length or 0.0)
+            self.view.follow(self.pos, self.marks.length or 0.0)
+            self._draw()
+            return
+        self._resume_after_scrub = False
+        self._scrub(event)
+
+    def _scrub_drag(self, event) -> None:
+        if self._resume_after_scrub:
+            L = self.marks.length or 0.0
+            prev_span = self.view.span(L)
+            self.pos = min(max(0.0, self._event_time(event)), L)
+            self.view.follow(self.pos, L)
+            if self.view.span(L) != prev_span:
+                self._draw()
+            else:
+                self._update_playhead_only()
+            return
+        self._scrub(event)
+
+    def _scrub_end(self, _event) -> None:
+        if self._resume_after_scrub:
+            self._resume_after_scrub = False
+            self._start_playback(self.pos, self._stop_at)
 
     def mark_in(self) -> None:
         self.marks.set_in(self.pos)
@@ -584,7 +657,7 @@ class ClipEditor:
 
     # ------------------------------------------------------------- playback
     def _start_playback(self, t: float, stop_at: float | None) -> None:
-        self._stop_playback()
+        self._stop_playback(wait=False)
         if self._gone:
             return
         self.pos, self._stop_at = t, stop_at
@@ -604,17 +677,29 @@ class ClipEditor:
         self.playing = True
         self._draw()
 
-    def _stop_playback(self) -> None:
+    def _stop_playback(self, wait: bool = True) -> None:
         self.playing = False
-        if self.audio is not None:
-            try:
-                self.audio.close()
-            except Exception:
-                pass
-            self.audio = None
-        if self.video is not None:
-            self.video.close()
-            self.video = None
+        old_audio, self.audio = self.audio, None
+        old_video, self.video = self.video, None
+        if old_audio is None and old_video is None:
+            return
+
+        def _cleanup():
+            if old_audio is not None:
+                try:
+                    old_audio.close()
+                except Exception:
+                    pass
+            if old_video is not None:
+                try:
+                    old_video.close()
+                except Exception:
+                    pass
+
+        if wait:
+            _cleanup()
+        else:
+            threading.Thread(target=_cleanup, daemon=True, name="clip-stop").start()
 
     def _clock(self) -> float:
         sink = getattr(self.audio, "sink", None)
@@ -634,13 +719,23 @@ class ClipEditor:
             if frame:
                 self.shown += 1
                 self._show(frame)
-        self.pos = min(p, self.marks.length or p)
-        ended = self.audio is not None and self.audio.ended() and p >= self.marks.length - 0.5
+        L = self.marks.length or 0.0
+        prev_span = self.view.span(L)
+        self.pos = min(p, L or p)
+        ended = self.audio is not None and self.audio.ended() and p >= L - 0.5
         if (self._stop_at is not None and p >= self._stop_at) or ended:
-            self._stop_playback()
+            self._stop_playback(wait=False)
             self._request_frame()
-        self.view.follow(self.pos, self.marks.length or 0.0)
-        self._draw()
+        self.view.follow(self.pos, L)
+        wave_dirty = self.show_wave.get() and self.wave is not None and self.wave.version != self._wave_seen
+        if not self.playing or self.view.span(L) != prev_span or wave_dirty:
+            self._draw()
+            self._last_playhead_tick = time.monotonic()
+            return
+        now = time.monotonic()
+        if now - self._last_playhead_tick >= 0.033:
+            self._last_playhead_tick = now
+            self._update_playhead_only()
 
     # ------------------------------------------------------------- settings
     def _load_limit(self) -> bool:

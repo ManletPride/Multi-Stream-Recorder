@@ -152,7 +152,11 @@ class ChooseRootTests(unittest.TestCase):
         self.assertIsNone(storage.fallback_root(" OFF "))
         self.assertEqual(storage.fallback_root(self.fallback), os.path.abspath(self.fallback))
         default = storage.fallback_root("", self.drive.path)
-        self.assertTrue(default.startswith(os.path.abspath(tempfile.gettempdir())))
+        self.assertTrue(default.startswith(os.path.abspath(storage._default_fallback_base())))
+        if os.name == "nt":
+            self.assertTrue(default.startswith(os.path.abspath(tempfile.gettempdir())))
+        else:
+            self.assertFalse(default.startswith(os.path.abspath(tempfile.gettempdir()) + os.sep))
         self.assertEqual(default, storage.fallback_root(None, self.drive.path))
         self.assertNotEqual(default, storage.fallback_root("", self.drive.path + "2"))
 

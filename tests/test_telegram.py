@@ -773,6 +773,20 @@ class UploadTests(unittest.TestCase):
         self.assertIn("Telethon", up.status()["line"])
         self.assertEqual(self.transport.sent, [])
 
+    def test_idle_step_caches_settings_until_config_changes(self):
+        from unittest import mock
+        from msr import telegram_upload as tu
+        cfg = Cfg()
+        up = self.uploader(cfg)
+        with mock.patch.object(tu, "read_settings", wraps=tu.read_settings) as spy:
+            for _ in range(5):
+                self.assertEqual(up.step(), "idle")
+            self.assertEqual(spy.call_count, 1)
+            cfg.v[("Telegram", "topic_id")] = "99"
+            self.assertEqual(up.step(), "idle")
+            self.assertEqual(spy.call_count, 2)
+        self.assertGreaterEqual(up._pause(), 5.0)
+
 
 if __name__ == "__main__":
     unittest.main()

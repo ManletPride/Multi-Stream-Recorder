@@ -188,7 +188,9 @@ class MalformedConfigTests(unittest.TestCase):
             cfg.save()
             backups = [n for n in os.listdir(tmp) if n.startswith("config.ini.broken-")]
             self.assertEqual(len(backups), 1)
-            self.assertEqual(_bytes(os.path.join(tmp, backups[0])), original.encode())
+            bak = _bytes(os.path.join(tmp, backups[0])).decode("utf-8")
+            self.assertNotIn(SECRET, bak)
+            self.assertIn("password =", bak)
             cfg.save()  # a second save does not make a second copy
             self.assertEqual(len([n for n in os.listdir(tmp) if n.startswith("config.ini.broken-")]), 1)
 
@@ -202,10 +204,13 @@ class MalformedConfigTests(unittest.TestCase):
             self.assertFalse(cfg._unreadable)
             self.assertIn("password", cfg.load_problem)
             self.assertNotIn("first", cfg.load_problem + " ".join(cfg.coerce_warnings))
-            # Defaults were missing, so the file had to be rewritten: the original is kept first.
+            # Defaults were missing, so the file had to be rewritten: a secret-stripped backup is kept first.
             backups = [n for n in os.listdir(tmp) if n.startswith("config.ini.broken-")]
             self.assertEqual(len(backups), 1)
-            self.assertEqual(_bytes(os.path.join(tmp, backups[0])), text.encode())
+            bak = _bytes(os.path.join(tmp, backups[0])).decode("utf-8")
+            self.assertNotIn("first", bak)
+            self.assertNotIn("second", bak)
+            self.assertIn("theme = dark", bak)
 
     def test_utf8_bom_is_accepted_without_a_problem(self):
         with tempfile.TemporaryDirectory() as tmp:
