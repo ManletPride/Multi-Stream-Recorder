@@ -80,13 +80,23 @@ def bundle_problems(root: Path) -> list[str]:
             f"CHANGELOG.md: first released heading is v{got}; "
             f"it must be '## v{version} ' to match msr/__init__.py."
         )
-    notes = root / "docs" / "release_notes" / f"RELEASE_NOTES_v{version}.md"
+    notes_name = f"RELEASE_NOTES_v{version}.md"
+    notes = root / "docs" / "release_notes" / notes_name
     if not notes.is_file():
         problems.append(
-            f"docs/release_notes/RELEASE_NOTES_v{version}.md is missing. "
+            f"docs/release_notes/{notes_name} is missing. "
             "That filename is the release-notes copy of __version__ "
             "(see tests/test_release_notes_home.py for where the file lives)."
         )
+    else:
+        body = notes.read_text(encoding="utf-8")
+        if re.search(rf"(?<![\w.])v{re.escape(version)}(?![\w.])", body) is None:
+            problems.append(
+                f"docs/release_notes/{notes_name}: does not name v{version}. "
+                "The release-notes file must match msr/__init__.py __version__ "
+                "(a file left over from another version, or a copy that still "
+                "says the previous one, fails here)."
+            )
     agents = root / "AGENTS.md"
     if agents.is_file():
         problems.extend(agents_version_claims(agents.read_text(encoding="utf-8")))
@@ -121,11 +131,35 @@ class VersionSyncTests(unittest.TestCase):
             (root / "CHANGELOG.md").write_text("## Unreleased\n\n## v3.1.5 (2026-11-16)\n", encoding="utf-8")
             notes = root / "docs" / "release_notes"
             notes.mkdir(parents=True)
-            (notes / "RELEASE_NOTES_v3.1.5.md").write_text("notes\n", encoding="utf-8")
+            (notes / "RELEASE_NOTES_v3.1.5.md").write_text(
+                "# Multi-Stream Recorder v3.1.5\n", encoding="utf-8")
             problems = bundle_problems(root)
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("README.md: describes v3.0.0", problems[0])
         self.assertIn("3.1.5", problems[0])
+
+    def test_release_notes_for_another_version_are_named(self):
+        """A notes file named for a different version, or one that still says it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "msr").mkdir()
+            (root / "msr" / "__init__.py").write_text('__version__ = "3.3.0"\n', encoding="utf-8")
+            (root / "README.md").write_text(
+                "This README describes **v3.3.0**.\n", encoding="utf-8")
+            (root / "CHANGELOG.md").write_text("## v3.3.0 (2026-11-23)\n", encoding="utf-8")
+            notes = root / "docs" / "release_notes"
+            notes.mkdir(parents=True)
+            (notes / "RELEASE_NOTES_v3.2.0.md").write_text(
+                "# Multi-Stream Recorder v3.2.0\n", encoding="utf-8")
+            missing = bundle_problems(root)
+            (notes / "RELEASE_NOTES_v3.3.0.md").write_text(
+                "# Multi-Stream Recorder v3.2.0\n", encoding="utf-8")
+            stale = bundle_problems(root)
+        self.assertEqual(len(missing), 1, missing)
+        self.assertIn("RELEASE_NOTES_v3.3.0.md is missing", missing[0])
+        self.assertEqual(len(stale), 1, stale)
+        self.assertIn("does not name v3.3.0", stale[0])
+        self.assertIn("RELEASE_NOTES_v3.3.0.md", stale[0])
 
 
 if __name__ == "__main__":

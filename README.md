@@ -4,7 +4,7 @@ A Windows-first desktop app (Python + Tkinter, also supporting Linux and macOS) 
 
 Supported: **Kick**, **Twitch**, **YouTube**, **Rumble**, **TikTok**, and custom URLs (any site yt-dlp supports, or a direct `.m3u8`).
 
-This README describes **v3.2.0**.
+This README describes **v3.3.0**.
 
 ![Status tab: five channels recording at once](screenshots/main.png)
 
@@ -28,11 +28,11 @@ This README describes **v3.2.0**.
 
 </details>
 
-## What's new in 3.2.0
+## What's new in 3.3.0
 
-- **Telegram uploads** (optional): a finished recording can go to one topic in a group you run. Both switches have to be on: **Options > Telegram** and a per-channel opt-in (right-click **Telegram…**, or `msr_ctl.py edit`). A topic on that channel overrides the global one. Sends use MTProto, about 2 GB per part, split with ffmpeg. The queue sends one file at a time, keeps going after a restart, and shows progress in the log, the Status tab, and `msr_ctl.py telegram status`. Install Telethon (`pip install "Telethon>=1.36,<2"`, or let `run_msr.pyw` install `requirements.txt`) and restart. Without it the section is greyed out and nothing is uploaded.
-- **Linux secrets**: the Twitch sign-in and the Fishtank password are encrypted at rest with the same user key as the Telegram secrets. A value that is still plain is encrypted on the next start.
-- **The per-channel Telegram window** opens at the size of its contents.
+- **Offline channels share one poller.** They are checked in-process, and a recording worker starts only when a channel goes live. Signed-in Twitch checks are batched (up to 100). Kick uses a light HTTP check before streamlink. When Kick or Twitch push is connected, that fallback check waits at least 10 minutes.
+- **A saved secret stays tied to its field.** Linux and macOS still use the 3.2.0 cipher (an HMAC-SHA256 keystream and MAC). The MAC now includes the setting name, so one field's blob cannot be pasted into another. Windows DPAPI takes the same context as optional entropy. A blob from 3.2.0 still opens, and is rewritten in the new form the next time that secret is saved.
+- **Quit asks while a stream is recording.** The smallest window is 1060×620 (it was 1060×720) so it fits a 1080p laptop at 150% scaling. If ffmpeg is missing, the Status tab shows a banner with **Open Options**.
 
 Earlier versions: [CHANGELOG.md](CHANGELOG.md) and [docs/release_notes/](docs/release_notes/).
 
@@ -48,13 +48,13 @@ Earlier versions: [CHANGELOG.md](CHANGELOG.md) and [docs/release_notes/](docs/re
    ```
    git clone https://github.com/ManletPride/Multi-Stream-Recorder.git
    ```
-4. Double-click **`run_msr.pyw`** in the MSR folder.
+4. Double-click **`run_msr.pyw`** in the MSR folder. **`run_msr.bat`** does the same and tries `pyw -3`, then `pythonw`, `py -3`, and `python`.
 
-The first launch shows a small first-time setup window, with each step and a live log, for about a minute while MSR creates its own environment (`.venv` in the MSR folder) and installs its packages there. Later launches start straight away. MSR writes `config.ini` on first start; recordings go to `%USERPROFILE%\Videos\Multi-Stream Recorder` unless you set `streams_dir`.
+The first launch shows a small first-time setup window, with each step and a live log, for about a minute while MSR creates its own environment (`.venv` in the MSR folder) and installs its packages there. Later launches start straight away. MSR writes `config.ini` on first start; recordings go to `%USERPROFILE%\Videos\Multi-Stream Recorder` unless you set `streams_dir`. If ffmpeg is not on PATH, the window still opens and the Status tab shows a banner with **Open Options**.
 
 Want a desktop shortcut with the icon? Run `python create_shortcut.py` once (`--data-dir D:\msr-data` for another data folder). It never replaces an existing shortcut; `--set-icon "path\to\Old.lnk"` only gives an existing one the icon.
 
-**Linux/macOS:** install ffmpeg and Tk from your package manager (`sudo apt install ffmpeg python3-tk python3-venv`, `brew install ffmpeg`), then run `python3 run_msr.pyw`. The environment is `.venv/bin/python`. `python3 create_shortcut.py --linux > ~/.local/share/applications/multi-stream-recorder.desktop` adds a menu entry. On Linux, install the tray libraries and the Hyprland float rule before that first launch: [docs/linux.md](docs/linux.md).
+**Linux/macOS:** install ffmpeg and Tk from your package manager (`sudo apt install ffmpeg python3-tk python3-venv`, `brew install ffmpeg`), then run `python3 run_msr.pyw`. The environment is `.venv/bin/python`. `python3 create_shortcut.py --linux > ~/.local/share/applications/multi-stream-recorder.desktop` adds a menu entry. On Linux the tray libraries are optional (missing build headers do not block setup) and Hyprland needs a float rule: [docs/linux.md](docs/linux.md).
 
 ### MSR's own environment (.venv)
 
@@ -77,7 +77,7 @@ For per-machine launcher settings, create an untracked `run_msr.local.bat` next 
 
 ### Updating
 
-- **MSR itself:** click **vX available** in the status bar (or Updates… > Multi-Stream Recorder). It downloads the release, keeps a backup of the current program files, verifies every file and rolls back if anything fails, then restarts. Your config, cookies, channels and recordings are not touched.
+- **MSR itself:** click **vX available** in the status bar (or Updates… > Multi-Stream Recorder). It downloads the release, keeps a backup of the current program files, verifies every file and rolls back if anything fails, then restarts. A window install restarts through `run_msr.pyw`. Program files the new release no longer ships are removed, and the temporary staging folder is deleted. Your config, cookies, channels and recordings are not touched.
 - **yt-dlp, streamlink and packages:** see [Updating yt-dlp, streamlink and packages](#updating-yt-dlp-streamlink-and-packages).
 - **From git:** `git pull`, then relaunch (fully quit first; a running MSR does not reload its code). The launcher refreshes `.venv` when `requirements.txt` changed.
 

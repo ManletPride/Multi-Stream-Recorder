@@ -44,7 +44,7 @@ Kick is a bare name (`gmhikaru`). Everything else is `platform:name`: `twitch:ch
 
 - `Multi-Stream-Recorder.py`: launcher, argparse, `--headless`, `--json`, `--library`.
 - `msr/gui.py`: thin Tk UI coordinator (`main_gui`) assembling `msr/roster_panel.py`, `msr/status_panel.py`, `msr/preview_strip.py`, `msr/bottom_bar.py`, `msr/options_panel.py`, and `msr/library_window.py`.
-- `msr/poller.py`: lightweight in-process `PollingCoordinator` (staggered startup, batch Twitch Helix, lightweight Kick HTTP, shared Fishtank auth, TikTok webcast cooldown) that spawns workers on demand when channels go live.
+- `msr/poller.py`: lightweight in-process `PollCoordinator` (staggered startup, batch Twitch Helix, lightweight Kick HTTP, shared Fishtank auth, TikTok webcast cooldown, 10-minute fallback floor when Kick or Twitch push is connected) that spawns workers on demand when channels go live.
 - `msr/worker.py`: `record_worker` (multiprocessing target; must stay top-level), clips, global 2-remux concurrency cap. `msr/platforms.py`: per-site live checks and command builders. `msr/recorder.py`: `StreamRecorder`, `BackgroundCleaner`, worker supervision, Kick/Twitch push integration.
 - `msr/config.py`: `Config` and defaults. `msr/filecrypt.py` / `msr/dpapi.py`: context-bound at-rest secret encryption. `msr/status.py`: the `--json` snapshot. `msr/history.py`: version history (secret-stripped `.ini` copies) and masked summaries. `msr/winstate.py`: window geometry memory.
 - `msr/control.py`, `msr/agent_status.py`, `msr_ctl.py`: loopback control server (token auth, `REMOTE_BLOCKED_SETTINGS`), `msr_status.json` writer, event tracker, and CLI client.

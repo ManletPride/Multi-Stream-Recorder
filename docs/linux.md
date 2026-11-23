@@ -4,7 +4,7 @@ Tray libraries and the Hyprland float rule. The install steps are in the [README
 
 ## Linux tray (Hyprland, GNOME, and other StatusNotifierItem bars)
 
-`requirements.txt` installs `PyGObject>=3.50` only on Linux (`sys_platform == "linux"`). Windows and macOS skip that line. PyGObject has no wheels, so pip compiles it (and pycairo) and needs the system headers. The Ayatana typelib is what the tray icon actually loads. Install these, then launch MSR (or run `pip install -r requirements.txt` yourself):
+`requirements.txt` installs `PyGObject>=3.50` only on Linux (`sys_platform == "linux"`). Windows and macOS skip that line. PyGObject has no wheels, so pip compiles it (and pycairo) and needs the system headers. The Ayatana typelib is what the tray icon actually loads. First-run `.venv` setup installs the core packages first and then tries PyGObject on its own. If the headers are missing, that second step is skipped, MSR still starts, and the tray stays off. Install these, then launch MSR (or run `pip install -r requirements.txt` yourself):
 
 ```
 # Arch / Omarchy

@@ -45,7 +45,7 @@ Left unencrypted on purpose: `cookies.txt`, the Fishtank email, the Twitch publi
 - Logs go through `redact_for_log` (argv, stderr, exceptions, worker channel tag).
 - Twitch reconnect URLs must be `wss://*.twitch.tv`; only `twitch.tv/activate` links are opened.
 - Worker processes only receive the credentials they need: Telegram credentials stay in the main process, `[Fishtank]` credentials are only handed to Fishtank workers, and `MSR_FISHTANK_PASSWORD` is stripped from child tool environments (`ffmpeg`, `ffprobe`, `streamlink`, `yt-dlp`, `pip`, `git`, etc.).
-- Encrypted secrets (v2 format) are context-bound to their config field or file purpose (AES-GCM AAD on non-Windows, DPAPI optional entropy on Windows) so a ciphertext cannot be swapped across fields, while legacy v1 blobs remain readable.
+- Encrypted secrets (v2) are context-bound to their config field or file purpose. On Linux and macOS the cipher is unchanged from 3.2.0 (an HMAC-SHA256 keystream and an HMAC-SHA256 MAC); v2 puts the field name in the MAC. Windows uses DPAPI optional entropy (`v2:` prefix). A v1 blob still decrypts.
 - Automatic backups of `config.ini` (`msr_history/` and `config.ini.broken-*`) strip secret values before writing.
 - Remote control (`msr_ctl.py` / `ControlServer`) refuses changes to host paths and executable binaries (`Advanced.ffmpeg_path`, `Clipping.clips_dir`, `Paths.channels_file`, `Paths.fallback_dir`, `GUI.window_state_file`) with `forbidden`.
 - On POSIX systems, default fallback storage and live preview thumbnail caches live under private `0700` `$XDG_CACHE_HOME/multi-stream-recorder/` directories (cleaned on exit for previews), and the Twitch token lock file lives in the data folder (`.twitch_token.lock`) rather than world-shared `/tmp`.
