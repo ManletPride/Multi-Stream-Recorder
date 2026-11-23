@@ -27,7 +27,7 @@ Pillow>=9.0.0             # Required by pystray for tray icon rendering (preview
 plyer>=2.1.0              # Desktop notifications (stream started/stopped)
 colorama>=0.4.6           # Colored console/log output (Windows terminal support)
 # Linux only (Windows and macOS skip this line). Source-only: pip builds it, so the
-# system needs gobject-introspection, cairo headers and a C compiler first (see README).
+# system needs gobject-introspection, cairo headers and a C compiler first (see docs/linux.md).
 # pycairo is pulled in as its dependency. If gi cannot be imported, the tray stays off
 # (one info line, no traceback) and recording still runs.
 PyGObject>=3.50; sys_platform == "linux"

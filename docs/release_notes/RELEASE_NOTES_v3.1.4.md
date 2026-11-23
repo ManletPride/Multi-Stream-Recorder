@@ -22,7 +22,7 @@ Fixes for long recordings, the Logs tab, the Library, and Linux (tooltips, the t
 
 - **A Linux right-click leaves the menu open.** The menu used to open on the button press, so the release activated whatever was under the pointer (Enable on a channel, for example). Channel list, status list and Library menus now open on the release and stay up until an item is chosen, the pointer clicks elsewhere, or Esc. Windows still opens the menu on the press.
 
-- **Hyprland leaves menus and tooltips at the size Tk posted.** Omarchy's floating workspaces resize a new menu, combobox list or tooltip to about 1100×760 and center it. A float rule for window classes `Menu`, `ComboboxPopdown` and `TkTooltip` keeps them out of that resize. MSR's tooltip uses the class `TkTooltip` so the rule matches it. Menus and combobox lists already use those class names. The rule is in the README, under **Hyprland / Omarchy (menus, dropdowns, tooltips)**.
+- **Hyprland leaves menus and tooltips at the size Tk posted.** Omarchy's floating workspaces resize a new menu, combobox list or tooltip to about 1100×760 and center it. A float rule for window classes `Menu`, `ComboboxPopdown` and `TkTooltip` keeps them out of that resize. MSR's tooltip uses the class `TkTooltip` so the rule matches it. Menus and combobox lists already use those class names. The rule is in [docs/linux.md](../linux.md), under **Hyprland / Omarchy (menus, dropdowns, tooltips)**.
 
 - **Status previews refresh after the window comes back, and the pinned still is sharper.** Restoring from the taskbar or the tray refreshes the preview strip at once. The age badge updates immediately, and a grab that was already running is followed by one more. The pinned preview (double-click a tile) is a 960×540 still from the live edge. The strip tiles stay 160×90. There is still no full-window 1080p preview.
 
@@ -33,9 +33,9 @@ Fixes for long recordings, the Logs tab, the Library, and Linux (tooltips, the t
 ## Upgrade notes
 
 - Replace the program files as usual, or use the in-app update. Your settings and recordings are kept: `config.ini`, `channels.json`, cookies, Twitch sign-in and the recordings folder stay as they are.
-- No new packages on Windows or macOS. Since v3.1.3, `requirements.txt` adds one line, and only on Linux: `PyGObject>=3.50` (`sys_platform == "linux"`), so the tray can dock on Hyprland and GNOME. pip builds it from source, which needs the gobject-introspection, cairo and Python headers first. The package names are in the README under **Linux tray**. If those headers are missing, recording still runs and the tray stays off.
+- No new packages on Windows or macOS. Since v3.1.3, `requirements.txt` adds one line, and only on Linux: `PyGObject>=3.50` (`sys_platform == "linux"`), so the tray can dock on Hyprland and GNOME. pip builds it from source, which needs the gobject-introspection, cairo and Python headers first. The package names are in [docs/linux.md](../linux.md) under **Linux tray**. If those headers are missing, recording still runs and the tray stays off.
 - Linux Clip Editor sound uses `pw-play`, `pw-cat` or `paplay`, which come with PipeWire or PulseAudio. They are not pip packages, and they are usually already installed. Without one, the picture still plays in real time, with no sound.
 - YouTube recording needs [Deno](https://deno.com/) installed and on PATH. yt-dlp uses it to solve YouTube's JavaScript challenge. Without Deno, YouTube recordings drop out about every 15 seconds. On Windows, `winget install DenoLand.Deno`, then restart MSR.
-- On Hyprland or Omarchy, add the float rule in the README (**Hyprland / Omarchy (menus, dropdowns, tooltips)**) so right-click menus, dropdowns and tooltips stay the size Tk posted.
+- On Hyprland or Omarchy, add the float rule in [docs/linux.md](../linux.md) (**Hyprland / Omarchy (menus, dropdowns, tooltips)**) so right-click menus, dropdowns and tooltips stay the size Tk posted.
 
 Full list of changes: [CHANGELOG.md](https://github.com/ManletPride/Multi-Stream-Recorder/blob/v3.1.4/CHANGELOG.md).

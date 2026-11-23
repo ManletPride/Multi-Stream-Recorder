@@ -4,7 +4,7 @@ A Windows-first desktop app (Python + Tkinter, also supporting Linux and macOS) 
 
 Supported: **Kick**, **Twitch**, **YouTube**, **Rumble**, **TikTok**, and custom URLs (any site yt-dlp supports, or a direct `.m3u8`).
 
-This README describes **v3.2.0**. Full history: [CHANGELOG.md](CHANGELOG.md).
+This README describes **v3.2.0**.
 
 ![Status tab: five channels recording at once](screenshots/main.png)
 
@@ -28,36 +28,58 @@ This README describes **v3.2.0**. Full history: [CHANGELOG.md](CHANGELOG.md).
 
 </details>
 
-## What's new in 3.1
+## What's new in 3.2.0
 
-- **3.1.4 Clip Now stays on the live edge** of a long recording, on every OS. Space plays the open Clip Editor instead of opening another one. The Logs tab shows worker lines such as remux progress. The Library overview scrolls, and on Linux old lowercase recording folders are counted and reused.
-- **3.1.4 Linux**: Clip Editor sound through PipeWire (`pw-play`) or PulseAudio, with real-time playback if neither is installed. Tooltips no longer flash, and the tray can dock on Hyprland when PyGObject is installed (Linux-only; Windows and macOS skip it). Menus and tooltips stay the size Tk posted once the Hyprland float rule in this README is in place.
+- **Telegram uploads** (optional): a finished recording can go to one topic in a group you run. Both switches have to be on: **Options > Telegram** and a per-channel opt-in (right-click **Telegram…**, or `msr_ctl.py edit`). A topic on that channel overrides the global one. Sends use MTProto, about 2 GB per part, split with ffmpeg. The queue sends one file at a time, keeps going after a restart, and shows progress in the log, the Status tab, and `msr_ctl.py telegram status`. Install Telethon (`pip install "Telethon>=1.36,<2"`, or let `run_msr.pyw` install `requirements.txt`) and restart. Without it the section is greyed out and nothing is uploaded.
+- **Linux secrets**: the Twitch sign-in and the Fishtank password are encrypted at rest with the same user key as the Telegram secrets. A value that is still plain is encrypted on the next start.
+- **The per-channel Telegram window** opens at the size of its contents.
 
-- **3.1.3 Twitch sign-in stays valid**: instant alerts no longer drop off after a few hours with "sign-in is no longer valid".
+Earlier versions: [CHANGELOG.md](CHANGELOG.md) and [docs/release_notes/](docs/release_notes/).
 
-- **3.1.2 Clip Editor zoom and waveform**: zoom into the timeline (Alt+wheel or +/-) for precise In/Out marks, and an optional audio waveform under it.
+## Install (Windows)
 
-- **YouTube from the start** (experimental): a broadcast MSR finds in its first 15 minutes is recorded from the beginning. See [Adding channels](#adding-channels).
-- **Options tab**: every common setting in one place, grouped, with a hint for what 0 or blank means, plus Fishtank **Test login** and an ffmpeg **Check**.
-- **Twitch push** (opt-in): connect Twitch in Options and MSR hears about go-live within seconds, like Kick. Polling keeps running.
-- **Health line** in the bottom bar: tools, free space, stalled recordings and sites whose checks all fail, checked at start and every 10 minutes.
-- **Sounds** (off by default): a chime on go-live, an alert on problems, a tick when a clip is saved.
-- **Library > Recordings**: each channel's recordings with title and length, and the clips cut from each one.
-- **First-time setup window** shows each step and a live log.
-- **More agent control**: Twitch sign-in, every Options setting, sound tests, Health check, Recordings browsing and a live event stream (`subscribe`). See [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md).
-- **Safer secrets**: the Twitch sign-in, the Fishtank password, and the Telegram api hash, bot token and session are encrypted at rest (Windows DPAPI, or a user-only key on Linux). `cookies.txt`, the Fishtank email, and the Twitch app client id stay as you saved them. The control file is readable only by you and is removed when MSR quits.
-- **Options**: Manage on Twitch button, and a warning when `cookies.txt` sits in a synced folder.
+1. Install Python from [python.org](https://www.python.org/downloads/) (tick **Add python.exe to PATH**).
+2. Install ffmpeg and (recommended) Deno:
+   ```
+   winget install Gyan.FFmpeg
+   winget install DenoLand.Deno
+   ```
+3. Get MSR: download the release ZIP from GitHub and unzip it, or
+   ```
+   git clone https://github.com/ManletPride/Multi-Stream-Recorder.git
+   ```
+4. Double-click **`run_msr.pyw`** in the MSR folder.
 
-## What's new in 3.0
+The first launch shows a small first-time setup window, with each step and a live log, for about a minute while MSR creates its own environment (`.venv` in the MSR folder) and installs its packages there. Later launches start straight away. MSR writes `config.ini` on first start; recordings go to `%USERPROFILE%\Videos\Multi-Stream Recorder` unless you set `streams_dir`.
 
-- **Clip Editor**: a DVR-style editor with a timeline, sound and a volume slider, smooth preview up to 60 fps, In/Out marks and lossless or frame-exact clips, also while the stream is still recording.
-- **Library tab**: see how much space recordings take per site, channel and month, and clean up safely (reversible by default).
-- **Agent and headless control**: `msr_ctl.py` and a local, token-protected control channel can do everything the window does, for scripts, bots and AI agents. See [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md).
-- **Easy install**: double-click `run_msr.pyw`. MSR sets up its own Python environment (`.venv`) on first launch, so it never changes the Python other programs use.
-- **Updates dialog**: check and update yt-dlp, streamlink and the other packages from inside the app, with automatic rollback.
-- **16 themes** with a live preview, your own theme files, and an app icon with its own taskbar entry.
-- **Safer recording**: recording starts at once after a crash, keeps going in a fallback folder when the recordings drive disappears, verifies every remux before touching the original, and no console windows flash.
-- **Privacy**: stream URLs, tokens and passwords are redacted from logs, status files and settings history.
+Want a desktop shortcut with the icon? Run `python create_shortcut.py` once (`--data-dir D:\msr-data` for another data folder). It never replaces an existing shortcut; `--set-icon "path\to\Old.lnk"` only gives an existing one the icon.
+
+**Linux/macOS:** install ffmpeg and Tk from your package manager (`sudo apt install ffmpeg python3-tk python3-venv`, `brew install ffmpeg`), then run `python3 run_msr.pyw`. The environment is `.venv/bin/python`. `python3 create_shortcut.py --linux > ~/.local/share/applications/multi-stream-recorder.desktop` adds a menu entry. On Linux, install the tray libraries and the Hyprland float rule before that first launch: [docs/linux.md](docs/linux.md).
+
+### MSR's own environment (.venv)
+
+MSR keeps its packages in `.venv` inside the MSR folder, so updating them never changes the Python other programs on your computer use.
+
+- `run_msr.pyw`, `run_msr.bat` and shortcuts made by `create_shortcut.py` create `.venv` on first launch and use it afterwards.
+- If setup fails (offline, Python without the `venv` module, no write access), MSR still starts on the Python that opened it, says why (window, log and `msr_venv_error.txt`) and tries again next launch.
+- A damaged or half-built `.venv`, one whose Python was uninstalled, or one in a folder that was moved is rebuilt automatically. When `requirements.txt` changes (after an update) the packages are installed again on the next launch.
+- Manage your own environment instead: set `MSR_NO_VENV=1`, or `[Advanced] use_venv = false` in `config.ini`, or set `MSR_PYTHON` in `run_msr.local.bat`.
+- By hand: `py -3.12 -m venv .venv`, `.venv\Scripts\python -m pip install -r requirements.txt`, `.venv\Scripts\pythonw Multi-Stream-Recorder.py`.
+
+### Where settings live
+
+By default `config.ini`, `channels.json`, `cookies.txt` and window state are in the MSR folder. To keep them elsewhere (the folder must exist):
+
+- `Multi-Stream-Recorder.py --data-dir D:\MSR`, or
+- set `MSR_DATA` (read by `run_msr.pyw` / `run_msr.bat`), e.g. `setx MSR_DATA "D:\MSR"`, or `MSR_HOME` (read by the app and `msr_ctl.py`).
+
+For per-machine launcher settings, create an untracked `run_msr.local.bat` next to `run_msr.bat`, for example `set "MSR_DATA=D:\MSR"`.
+
+### Updating
+
+- **MSR itself:** click **vX available** in the status bar (or Updates… > Multi-Stream Recorder). It downloads the release, keeps a backup of the current program files, verifies every file and rolls back if anything fails, then restarts. Your config, cookies, channels and recordings are not touched.
+- **yt-dlp, streamlink and packages:** see [Updating yt-dlp, streamlink and packages](#updating-yt-dlp-streamlink-and-packages).
+- **From git:** `git pull`, then relaunch (fully quit first; a running MSR does not reload its code). The launcher refreshes `.venv` when `requirements.txt` changed.
 
 ## Features
 
@@ -97,6 +119,7 @@ This README describes **v3.2.0**. Full history: [CHANGELOG.md](CHANGELOG.md).
 
 **Library tab**
 - How much space your recordings take: total, per site (donut), top channels (bars), per month, and a sortable channel table with **Open folder**. **Copy summary** gives plain text; **Count hours** (optional) adds recorded time. The scan runs in the background, only reads sizes and can be cancelled.
+- On Linux, old lowercase recording folders from a Windows drive (`processed`, `recorded`, `pendingdeletion`, `clips`, and the platform and channel folders under them) are counted and reused, so new files join that tree instead of a new `Processed` folder.
 - **Clean up from the tab**: click a slice, bar or month to drill in, select channels and press **Delete...**. You always get a preview with files, sizes and dates first, with filters (older than N days, keep the newest N files or GB, date range).
   - The default is **Move to PendingDeletion**: reversible (**Undo**, or **Restore** in the PendingDeletion tab). MSR deletes those files after `auto_purge_days`. **Delete permanently** needs you to type a confirmation; the Recycle Bin is offered when it is large enough.
   - **Recordings** lists one channel's recordings (title, length, Play, Open folder, Clip Editor); clip files fold under the recording they came from. **PendingDeletion** shows size, age and the next purge. **Clean up** suggests large, old, duplicate and leftover files, with nothing ticked until you choose, and below that lists single files to tick (channel, type, search, older than N days) and delete.
@@ -132,75 +155,6 @@ This README describes **v3.2.0**. Full history: [CHANGELOG.md](CHANGELOG.md).
 | `pw-play` or `pw-cat`, or `paplay` | Linux Clip Editor sound | Plays the Clip Editor's audio. Comes with PipeWire (`pipewire`) or PulseAudio (`pulseaudio` / `pipewire-pulse`); usually already installed. Without one, the Clip Editor still plays the picture, silently, in real time. Nothing extra to pip-install. |
 | Deno | Recommended | yt-dlp uses it for YouTube's JS challenge; without it YouTube drops every ~15 s |
 | Python packages | Installed for you | yt-dlp, streamlink, curl_cffi, websocket-client, psutil, pystray, Pillow, plyer, colorama, and on Linux only PyGObject (see `requirements.txt`) |
-
-## Install (Windows)
-
-1. Install Python from [python.org](https://www.python.org/downloads/) (tick **Add python.exe to PATH**).
-2. Install ffmpeg and (recommended) Deno:
-   ```
-   winget install Gyan.FFmpeg
-   winget install DenoLand.Deno
-   ```
-3. Get MSR: download the release ZIP from GitHub and unzip it, or
-   ```
-   git clone https://github.com/ManletPride/Multi-Stream-Recorder.git
-   ```
-4. Double-click **`run_msr.pyw`** (or **`run_msr.bat`**, which automatically checks `pyw -3`, `pythonw`, `py -3`, and `python`) in the MSR folder.
-
-The first launch shows a small "first-time setup" window for about a minute while MSR creates its own environment (`.venv` in the MSR folder) and installs its packages there. Later launches start straight away. MSR writes `config.ini` on first start; recordings go to `%USERPROFILE%\Videos\Multi-Stream Recorder` unless you set `streams_dir`. If `ffmpeg` is missing, the GUI still opens with an inline banner and an **Open Options** button so you can install it or pick its path without editing files by hand.
-
-Want a desktop shortcut with the icon? Run `python create_shortcut.py` once (`--data-dir D:\msr-data` for another data folder). It never replaces an existing shortcut; `--set-icon "path\to\Old.lnk"` only gives an existing one the icon.
-
-**Linux/macOS:** install ffmpeg and Tk from your package manager (`sudo apt install ffmpeg python3-tk python3-venv`, `brew install ffmpeg`), then run `python3 run_msr.pyw`. The environment is `.venv/bin/python`. `python3 create_shortcut.py --linux > ~/.local/share/applications/multi-stream-recorder.desktop` adds a menu entry. On Linux, `PyGObject` (used only for the optional system tray icon) is installed as a **best-effort optional step** during `.venv` setup — if C/GTK dev headers are not installed, core packages still finish installing and MSR runs normally without the tray icon.
-
-**Linux tray (Hyprland, GNOME, and other StatusNotifierItem bars):** `requirements.txt` lists `PyGObject>=3.50` only on Linux (`sys_platform == "linux"`). Windows and macOS skip that line. During `.venv` bootstrap on Linux, MSR installs core packages first and then attempts `PyGObject` as a best-effort second step. PyGObject has no wheels, so pip compiles it (and pycairo) and needs the system headers; the Ayatana typelib is what the tray icon actually loads. To enable the tray icon, install these and relaunch (or run `pip install -r requirements.txt` yourself):
-
-```
-# Arch / Omarchy
-sudo pacman -S gobject-introspection cairo libayatana-appindicator
-
-# Debian / Ubuntu
-sudo apt install gcc pkg-config python3-dev libgirepository-2.0-dev libcairo2-dev gir1.2-ayatanaappindicator3-0.1
-```
-
-PyGObject 3.50 and newer needs the girepository **2.0** headers (glib 2.80 or newer), which is `libgirepository-2.0-dev` on Debian/Ubuntu, plus Python headers (`python3-dev`) so pycairo can compile. An older release only has `libgirepository1.0-dev`; that is not enough for this version. On Arch the `python` package already includes headers; `base-devel` supplies the compiler. If the headers are missing and `gi` cannot be imported, recording still runs and the log has one info line: the system tray is off. No traceback. Creating the venv with `python3 -m venv --system-site-packages .venv` is the other way to see a distro `gi` that already imports AyatanaAppIndicator3. If you set `PYSTRAY_BACKEND` yourself, MSR leaves that choice alone.
-
-**Hyprland / Omarchy (menus, dropdowns, tooltips):** Omarchy's floating workspaces resize every new non-modal window to about 1100×760 and center it. That catches a right-click menu, a combobox list and a tooltip, so the menu opens as a huge dark box instead of at the pointer. A window whose class already has a user float rule is left out of that opener. Tk reports menus as class `Menu` and combobox lists as `ComboboxPopdown`. MSR's tooltip is class `TkTooltip` (a plain Toplevel is class `Toplevel`, which would also match dialogs). Add this at the end of `~/.config/hypr/hyprland.lua`, then run `hyprctl reload`:
-
-```lua
-o.window({ class = "^(Menu|ComboboxPopdown|TkTooltip)$" }, { float = true })
-```
-
-Plain Hyprland, in `hyprland.conf`, is the same match without Omarchy's helper:
-
-```
-windowrule = float on, match:class ^(Menu|ComboboxPopdown|TkTooltip)$
-```
-
-### MSR's own environment (.venv)
-
-MSR keeps its packages in `.venv` inside the MSR folder, so updating them never changes the Python other programs on your computer use.
-
-- `run_msr.pyw`, `run_msr.bat` and shortcuts made by `create_shortcut.py` create `.venv` on first launch and use it afterwards.
-- If setup fails (offline, Python without the `venv` module, no write access), MSR still starts on the Python that opened it, says why (window, log and `msr_venv_error.txt`) and tries again next launch.
-- A damaged or half-built `.venv`, one whose Python was uninstalled, or one in a folder that was moved is rebuilt automatically. When `requirements.txt` changes (after an update) the packages are installed again on the next launch.
-- Manage your own environment instead: set `MSR_NO_VENV=1`, or `[Advanced] use_venv = false` in `config.ini`, or set `MSR_PYTHON` in `run_msr.local.bat`.
-- By hand: `py -3.12 -m venv .venv`, `.venv\Scripts\python -m pip install -r requirements.txt`, `.venv\Scripts\pythonw Multi-Stream-Recorder.py`.
-
-### Where settings live
-
-By default `config.ini`, `channels.json`, `cookies.txt` and window state are in the MSR folder. To keep them elsewhere (the folder must exist):
-
-- `Multi-Stream-Recorder.py --data-dir D:\MSR`, or
-- set `MSR_DATA` (read by `run_msr.pyw` / `run_msr.bat`), e.g. `setx MSR_DATA "D:\MSR"`, or `MSR_HOME` (read by the app and `msr_ctl.py`).
-
-For per-machine launcher settings, create an untracked `run_msr.local.bat` next to `run_msr.bat`, for example `set "MSR_DATA=D:\MSR"`.
-
-### Updating
-
-- **MSR itself:** click **vX available** in the status bar (or Updates… > Multi-Stream Recorder). It downloads the release, keeps a backup of the current program files, verifies every file, removes retired program files, cleans up its temporary staging folder, and rolls back if anything fails, then restarts (via `run_msr.pyw` on GUI installs so updated `requirements.txt` packages install automatically into `.venv`). Your config, cookies, channels and recordings are not touched.
-- **yt-dlp, streamlink and packages:** see [Updating yt-dlp, streamlink and packages](#updating-yt-dlp-streamlink-and-packages).
-- **From git:** `git pull`, then relaunch (fully quit first; a running MSR does not reload its code). The launcher refreshes `.venv` when `requirements.txt` changed.
 
 ## Adding channels
 
